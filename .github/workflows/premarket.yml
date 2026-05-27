@@ -1,0 +1,48 @@
+name: Strategy C — Premarket
+
+on:
+  schedule:
+    # 7:15 AM EDT (UTC-4). In EST (UTC-5, Nov–Mar) this fires at 6:15 AM ET —
+    # early but within premarket window; Python guards handle trading_day check.
+    - cron: "15 11 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  premarket:
+    name: Premarket session
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      # Phase 1: uncomment to compile TypeScript News Analyst before session runs.
+      # - uses: actions/setup-node@v4
+      #   with:
+      #     node-version: "20"
+      #     cache: npm
+      #     cache-dependency-path: agents/ts/package-lock.json
+      # - name: Build TypeScript News Analyst
+      #   run: npm ci && npm run build
+      #   working-directory: agents/ts
+
+      - name: Run premarket session
+        run: python sessions/premarket.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
+          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
+          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}

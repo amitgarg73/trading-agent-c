@@ -1,0 +1,38 @@
+name: Strategy C — EOD
+
+on:
+  schedule:
+    # 3:55 PM EDT (UTC-4). In EST (UTC-5, Nov–Mar) this fires at 2:55 PM ET —
+    # one hour early but harmless; Python guards check trading_day and session_id.
+    - cron: "55 19 * * 1-5"
+  workflow_dispatch:
+
+jobs:
+  eod:
+    name: EOD session
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run EOD session
+        run: python sessions/eod.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
+          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
+          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}

@@ -1,0 +1,41 @@
+name: Strategy C — Intraday
+
+on:
+  schedule:
+    # Every 15 minutes, 9:15 AM to 3:50 PM EDT (13:15–19:50 UTC).
+    # The Python session guards (is_trading_day, time window) provide the
+    # authoritative check — the cron windows are approximate.
+    - cron: "15,30,45 13 * * 1-5"      # 9:15–9:45 AM EDT
+    - cron: "0,15,30,45 14-19 * * 1-5" # 10:00 AM–3:45 PM EDT
+    - cron: "50 19 * * 1-5"             # 3:50 PM EDT
+  workflow_dispatch:
+
+jobs:
+  intraday:
+    name: Intraday poll
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run intraday session
+        run: python sessions/intraday.py
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
+          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
+          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
