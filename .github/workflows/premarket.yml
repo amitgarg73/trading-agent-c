@@ -37,6 +37,7 @@ jobs:
       - name: Run premarket session
         run: python sessions/premarket.py
         env:
+          PYTHONPATH: ${{ github.workspace }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
           ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
           ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
