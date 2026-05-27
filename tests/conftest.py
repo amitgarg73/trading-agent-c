@@ -40,6 +40,41 @@ def make_query(data: list) -> MagicMock:
 
 
 @pytest.fixture
+def tracer(mock_supabase):
+    """Shared TraceLogger backed by mock_supabase for agent tests."""
+    from trace.logger import TraceLogger
+    mock_supabase.table.return_value = make_query([])
+    return TraceLogger("test-session-id-1234")
+
+
+def make_api_response(stop_reason, blocks, in_tok=200, out_tok=100):
+    """Build a mock anthropic.messages.create response."""
+    r = MagicMock()
+    r.stop_reason = stop_reason
+    r.content = blocks
+    r.usage = MagicMock(input_tokens=in_tok, output_tokens=out_tok)
+    return r
+
+
+def tool_block(name, inp=None, bid="tool-1"):
+    """Build a mock tool_use content block."""
+    b = MagicMock()
+    b.type = "tool_use"
+    b.id = bid
+    b.name = name
+    b.input = inp or {}
+    return b
+
+
+def text_block(text):
+    """Build a mock text content block."""
+    b = MagicMock()
+    b.type = "text"
+    b.text = text
+    return b
+
+
+@pytest.fixture
 def mock_supabase(monkeypatch):
     """
     Patches core.db.get_client to return a mock Supabase client.
