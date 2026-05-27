@@ -24,11 +24,6 @@ jobs:
 
       - name: Run pytest
         run: pytest tests/ -v --tb=short
-        env:
-          # Unit tests use mock_supabase; these vars are placeholders for
-          # any future integration tests that hit the test Supabase project.
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL_C_TEST }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C_TEST }}
 
   typescript-tests:
     name: TypeScript tests
