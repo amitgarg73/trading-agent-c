@@ -1,0 +1,141 @@
+---
+config:
+  theme: base
+  themeVariables:
+    primaryColor: "#2b5aa0"
+    primaryTextColor: "#ffffff"
+    primaryBorderColor: "#1a3a5c"
+    lineColor: "#555555"
+    secondaryColor: "#1a3a5c"
+    tertiaryColor: "#f0f0f0"
+    fontSize: "16px"
+---
+flowchart TD
+    title["<b>Trading Agent C — Agentic Multi-Agent Workflow</b><br/>Sequential orchestration · Tool use per agent · Full trace observability"]
+
+    %% ── ① SESSION SETUP ──────────────────────────────────────────
+    subgraph SETUP["① Session Setup"]
+        g_td{{"Trading Day?<br/>(weekend / holiday)"}}
+        g_time{{"After 10:20 AM ET?<br/>(hard cap — late entries are negative EV)"}}
+        exit_s(["exit — no session"])
+        s_go(["session start"])
+        g_td -- "yes" --> g_time
+        g_td -. "NO" .-> exit_s
+        g_time -. "too late" .-> exit_s
+        g_time -- "OK" --> s_go
+    end
+
+    %% ── ② MARKET AGENT ───────────────────────────────────────────
+    subgraph MARKET["② Market Agent  (Claude Haiku)  —  all 4 tools required · 1 round · no loops"]
+        ma_tools["<b>All 4 tools called in sequence</b><br/>get_vix → value · LOW / ELEVATED / HIGH / CRISIS / EXTREME<br/>get_futures → S&amp;P · Nasdaq · Dow % change · bias<br/>get_fear_greed → value 0–100 · classification<br/>get_sector_rotation → all 11 sector ETFs sorted best→worst"]
+        g_mkt{{"Market decision?<br/>futures &lt; −1.5% → SKIP<br/>VIX &gt; 20 or F&amp;G &lt; 25 → CAUTION"}}
+        exit_skip(["SKIP — 0 trades<br/>session ends"])
+        mkt_out["<b>market_report → passed to Research Agent as user message</b><br/>decision (GO / CAUTION / SKIP) · max_positions · bias · summary<br/><i>c_traces: 4 tool call rows + 1 agent message row</i>"]
+        ma_tools --> g_mkt
+        g_mkt -. "SKIP" .-> exit_skip
+        g_mkt -- "GO / CAUTION" --> mkt_out
+    end
+
+    %% ── ③ RESEARCH AGENT ─────────────────────────────────────────
+    subgraph RESEARCH["③ Research Agent  (Claude Sonnet)  —  1 get_candidates + max 5 deep-dives (~26 tool calls max)"]
+        ra_ctx["<b>Receives market_report as user message</b><br/>CAUTION → requires score ≥ 7 + above_vwap before proposing any trade"]
+        ra_cands["<b>Phase 1 — get_candidates(min_score=5)  [called exactly once]</b><br/>Returns: ticker · score · price only — NOT full signals · max 100 results<br/>Key design difference from Strategy A: agent decides what to investigate"]
+        ra_sel["<b>Agent selects top 5 tickers to investigate</b><br/>Core agentic judgment: Claude reads scores + prices, chooses which to deep-dive"]
+        ra_ph2["<b>Phase 2 — Per-ticker investigation  (repeats for each of the 5 chosen tickers)</b><br/>max ~26 tool calls per session across all tickers"]
+        ra_news["<b>get_news()  [REQUIRED first for every ticker]</b><br/>blackout: true → drop ticker immediately, pick next candidate"]
+        g_bo{{"Earnings blackout?<br/>(today or tomorrow)"}}
+        ra_drop(["drop ticker<br/>pick next"])
+        ra_deep["<b>Optional tools  (agent decides which to call per ticker)</b><br/>get_intraday_signals → above_vwap · rs_vs_spy · today_pct_change<br/>get_live_price → price · source · stale_minutes<br/>get_atr → atr_pct · orb_pct<br/>get_position_history → win_rate · avg_pnl · last_exit (30 days)"]
+        ra_out["<b>trade_proposals → passed to Risk Agent as user message</b><br/>ticker · entry · target · stop · position_size · confidence (HIGH/MEDIUM/LOW) · evidence[]<br/><i>c_traces: 1 candidates call + per-ticker tool rows + skipped[] outcomes</i>"]
+        ra_ctx --> ra_cands
+        ra_cands --> ra_sel
+        ra_sel --> ra_ph2
+        ra_ph2 --> ra_news
+        ra_news --> g_bo
+        g_bo -. "YES" .-> ra_drop
+        ra_drop -. "next ticker" .-> ra_ph2
+        g_bo -- "NO → investigate" --> ra_deep
+        ra_deep --> ra_out
+    end
+
+    %% ── ④ RISK AGENT ─────────────────────────────────────────────
+    subgraph RISK["④ Risk Agent  (Claude Haiku)  —  all 4 portfolio tools required before reviewing any proposal"]
+        rk_tools["<b>All 4 portfolio tools called before reviewing proposals</b><br/>get_open_positions → ticker · size · sector · unrealized P&amp;L<br/>get_today_pnl → realized_pnl · trades_closed · limit_hit<br/>get_buying_power → buying_power · total_capital · deployed<br/>get_portfolio_exposure → positions_open · by_sector · max_sector_pct"]
+        rk_rev["<b>Review each proposal — constraints applied in order</b><br/>① loss limit already hit → reject ALL<br/>② insufficient buying power → reject<br/>③ adding position pushes sector &gt; 35% → reject<br/>④ ticker already in open positions → reject (duplicate)<br/>⑤ position count already at MAX_POSITIONS → reject"]
+        rk_out["<b>risk_verdicts → passed to Orchestrator (accumulated with market_report + trade_proposals)</b><br/>per ticker: APPROVED | REJECTED + specific constraint violated<br/><i>c_traces: 4 tool call rows + 1 verdict row per ticker reviewed</i>"]
+        rk_tools --> rk_rev
+        rk_rev --> rk_out
+    end
+
+    %% ── ⑤ ORCHESTRATOR ───────────────────────────────────────────
+    subgraph ORCH["⑤ Orchestrator Agent  (Claude Sonnet)  —  no tools registered"]
+        oc_in["<b>Receives accumulated context: market_report + trade_proposals + risk_verdicts</b><br/>Synthesizes — does not re-analyse, re-rank, or call tools"]
+        g_app{{"Any approved<br/>trades?"}}
+        oc_retry["<b>Retry path — fixable rejections + iterations &lt; 2</b><br/>Fixable = sector concentration, position count limit<br/>Research Agent called again with rejection context as user message<br/>Same tool caps apply · Orchestrator synthesizes once more · no further retries"]
+        oc_struct(["structural block<br/>0 trades — session ends<br/>loss limit / no capital"])
+        oc_out["<b>final_trade_list  (Strategy A-compatible output schema)</b><br/>trades[] · market_context · session_meta {loop_iterations · retry_triggered · terminal_reason}<br/><i>c_traces: 1 decision row · c_sessions: full session summary row</i>"]
+        oc_in --> g_app
+        g_app -- "YES → converged" --> oc_out
+        g_app -. "NO — fixable" .-> oc_retry
+        g_app -. "NO — structural" .-> oc_struct
+    end
+
+    %% ── ⑥ POST-PROCESSING ────────────────────────────────────────
+    subgraph POST["⑥ Deterministic Post-Processing  (unchanged from Strategy A)"]
+        atr["<b>ATR Sizer</b><br/>stop = ATR×0.8 · shares ≤ $150/mk · drops trade if R:R &lt; 1"]
+        grail["<b>Guardrails</b><br/>Price sanity · duplicate check · capital cap · loss limit — final safety gate"]
+        p_sim["<b>Phase 1 — Simulation</b><br/>c_positions DB write only · no broker calls"]
+        p_paper["<b>Phase 2 — Paper Trading</b><br/>Alpaca bracket orders · stratc_{ticker}_{ts}<br/>Separate Alpaca account · STRATEGY_TAG = c"]
+        atr --> grail
+        grail --> p_sim
+        grail --> p_paper
+    end
+
+    %% ── Spine connections ────────────────────────────────────────
+    title -.->|" "| SETUP
+    s_go --> MARKET
+    mkt_out --> RESEARCH
+    ra_out --> RISK
+    rk_out --> ORCH
+    oc_out --> POST
+
+    %% ── Styles ───────────────────────────────────────────────────
+    style title fill:#ffffff,stroke:#ffffff,color:#1a3a5c
+    style SETUP fill:#f0f0f0,stroke:#999999,color:#444444
+    style MARKET fill:#dde8f5,stroke:#6a8ab0,color:#2c4a6e
+    style RESEARCH fill:#d0e8f8,stroke:#5a8ab0,color:#1a4a6e
+    style RISK fill:#ede0f5,stroke:#8a6ab0,color:#3a1a6e
+    style ORCH fill:#fef9e7,stroke:#c0a020,color:#5c3d00
+    style POST fill:#f0eaf8,stroke:#7a5ab0,color:#3a1a6e
+
+    style ma_tools fill:#2e6d9e,color:#ffffff,stroke:#2e6d9e
+    style mkt_out fill:#1a3a5c,color:#ffffff,stroke:#1a3a5c
+    style ra_ctx fill:#2e6d9e,color:#ffffff,stroke:#2e6d9e
+    style ra_cands fill:#2b5aa0,color:#ffffff,stroke:#2b5aa0
+    style ra_sel fill:#1a3a5c,color:#ffffff,stroke:#1a3a5c
+    style ra_ph2 fill:#3a6a9e,color:#ffffff,stroke:#3a6a9e
+    style ra_news fill:#2b5aa0,color:#ffffff,stroke:#2b5aa0
+    style ra_deep fill:#2b5aa0,color:#ffffff,stroke:#2b5aa0
+    style ra_out fill:#1a3a5c,color:#ffffff,stroke:#1a3a5c
+    style rk_tools fill:#2e6d9e,color:#ffffff,stroke:#2e6d9e
+    style rk_rev fill:#2e6d9e,color:#ffffff,stroke:#2e6d9e
+    style rk_out fill:#3a1a6e,color:#ffffff,stroke:#3a1a6e
+    style oc_in fill:#1a3a5c,color:#ffffff,stroke:#1a3a5c
+    style oc_retry fill:#c05800,color:#ffffff,stroke:#c05800
+    style oc_out fill:#1a3a5c,color:#ffffff,stroke:#1a3a5c
+    style atr fill:#5a3a8a,color:#ffffff,stroke:#5a3a8a
+    style grail fill:#5a3a8a,color:#ffffff,stroke:#5a3a8a
+    style p_sim fill:#555555,color:#ffffff,stroke:#555555
+    style p_paper fill:#b55a1a,color:#ffffff,stroke:#b55a1a
+
+    style g_td fill:#b03020,color:#ffffff,stroke:#b03020
+    style g_time fill:#b03020,color:#ffffff,stroke:#b03020
+    style g_mkt fill:#b03020,color:#ffffff,stroke:#b03020
+    style g_bo fill:#b03020,color:#ffffff,stroke:#b03020
+    style g_app fill:#b03020,color:#ffffff,stroke:#b03020
+
+    style exit_s fill:#f8d7da,color:#721c24,stroke:#b03020
+    style exit_skip fill:#f8d7da,color:#721c24,stroke:#b03020
+    style ra_drop fill:#f8d7da,color:#721c24,stroke:#b03020
+    style oc_struct fill:#f8d7da,color:#721c24,stroke:#b03020
+    style s_go fill:#d4edda,color:#155724,stroke:#1e7e42
