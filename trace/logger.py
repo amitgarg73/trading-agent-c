@@ -37,6 +37,7 @@ class TraceLogger:
         self._session_span_id = str(uuid4())
         self._tokens: dict[str, dict[str, int]] = {}   # agent -> {input, output}
         self._started_at = datetime.utcnow()
+        self._insert_session_stub()
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -208,9 +209,19 @@ class TraceLogger:
             "started_at":          self._started_at.isoformat(),
             "completed_at":        completed_at.isoformat(),
         }
-        get_client().table("c_sessions").insert(row).execute()
+        get_client().table("c_sessions").upsert(row).execute()
 
     # ── Private ────────────────────────────────────────────────────────────────
+
+    def _insert_session_stub(self) -> None:
+        """Insert a minimal c_sessions row so c_traces FK is satisfied from the start."""
+        from core.db import get_client
+        get_client().table("c_sessions").insert({
+            "id":              self.session_id,
+            "date":            date.today().isoformat(),
+            "terminal_reason": "in_progress",
+            "started_at":      self._started_at.isoformat(),
+        }).execute()
 
     def _write(self, fields: dict) -> str:
         from core.db import get_client
