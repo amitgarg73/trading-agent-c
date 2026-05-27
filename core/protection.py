@@ -251,9 +251,9 @@ def _get_daily_pnl(for_date: date) -> float:
     from core.db import get_client
     result = (
         get_client()
-        .table("c_trades")
+        .table("c_positions")
         .select("realized_pnl")
-        .eq("date", for_date.isoformat())
+        .eq("close_date", for_date.isoformat())
         .eq("status", "closed")
         .execute()
     )
