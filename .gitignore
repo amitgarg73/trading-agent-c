@@ -20,5 +20,8 @@ agents/ts/dist/
 *.swp
 *.swo
 
+# Streamlit
+.streamlit/secrets.toml
+
 # macOS
 .DS_Store
