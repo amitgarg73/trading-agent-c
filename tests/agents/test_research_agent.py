@@ -91,6 +91,28 @@ class TestRunResearchAgent:
         result = _run(tracer, mock_client=client)
         assert "proposals" in result
 
+    def test_no_candidates_returns_empty_proposals(self, tracer):
+        from unittest.mock import MagicMock
+        with patch("agents.research_agent.get_candidates", return_value=[]), \
+             patch("agents.research_agent.anthropic.Anthropic"):
+            result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
+        assert result["proposals"] == []
+        assert result["skipped"] == []
+
+    def test_no_candidates_does_not_call_claude(self, tracer):
+        from unittest.mock import MagicMock
+        mock_anthropic = MagicMock()
+        with patch("agents.research_agent.get_candidates", return_value=[]), \
+             patch("agents.research_agent.anthropic.Anthropic", return_value=mock_anthropic):
+            run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
+        mock_anthropic.messages.create.assert_not_called()
+
+    def test_db_error_on_candidates_returns_empty_proposals(self, tracer):
+        with patch("agents.research_agent.get_candidates", return_value=[{"error": "db timeout"}]), \
+             patch("agents.research_agent.anthropic.Anthropic"):
+            result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
+        assert result["proposals"] == []
+
 
 class TestBuildUserMessage:
     def test_includes_market_report_json(self):

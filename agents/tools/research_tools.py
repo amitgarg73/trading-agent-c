@@ -4,6 +4,15 @@ from datetime import date, timedelta
 from typing import Any
 
 
+def _is_premarket() -> bool:
+    """True before 9:25 AM ET — intraday bar data is not yet available."""
+    import pytz
+    from datetime import datetime
+    et = pytz.timezone("America/New_York")
+    now_et = datetime.now(et)
+    return (now_et.hour, now_et.minute) < (9, 25)
+
+
 def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
     """
     Return tickers from c_scan_results for today with score >= min_score.
@@ -94,7 +103,17 @@ def get_live_price(ticker: str) -> dict[str, Any]:
 def get_intraday_signals(ticker: str) -> dict[str, Any]:
     """
     Compute VWAP, relative strength vs SPY, and today's % change from Alpaca 1-min bars.
+    Returns available: false before market open (9:25 AM ET) — no bars exist yet.
     """
+    if _is_premarket():
+        return {
+            "available":        False,
+            "reason":           "pre-market",
+            "above_vwap":       None,
+            "vwap":             None,
+            "rs_vs_spy":        None,
+            "today_pct_change": None,
+        }
     try:
         from core.alpaca import _dclient
         from alpaca.data.requests import StockBarsRequest

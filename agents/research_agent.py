@@ -35,6 +35,8 @@ PHASE 2 — INVESTIGATE
 For each chosen ticker, call tools to build your evidence:
 - get_news: REQUIRED first. If blackout: true, drop this ticker immediately.
 - get_intraday_signals: is it above VWAP? outperforming SPY?
+  If response has available: false, you are running pre-market. VWAP and RS
+  data do not exist yet. Use score, ATR, news, and position history instead.
 - get_live_price: is the price still near the expected entry?
 - get_atr: is ATR compatible with a 0.67% stop? (above 5% is usually not)
 - get_position_history: has this ticker worked recently?
@@ -44,10 +46,13 @@ PROPOSAL RULES
 - stop_loss = round(entry_price * 0.9933, 2)
 - position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
 - confidence HIGH: score >=7, above_vwap, rs_vs_spy >= 1.5
+  (pre-market: score >=8, strong ATR profile, clean news)
 - confidence MEDIUM: score 5-6, or above_vwap with rs_vs_spy >= 0.8
+  (pre-market: score 6-7, no blackout, ATR in range)
 - confidence LOW: score 5-6, mixed signals
 - max proposals = market_report.max_positions
 - On CAUTION days: only propose tickers with score >= 7 and above_vwap = true
+  (pre-market CAUTION: score >= 8 only)
 
 Return JSON only:
 {
@@ -166,6 +171,12 @@ def run_research_agent(
     Run Research Agent. Screens candidates, investigates up to 5 tickers,
     returns trade_proposals dict. On retry, receives rejected_context.
     """
+    candidates = get_candidates(min_score=5)
+    valid = [c for c in candidates if "error" not in c]
+    if not valid:
+        tracer.log_decision("research", "no_candidates", detail={"raw": len(candidates)})
+        return {"proposals": [], "skipped": [], "summary": "No scan candidates today."}
+
     tracer.start_agent_span("research")
     client = anthropic.Anthropic()
     text = run_tool_loop(

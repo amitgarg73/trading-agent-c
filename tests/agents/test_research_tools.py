@@ -156,6 +156,9 @@ class TestGetLivePrice:
 
 # ── get_intraday_signals ───────────────────────────────────────────────────────
 
+_MARKET_SESSION = patch("agents.tools.research_tools._is_premarket", return_value=False)
+
+
 class TestGetIntradaySignals:
     def _bars_map(self, stock_closes, spy_closes=None):
         stock = [_make_bar(c, open_=stock_closes[0]) for c in stock_closes]
@@ -163,27 +166,35 @@ class TestGetIntradaySignals:
                  for c in (spy_closes or [400.0] * len(stock_closes))]
         return {"AAPL": stock, "SPY": spy}
 
+    def test_premarket_returns_unavailable(self):
+        with patch("agents.tools.research_tools._is_premarket", return_value=True):
+            result = get_intraday_signals("AAPL")
+        assert result["available"] is False
+        assert result["reason"] == "pre-market"
+        assert result["above_vwap"] is None
+        assert result["rs_vs_spy"] is None
+
     def test_above_vwap_when_price_above_average(self):
         closes = [100.0] * 30 + [105.0] * 30
-        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
+        with _MARKET_SESSION, patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
             result = get_intraday_signals("AAPL")
         assert result["above_vwap"] is True
 
     def test_today_pct_change_calculated(self):
         closes = [100.0] + [102.0] * 59
-        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
+        with _MARKET_SESSION, patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
             result = get_intraday_signals("AAPL")
         assert result["today_pct_change"] == pytest.approx(2.0, rel=1e-2)
 
     def test_rs_vs_spy_is_none_when_spy_flat(self):
         closes = [100.0] * 60
         spy_c  = [400.0] * 60
-        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes, spy_c))):
+        with _MARKET_SESSION, patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes, spy_c))):
             result = get_intraday_signals("AAPL")
         assert result["rs_vs_spy"] is None
 
     def test_returns_error_when_no_bars(self):
-        with patch("core.alpaca._dclient", _alpaca_dclient({"AAPL": [], "SPY": []})):
+        with _MARKET_SESSION, patch("core.alpaca._dclient", _alpaca_dclient({"AAPL": [], "SPY": []})):
             result = get_intraday_signals("AAPL")
         assert "error" in result
 
