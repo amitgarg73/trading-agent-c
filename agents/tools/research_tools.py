@@ -29,7 +29,7 @@ def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
             .eq("date", today)
             .gte("score", min_score)
             .order("score", desc=True)
-            .limit(100)
+            .limit(25)
             .execute()
             .data
         )

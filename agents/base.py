@@ -1,9 +1,30 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import re
 import time
 from typing import Any, Callable
+
+_TOOL_TIMEOUT_S = 25   # yfinance / slow external calls must return within this window
+
+
+def _dispatch_with_timeout(
+    dispatch: Callable[[str, dict], Any],
+    name: str,
+    inp: dict,
+) -> Any:
+    """
+    Run a tool dispatch in a thread with a hard timeout.
+    Returns {"error": "timeout"} if the call does not finish in _TOOL_TIMEOUT_S seconds.
+    Prevents yfinance or slow Alpaca calls from stalling the whole pipeline.
+    """
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
+        future = ex.submit(dispatch, name, inp)
+        try:
+            return future.result(timeout=_TOOL_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            return {"error": f"tool timeout after {_TOOL_TIMEOUT_S}s"}
 
 import anthropic
 
@@ -56,7 +77,7 @@ def run_tool_loop(
             for block in response.content:
                 if block.type == "tool_use":
                     t1 = time.monotonic()
-                    result = dispatch(block.name, block.input)
+                    result = _dispatch_with_timeout(dispatch, block.name, block.input)
                     tool_ms = int((time.monotonic() - t1) * 1000)
                     tracer.log_tool_call(
                         agent_name, block.name, block.input, result,
