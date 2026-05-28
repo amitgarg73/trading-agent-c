@@ -136,6 +136,42 @@ class TestGetNews:
             result = get_news("AAPL")
         assert "error" in result
 
+    def test_dict_calendar_blackout_today(self):
+        """yfinance returns a dict instead of DataFrame on some versions/days."""
+        mock_ticker = MagicMock()
+        mock_ticker.calendar = {"Earnings Date": [pd.Timestamp(date.today())]}
+        mock_ticker.news = []
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = get_news("MS")
+        assert result["blackout"] is True
+        assert "earnings" in result["reason"]
+
+    def test_dict_calendar_no_blackout_far_future(self):
+        mock_ticker = MagicMock()
+        mock_ticker.calendar = {"Earnings Date": [pd.Timestamp(date.today() + timedelta(days=30))]}
+        mock_ticker.news = []
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = get_news("MS")
+        assert result["blackout"] is False
+
+    def test_dict_calendar_empty_earnings_key(self):
+        mock_ticker = MagicMock()
+        mock_ticker.calendar = {"Earnings Date": []}
+        mock_ticker.news = []
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = get_news("MS")
+        assert result["blackout"] is False
+        assert "error" not in result
+
+    def test_dict_calendar_missing_earnings_key(self):
+        mock_ticker = MagicMock()
+        mock_ticker.calendar = {"Ex-Dividend Date": [pd.Timestamp(date.today())]}
+        mock_ticker.news = []
+        with patch("yfinance.Ticker", return_value=mock_ticker):
+            result = get_news("MS")
+        assert result["blackout"] is False
+        assert "error" not in result
+
 
 # ── get_live_price ─────────────────────────────────────────────────────────────
 

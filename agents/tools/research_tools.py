@@ -60,25 +60,31 @@ def get_news(ticker: str) -> dict[str, Any]:
         blackout = False
         reason: str | None = None
 
-        if cal is not None and not cal.empty:
-            if "Earnings Date" in cal.index:
-                earn_dates = cal.loc["Earnings Date"]
-                if hasattr(earn_dates, "__iter__"):
-                    earn_dates = list(earn_dates)
-                else:
-                    earn_dates = [earn_dates]
+        # yfinance returns a DataFrame or a dict depending on version/data availability
+        import pandas as pd
+        if cal is not None:
+            if isinstance(cal, pd.DataFrame):
+                earn_dates_raw = cal.loc["Earnings Date"] if "Earnings Date" in cal.index else []
+            elif isinstance(cal, dict):
+                earn_dates_raw = cal.get("Earnings Date", [])
+            else:
+                earn_dates_raw = []
 
-                today     = date.today()
-                tomorrow  = today + timedelta(days=1)
-                for ed in earn_dates:
-                    try:
-                        ed_date = ed.date() if hasattr(ed, "date") else date.fromisoformat(str(ed))
-                        if ed_date in (today, tomorrow):
-                            blackout = True
-                            reason   = f"earnings {ed_date.isoformat()}"
-                            break
-                    except Exception:
-                        continue
+            if not hasattr(earn_dates_raw, "__iter__") or isinstance(earn_dates_raw, str):
+                earn_dates_raw = [earn_dates_raw]
+            earn_dates_list = list(earn_dates_raw)
+
+            today    = date.today()
+            tomorrow = today + timedelta(days=1)
+            for ed in earn_dates_list:
+                try:
+                    ed_date = ed.date() if hasattr(ed, "date") else date.fromisoformat(str(ed))
+                    if ed_date in (today, tomorrow):
+                        blackout = True
+                        reason   = f"earnings {ed_date.isoformat()}"
+                        break
+                except Exception:
+                    continue
 
         news_items = t.news or []
         headlines  = [n.get("title", "") for n in news_items[:3] if n.get("title")]
