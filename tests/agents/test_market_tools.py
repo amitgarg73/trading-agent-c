@@ -8,9 +8,11 @@ import pytest
 from agents.tools.market_tools import (
     _SECTOR_ETFS,
     _vix_level,
+    get_economic_calendar,
     get_fear_greed,
     get_futures,
     get_sector_rotation,
+    get_treasury_yields,
     get_vix,
 )
 
@@ -178,3 +180,96 @@ class TestGetSectorRotation:
         with patch("core.alpaca._dclient", mock_dc):
             result = get_sector_rotation()
         assert "error" in result[0]
+
+
+# ── get_economic_calendar ──────────────────────────────────────────────────────
+
+class TestGetEconomicCalendar:
+    def _mock_urlopen(self, events: list):
+        import json
+        payload = json.dumps(events).encode()
+        mock_resp = MagicMock()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        mock_resp.read.return_value = payload
+        return patch("urllib.request.urlopen", return_value=mock_resp)
+
+    def _today(self):
+        from datetime import date
+        return date.today().isoformat()
+
+    def test_high_impact_event_detected(self):
+        events = [
+            {"country": "USD", "date": f"{self._today()}T08:30:00-0400",
+             "title": "CPI m/m", "impact": "High", "forecast": "0.3%", "previous": "0.4%"},
+        ]
+        with self._mock_urlopen(events):
+            result = get_economic_calendar()
+        assert result["has_high_impact_events"] is True
+        assert result["high_impact_count"] == 1
+        assert any("CPI" in e for e in result["high_impact_events"])
+
+    def test_non_usd_events_filtered_out(self):
+        events = [
+            {"country": "EUR", "date": f"{self._today()}T10:00:00-0400",
+             "title": "ECB Rate", "impact": "High", "forecast": None, "previous": None},
+        ]
+        with self._mock_urlopen(events):
+            result = get_economic_calendar()
+        assert result["has_high_impact_events"] is False
+        assert result["high_impact_count"] == 0
+
+    def test_medium_impact_not_in_high_list(self):
+        events = [
+            {"country": "USD", "date": f"{self._today()}T10:00:00-0400",
+             "title": "Housing Starts", "impact": "Medium", "forecast": None, "previous": None},
+        ]
+        with self._mock_urlopen(events):
+            result = get_economic_calendar()
+        assert result["has_high_impact_events"] is False
+        assert len(result["all_events_today"]) == 1
+
+    def test_returns_error_on_exception(self):
+        with patch("urllib.request.urlopen", side_effect=Exception("timeout")):
+            result = get_economic_calendar()
+        assert "error" in result
+
+
+# ── get_treasury_yields ────────────────────────────────────────────────────────
+
+class TestGetTreasuryYields:
+    def test_returns_yield_and_direction_rising(self):
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = _make_hist(4.40, 4.52)
+        with patch("agents.tools.market_tools.yf.Ticker", return_value=mock_ticker):
+            result = get_treasury_yields()
+        assert result["yield_10y"] == pytest.approx(4.52)
+        assert result["change_bp"] == pytest.approx(12.0, abs=0.2)
+        assert result["direction"] == "rising"
+
+    def test_returns_direction_falling(self):
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = _make_hist(4.60, 4.45)
+        with patch("agents.tools.market_tools.yf.Ticker", return_value=mock_ticker):
+            result = get_treasury_yields()
+        assert result["direction"] == "falling"
+        assert result["change_bp"] < 0
+
+    def test_flat_within_5bp(self):
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = _make_hist(4.50, 4.53)
+        with patch("agents.tools.market_tools.yf.Ticker", return_value=mock_ticker):
+            result = get_treasury_yields()
+        assert result["direction"] == "flat"
+
+    def test_returns_error_on_insufficient_history(self):
+        mock_ticker = MagicMock()
+        mock_ticker.history.return_value = _make_hist(4.50)
+        with patch("agents.tools.market_tools.yf.Ticker", return_value=mock_ticker):
+            result = get_treasury_yields()
+        assert "error" in result
+
+    def test_returns_error_on_exception(self):
+        with patch("agents.tools.market_tools.yf.Ticker", side_effect=Exception("network")):
+            result = get_treasury_yields()
+        assert "error" in result

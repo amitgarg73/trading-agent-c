@@ -5,6 +5,10 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
+import pytz
+
+_ET = pytz.timezone("America/New_York")
+
 _API_KEY = os.getenv("ALPACA_API_KEY_ID_C", "")
 _SECRET  = os.getenv("ALPACA_API_SECRET_KEY_C", "")
 _PAPER   = os.getenv("ALPACA_PAPER", "true").lower() != "false"
@@ -29,6 +33,13 @@ def _dclient():
         from alpaca.data import StockHistoricalDataClient
         _data_client = StockHistoricalDataClient(_API_KEY, _SECRET)
     return _data_client
+
+
+def _is_market_open() -> bool:
+    """True between 9:25 AM and 4:00 PM ET — safe window to poll for fills."""
+    now_et = datetime.now(timezone.utc).astimezone(_ET)
+    t = (now_et.hour, now_et.minute)
+    return (9, 25) <= t < (16, 1)
 
 
 def _order_id(ticker: str) -> str:
@@ -108,6 +119,10 @@ def submit_bracket_order(
     )
     order = _client().submit_order(req)
     print(f"  [alpaca] Bracket order: {ticker} {shares}sh @ ${limit_px} → {order.id}")
+
+    if not _is_market_open():
+        print(f"  [alpaca] {ticker} queued for market open — skipping fill poll")
+        return str(order.id), None
 
     for _ in range(15):
         time.sleep(2)

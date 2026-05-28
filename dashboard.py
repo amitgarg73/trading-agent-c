@@ -106,7 +106,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["Overview", "P&L", "Costs", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings"],
+        ["Overview", "P&L", "Costs", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings", "Market Intel"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -896,3 +896,106 @@ elif page == "Goals & Learnings":
                     st.caption(f"Param change: {lrn['param_key']}  {lrn.get('old_param_value')} → {lrn.get('new_param_value')}")
                 if lrn.get("requires_human_review"):
                     st.warning("Requires human review")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: MARKET INTEL (shadow agent comparison)
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Market Intel":
+    st.header("Market Agent — Shadow Evaluation")
+    st.caption(
+        "V1 = threshold-based (4 tools, hard rules).  "
+        "V2 = autonomous (6 tools, circuit-breakers only).  "
+        "V2 does not affect trade execution — comparison only."
+    )
+
+    evals = q("c_market_evals", order="-eval_date", limit=60)
+
+    if not evals:
+        st.info("No evaluation data yet. Data populates after the first premarket session.")
+    else:
+        total   = len(evals)
+        agreed  = sum(1 for e in evals if e.get("decisions_agree"))
+        cb_days = sum(1 for e in evals if e.get("v2_circuit_breaker"))
+        v2_cons = sum(1 for e in evals if not e.get("decisions_agree") and
+                      e.get("v2_decision") in ("SKIP", "CAUTION") and
+                      e.get("v1_decision") == "GO")
+        v1_cons = sum(1 for e in evals if not e.get("decisions_agree") and
+                      e.get("v1_decision") in ("SKIP", "CAUTION") and
+                      e.get("v2_decision") == "GO")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Days Tracked",        total)
+        m2.metric("Agreement Rate",      f"{agreed / total:.0%}" if total else "—")
+        m3.metric("V2 More Conservative", v2_cons)
+        m4.metric("Circuit Breakers Fired", cb_days)
+
+        st.markdown("---")
+
+        # Day-by-day table
+        st.subheader("Day-by-Day Comparison")
+        decision_icon = {"GO": "GO", "CAUTION": "CAUTION", "SKIP": "SKIP"}
+        rows = []
+        for e in evals:
+            agree_str = "Yes" if e.get("decisions_agree") else "No"
+            rows.append({
+                "Date":         e["eval_date"],
+                "V1 Decision":  e.get("v1_decision", "—"),
+                "V1 MaxPos":    e.get("v1_max_positions"),
+                "V1 Bias":      e.get("v1_bias", "—"),
+                "V2 Decision":  e.get("v2_decision", "—"),
+                "V2 MaxPos":    e.get("v2_max_positions"),
+                "V2 Bias":      e.get("v2_bias", "—"),
+                "V2 Conf":      e.get("v2_confidence", "—"),
+                "Agree?":       agree_str,
+                "CB Fired":     "Yes" if e.get("v2_circuit_breaker") else "No",
+                "P&L":          fmt_pnl(e.get("session_pnl")),
+                "Hindsight":    e.get("hindsight_call") or "pending",
+            })
+        st.dataframe(rows, width="stretch", hide_index=True)
+
+        # Disagreement drill-down
+        disagreements = [e for e in evals if not e.get("decisions_agree")]
+        if disagreements:
+            st.markdown("---")
+            st.subheader(f"Disagreements ({len(disagreements)} days)")
+            for e in disagreements:
+                v2_cb = e.get("v2_circuit_breaker")
+                label = (
+                    f"{e['eval_date']}  —  V1: {e.get('v1_decision')} "
+                    f"({e.get('v1_max_positions')} pos)  |  "
+                    f"V2: {e.get('v2_decision')} ({e.get('v2_max_positions')} pos)"
+                )
+                with st.expander(label, expanded=False):
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        st.markdown("**V1 (Baseline)**")
+                        st.markdown(e.get("v1_summary") or "—")
+                    with c2:
+                        st.markdown("**V2 (Shadow)**")
+                        if v2_cb:
+                            st.markdown(f"Circuit breaker: `{v2_cb}`")
+                        else:
+                            st.markdown(e.get("v2_summary") or "—")
+                        factors = e.get("v2_key_factors") or []
+                        if factors:
+                            st.markdown("Key factors: " + " · ".join(f"`{f}`" for f in factors))
+                    pnl = e.get("session_pnl")
+                    if pnl is not None:
+                        st.markdown(
+                            f"Outcome: **{fmt_pnl(pnl)}**  ·  "
+                            f"Hindsight: `{e.get('hindsight_call') or 'pending'}`"
+                        )
+
+        # V2 key factors frequency
+        all_factors: list[str] = []
+        for e in evals:
+            all_factors.extend(e.get("v2_key_factors") or [])
+        if all_factors:
+            st.markdown("---")
+            st.subheader("V2 Key Factors (frequency)")
+            from collections import Counter
+            factor_counts = Counter(all_factors).most_common(15)
+            factor_rows = [{"Factor": f, "Count": c} for f, c in factor_counts]
+            st.dataframe(factor_rows, width="stretch", hide_index=True)

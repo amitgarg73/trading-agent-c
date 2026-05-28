@@ -14,6 +14,33 @@ from trace.logger import TraceLogger
 
 _MODEL = "claude-haiku-4-5-20251001"
 
+
+def check_circuit_breakers(vix_data: dict, futures_data: dict) -> tuple[bool, str | None]:
+    """
+    Hard SKIP conditions applied before any agent runs.
+    These override Claude's judgment — they cannot be reasoned away.
+
+    Breakers:
+      - VIX > 35: volatility regime where ATR-based stops become noise
+      - avg futures < -2.0%: gap-down open makes entries and fills unreliable
+      - All three indices individually < -1.0%: coordinated market selloff
+    """
+    vix = vix_data.get("value", 0)
+    if vix > 35:
+        return True, f"vix_extreme: VIX={vix} > 35"
+
+    avg_fut = futures_data.get("avg_change_pct", 0)
+    if avg_fut < -2.0:
+        return True, f"futures_crash: avg={avg_fut}% < -2.0%"
+
+    sp = futures_data.get("S&P500", {}).get("change_pct", 0)
+    nq = futures_data.get("Nasdaq",  {}).get("change_pct", 0)
+    dw = futures_data.get("Dow",     {}).get("change_pct", 0)
+    if sp < -1.0 and nq < -1.0 and dw < -1.0:
+        return True, f"coordinated_selloff: SP={sp}%,NQ={nq}%,Dow={dw}%"
+
+    return False, None
+
 _SYSTEM = """
 You are a macro market analyst. Your job is to assess today's market conditions
 and recommend a position count ceiling for a day-trading system.

@@ -84,10 +84,14 @@ class TestGetLivePrice:
 
 # ── submit_bracket_order ───────────────────────────────────────────────────────
 
+_MARKET_OPEN  = patch("core.alpaca._is_market_open", return_value=True)
+_MARKET_CLOSED = patch("core.alpaca._is_market_open", return_value=False)
+
+
 class TestSubmitBracketOrder:
     def test_returns_order_id_and_fill_price_on_fill(self):
         order = _mock_order(status="filled", filled_avg_price=185.20)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             mc.return_value.get_order_by_id.return_value = order
@@ -99,7 +103,7 @@ class TestSubmitBracketOrder:
     def test_returns_none_none_on_rejection(self):
         submitted = _mock_order(status="new")
         rejected  = _mock_order(status="rejected", filled_avg_price=None)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = submitted
             mc.return_value.get_order_by_id.return_value = rejected
@@ -110,7 +114,7 @@ class TestSubmitBracketOrder:
 
     def test_returns_order_id_with_none_fill_when_pending(self):
         pending = _mock_order(status="new", filled_avg_price=None)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = pending
             mc.return_value.get_order_by_id.return_value = pending
@@ -121,7 +125,7 @@ class TestSubmitBracketOrder:
 
     def test_limit_price_has_buffer(self):
         order = _mock_order(status="filled", filled_avg_price=185.20)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             mc.return_value.get_order_by_id.return_value = order
@@ -129,6 +133,26 @@ class TestSubmitBracketOrder:
             submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
         call_args = mc.return_value.submit_order.call_args[0][0]
         assert call_args.limit_price == pytest.approx(185.0 * 1.001, rel=1e-3)
+
+    def test_premarket_skips_poll_and_returns_order_id(self):
+        order = _mock_order(status="new", filled_avg_price=None)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_CLOSED:
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            from core.alpaca import submit_bracket_order
+            oid, fill = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        assert oid == "ord-001"
+        assert fill is None
+        mt.sleep.assert_not_called()
+
+    def test_premarket_does_not_call_get_order_by_id(self):
+        order = _mock_order(status="new")
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_CLOSED:
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        mc.return_value.get_order_by_id.assert_not_called()
 
 
 # ── get_order_fill ─────────────────────────────────────────────────────────────

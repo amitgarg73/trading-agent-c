@@ -193,6 +193,42 @@ CREATE TABLE c_goal_snapshots (
 CREATE INDEX idx_c_goal_snapshots_date ON c_goal_snapshots(snapshot_date DESC);
 
 
+-- ── Market Agent Shadow Evaluation ───────────────────────────────────────────
+
+-- Side-by-side comparison of V1 (threshold-based) vs V2 (autonomous) market agent.
+-- Populated daily by premarket.py. Outcomes backfilled by EOD session.
+CREATE TABLE c_market_evals (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  eval_date            DATE NOT NULL UNIQUE,
+  session_id           UUID NOT NULL,
+  -- V1 Baseline (threshold-based system prompt, 4 tools)
+  v1_decision          TEXT NOT NULL,
+  v1_max_positions     INT,
+  v1_bias              TEXT,
+  v1_summary           TEXT,
+  -- V2 Shadow (autonomous, circuit-breaker-gated, 6 tools)
+  v2_decision          TEXT NOT NULL,
+  v2_max_positions     INT,
+  v2_bias              TEXT,
+  v2_confidence        TEXT,
+  v2_key_factors       TEXT[],
+  v2_summary           TEXT,
+  v2_circuit_breaker   TEXT,
+  -- Comparison
+  decisions_agree      BOOL NOT NULL,
+  v1_more_aggressive   BOOL,
+  -- Outcomes (backfilled by EOD session)
+  actual_trades        INT,
+  session_pnl          FLOAT,
+  hindsight_call       TEXT,  -- v1_better | v2_better | tie | pending
+  notes                TEXT,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_c_market_evals_date ON c_market_evals(eval_date DESC);
+
+
 -- ── Infrastructure ─────────────────────────────────────────────────────────────
 
 CREATE TABLE c_agent_config (

@@ -10,6 +10,10 @@ on:
     - cron: "50 19 * * 1-5"             # 3:50 PM EDT
   workflow_dispatch:
 
+concurrency:
+  group: intraday
+  cancel-in-progress: false
+
 jobs:
   intraday:
     name: Intraday poll
@@ -32,8 +36,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
-          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
-          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
+          ALPACA_API_KEY_ID_C: ${{ secrets.ALPACA_API_KEY_ID_C }}
+          ALPACA_API_SECRET_KEY_C: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
           NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}

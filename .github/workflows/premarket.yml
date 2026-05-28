@@ -7,6 +7,10 @@ on:
     - cron: "15 11 * * 1-5"
   workflow_dispatch:
 
+concurrency:
+  group: premarket
+  cancel-in-progress: false
+
 jobs:
   premarket:
     name: Premarket session
@@ -39,8 +43,8 @@ jobs:
         env:
           PYTHONPATH: ${{ github.workspace }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
-          ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID_C }}
-          ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
+          ALPACA_API_KEY_ID_C: ${{ secrets.ALPACA_API_KEY_ID_C }}
+          ALPACA_API_SECRET_KEY_C: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
           NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
