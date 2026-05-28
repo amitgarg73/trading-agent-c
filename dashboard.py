@@ -513,66 +513,228 @@ elif page == "Observability":
         agents = selected_session.get("agents_invoked") or []
         st.markdown("**Agents invoked:** " + " · ".join(agents) if agents else "—")
 
-    # Trace stream
     traces = q("c_traces", filters={"session_id": selected_id}, order="sequence")
 
-    agent_filter = st.multiselect(
-        "Filter by agent",
-        options=sorted({t["agent"] for t in traces}),
-        default=[],
-    )
-    type_filter = st.multiselect(
-        "Filter by step type",
-        options=sorted({t["step_type"] for t in traces}),
-        default=[],
-    )
-
-    filtered = [
-        t for t in traces
-        if (not agent_filter or t["agent"] in agent_filter)
-        and (not type_filter or t["step_type"] in type_filter)
-    ]
-
-    st.caption(f"{len(filtered)} of {len(traces)} spans")
-
-    step_colors = {
+    STEP_COLORS = {
         "tool_call":     "#388bfd",
         "agent_message": "#3fb950",
         "decision":      "#d29922",
         "error":         "#f85149",
     }
+    AGENT_ORDER = ["market", "news_analyst", "research", "risk", "orchestrator", "learning"]
 
-    for t in filtered:
-        color  = step_colors.get(t["step_type"], "#888")
-        label  = t.get("tool_name") or t.get("step_type")
-        err    = t.get("error")
-        tokens = f"{t.get('tokens_input',0)}→{t.get('tokens_output',0)} tok"
-        lat    = f"{t.get('latency_ms',0)}ms"
+    tab_graph, tab_timeline, tab_stream = st.tabs(["Call Chain Graph", "Timeline", "Trace Stream"])
 
-        header = (
-            f"**#{t['sequence']}** &nbsp; "
-            f"<span style='color:{color}'>{t['agent']}</span> &nbsp; "
-            f"`{label}` &nbsp; {lat} &nbsp; {tokens}"
+    # ── TAB: CALL CHAIN GRAPH ─────────────────────────────────────────────────
+    with tab_graph:
+        if not traces:
+            st.info("No traces for this session")
+        else:
+            import graphviz
+
+            # Aggregate per-agent stats
+            agent_stats: dict[str, dict] = {}
+            for t in traces:
+                a = t["agent"]
+                if a not in agent_stats:
+                    agent_stats[a] = {"steps": 0, "tool_calls": 0, "tokens_in": 0,
+                                      "tokens_out": 0, "latency_ms": 0, "errors": 0}
+                agent_stats[a]["steps"]      += 1
+                agent_stats[a]["tokens_in"]  += t.get("tokens_input", 0)
+                agent_stats[a]["tokens_out"] += t.get("tokens_output", 0)
+                agent_stats[a]["latency_ms"] += t.get("latency_ms", 0)
+                if t["step_type"] == "tool_call":
+                    agent_stats[a]["tool_calls"] += 1
+                if t["step_type"] == "error":
+                    agent_stats[a]["errors"] += 1
+
+            # Infer handoff edges from decision outcomes
+            decisions = [t for t in traces if t["step_type"] == "decision"]
+            handoffs: list[tuple[str, str, str]] = []
+            outcome_map = {t["agent"]: t.get("outcome", "") for t in decisions}
+            seq = [a for a in AGENT_ORDER if a in agent_stats]
+            for i in range(len(seq) - 1):
+                src, dst = seq[i], seq[i + 1]
+                label = outcome_map.get(src, "→")
+                handoffs.append((src, dst, label[:30]))
+
+            g = graphviz.Digraph(graph_attr={"rankdir": "LR", "bgcolor": "transparent",
+                                              "fontname": "Arial", "splines": "ortho"})
+            g.attr("node", shape="box", style="rounded,filled", fontname="Arial",
+                   fontsize="11", margin="0.3,0.15")
+            g.attr("edge", fontname="Arial", fontsize="9", color="#666666")
+
+            AGENT_COLORS = {
+                "market":       ("#1f4e79", "#dce9f7"),
+                "news_analyst": ("#4b2e83", "#ede9f7"),
+                "research":     ("#1a4731", "#d4edda"),
+                "risk":         ("#7c2d12", "#fde8d0"),
+                "orchestrator": ("#374151", "#e5e7eb"),
+                "learning":     ("#1e3a5f", "#dbeafe"),
+            }
+
+            for agent, stats in agent_stats.items():
+                fc, bc = AGENT_COLORS.get(agent, ("#333", "#eee"))
+                tok = f"{stats['tokens_in']:,}→{stats['tokens_out']:,} tok"
+                lat = f"{stats['latency_ms']}ms"
+                tools_str = f"{stats['tool_calls']} tools · " if stats["tool_calls"] else ""
+                err_str   = f" ⚠ {stats['errors']} err" if stats["errors"] else ""
+                node_label = f"{agent}\n{tools_str}{lat}\n{tok}{err_str}"
+                g.node(agent, label=node_label, fillcolor=bc, fontcolor=fc, color=fc)
+
+            for src, dst, label in handoffs:
+                g.edge(src, dst, label=label)
+
+            st.graphviz_chart(g, use_container_width=True)
+
+            # Drill-down: pick an agent to inspect
+            st.markdown("---")
+            st.subheader("Drill-down by agent")
+            agents_present = [a for a in AGENT_ORDER if a in agent_stats]
+            selected_agent = st.selectbox("Select agent", agents_present, key="graph_agent")
+
+            agent_traces = [t for t in traces if t["agent"] == selected_agent]
+            st.caption(f"{len(agent_traces)} steps · "
+                       f"{agent_stats[selected_agent]['tokens_in']:,} tokens in · "
+                       f"{agent_stats[selected_agent]['tokens_out']:,} tokens out · "
+                       f"{agent_stats[selected_agent]['latency_ms']}ms total")
+
+            for t in agent_traces:
+                color = STEP_COLORS.get(t["step_type"], "#888")
+                label = t.get("tool_name") or t["step_type"]
+                with st.expander(f"#{t['sequence']} `{label}` — {t.get('latency_ms',0)}ms", expanded=False):
+                    st.markdown(f"<span style='color:{color}'>**{t['step_type']}**</span>",
+                                unsafe_allow_html=True)
+                    if t.get("agent_reasoning"):
+                        st.markdown("**Reasoning**")
+                        st.markdown(t["agent_reasoning"])
+                    if t.get("tool_input"):
+                        st.markdown("**Input**")
+                        st.json(t["tool_input"])
+                    if t.get("tool_output"):
+                        st.markdown("**Output**")
+                        st.json(t["tool_output"])
+                    if t.get("outcome"):
+                        st.markdown(f"**Outcome:** `{t['outcome']}`")
+                    if t.get("step_type") == "error":
+                        st.error(t.get("agent_reasoning", "unknown error"))
+                    tok = f"{t.get('tokens_input',0)}→{t.get('tokens_output',0)}"
+                    st.caption(f"seq {t['sequence']} · tokens {tok} · span {str(t['span_id'])[:8]}")
+
+    # ── TAB: TIMELINE ─────────────────────────────────────────────────────────
+    with tab_timeline:
+        if not traces:
+            st.info("No traces for this session")
+        else:
+            import plotly.graph_objects as go
+
+            fig = go.Figure()
+
+            for step_type, color in STEP_COLORS.items():
+                pts = [t for t in traces if t["step_type"] == step_type]
+                if not pts:
+                    continue
+                fig.add_trace(go.Scatter(
+                    x=[t["sequence"] for t in pts],
+                    y=[t["agent"] for t in pts],
+                    mode="markers",
+                    name=step_type,
+                    marker=dict(
+                        color=color,
+                        size=[max(8, min(24, 8 + (t.get("tokens_output", 0) or 0) // 50)) for t in pts],
+                        symbol="circle",
+                        line=dict(width=1, color="#fff"),
+                    ),
+                    customdata=[[
+                        t.get("tool_name") or t["step_type"],
+                        t.get("outcome") or "—",
+                        t.get("latency_ms", 0),
+                        t.get("tokens_input", 0),
+                        t.get("tokens_output", 0),
+                        (t.get("agent_reasoning") or "")[:120],
+                    ] for t in pts],
+                    hovertemplate=(
+                        "<b>%{customdata[0]}</b><br>"
+                        "outcome: %{customdata[1]}<br>"
+                        "latency: %{customdata[2]}ms<br>"
+                        "tokens: %{customdata[3]}→%{customdata[4]}<br>"
+                        "%{customdata[5]}"
+                        "<extra></extra>"
+                    ),
+                ))
+
+            # Draw sequence connectors
+            fig.add_trace(go.Scatter(
+                x=[t["sequence"] for t in traces],
+                y=[t["agent"] for t in traces],
+                mode="lines",
+                line=dict(color="#444", width=0.5, dash="dot"),
+                showlegend=False,
+                hoverinfo="skip",
+            ))
+
+            fig.update_layout(
+                height=380,
+                margin=dict(l=20, r=20, t=30, b=20),
+                yaxis=dict(categoryorder="array", categoryarray=list(reversed(AGENT_ORDER)),
+                           gridcolor="#333"),
+                xaxis=dict(title="Sequence", gridcolor="#333"),
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                legend=dict(orientation="h", y=1.1),
+                font=dict(color="#ccc"),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption("Marker size ∝ output tokens. Hover for details.")
+
+    # ── TAB: TRACE STREAM ─────────────────────────────────────────────────────
+    with tab_stream:
+        agent_filter = st.multiselect(
+            "Filter by agent",
+            options=sorted({t["agent"] for t in traces}),
+            default=[],
+            key="stream_agent",
         )
-        if err:
-            header += f" &nbsp; <span style='color:#f85149'>ERROR</span>"
+        type_filter = st.multiselect(
+            "Filter by step type",
+            options=sorted({t["step_type"] for t in traces}),
+            default=[],
+            key="stream_type",
+        )
 
-        with st.expander(label=f"#{t['sequence']} {t['agent']} · {label}", expanded=False):
-            st.markdown(header, unsafe_allow_html=True)
-            if t.get("agent_reasoning"):
-                st.markdown("**Reasoning**")
-                st.markdown(t["agent_reasoning"])
-            if t.get("tool_input"):
-                st.markdown("**Input**")
-                st.json(t["tool_input"])
-            if t.get("tool_output"):
-                st.markdown("**Output**")
-                st.json(t["tool_output"])
-            if t.get("outcome"):
-                st.markdown(f"**Outcome:** `{t['outcome']}`")
-            if err:
-                st.error(err)
-            st.caption(f"Span {t['span_id']} · {fmt_ts(t.get('created_at'))}")
+        filtered = [
+            t for t in traces
+            if (not agent_filter or t["agent"] in agent_filter)
+            and (not type_filter or t["step_type"] in type_filter)
+        ]
+        st.caption(f"{len(filtered)} of {len(traces)} spans")
+
+        for t in filtered:
+            color = STEP_COLORS.get(t["step_type"], "#888")
+            label = t.get("tool_name") or t.get("step_type")
+            err   = t.get("step_type") == "error"
+            with st.expander(f"#{t['sequence']} {t['agent']} · {label}", expanded=False):
+                st.markdown(
+                    f"**#{t['sequence']}** &nbsp; "
+                    f"<span style='color:{color}'>{t['agent']}</span> &nbsp; "
+                    f"`{label}` &nbsp; {t.get('latency_ms',0)}ms &nbsp; "
+                    f"{t.get('tokens_input',0)}→{t.get('tokens_output',0)} tok",
+                    unsafe_allow_html=True,
+                )
+                if t.get("agent_reasoning"):
+                    st.markdown("**Reasoning**")
+                    st.markdown(t["agent_reasoning"])
+                if t.get("tool_input"):
+                    st.markdown("**Input**")
+                    st.json(t["tool_input"])
+                if t.get("tool_output"):
+                    st.markdown("**Output**")
+                    st.json(t["tool_output"])
+                if t.get("outcome"):
+                    st.markdown(f"**Outcome:** `{t['outcome']}`")
+                if err:
+                    st.error(t.get("agent_reasoning", "error"))
+                st.caption(f"Span {t['span_id']} · {fmt_ts(t.get('created_at'))}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
