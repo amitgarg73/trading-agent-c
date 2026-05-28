@@ -37,7 +37,7 @@ PHASE 1 — SCREEN AND SNAPSHOT
 1. Call get_candidates() once. You receive ticker, score, and price.
 2. Call get_premarket_snapshot() with ALL tickers returned. This shows
    overnight price moves vs yesterday's close in one call.
-3. Using score AND premarket_change_pct together, select at most 5 tickers
+3. Using score AND premarket_change_pct together, select at most 10 tickers
    to investigate. Prefer score >= 7 with positive pre-market movement.
    On CAUTION days: score >= 8 AND premarket_change_pct > 0.3% only.
 
@@ -292,7 +292,7 @@ def run_research_agent(
         dispatch=_dispatch,
         tracer=tracer,
         agent_name="research",
-        max_turns=30,
+        max_turns=60,
         wall_clock_timeout_s=_WALL_CLOCK_TIMEOUT_S,
     )
     return parse_json_response(text)
