@@ -179,19 +179,57 @@ def get_bracket_status(order_id: str) -> dict:
 
 def get_order_fill(order_id: str) -> tuple[Optional[float], Optional[str]]:
     """
-    For a completed bracket, return (close_price, exit_reason).
-    exit_reason: TARGET | STOP
+    For a completed bracket or trailing stop, return (close_price, exit_reason).
+    exit_reason: TARGET | NATIVE_TRAIL | STOP
     """
     try:
-        order = _client().get_order_by_id(order_id)
+        order    = _client().get_order_by_id(order_id)
+        type_str = str(order.order_type).lower()
+        status   = str(order.status).lower()
+
+        # Standalone trailing stop order (not a bracket leg)
+        if "trailing" in type_str and "filled" in status and order.filled_avg_price:
+            return float(order.filled_avg_price), "NATIVE_TRAIL"
+
+        # Bracket legs
         for leg in (order.legs or []):
             if "filled" in str(leg.status).lower() and leg.filled_avg_price:
-                type_str = str(leg.order_type).lower()
-                reason   = "STOP" if "stop" in type_str else "TARGET"
+                leg_type = str(leg.order_type).lower()
+                if "trailing" in leg_type:
+                    reason = "NATIVE_TRAIL"
+                elif "stop" in leg_type:
+                    reason = "STOP"
+                else:
+                    reason = "TARGET"
                 return float(leg.filled_avg_price), reason
     except Exception as e:
         print(f"  [alpaca] get_order_fill({order_id[:8]}): {e}")
     return None, None
+
+
+def submit_trailing_stop(ticker: str, shares: int, trail_pct: float) -> Optional[str]:
+    """
+    Submit a standalone trailing stop sell order for an open position.
+    Alpaca tracks the high-watermark server-side and fires on reversal.
+    Returns order ID or None on failure.
+    """
+    from alpaca.trading.requests import TrailingStopOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    try:
+        req = TrailingStopOrderRequest(
+            symbol=ticker,
+            qty=shares,
+            side=OrderSide.SELL,
+            time_in_force=TimeInForce.DAY,
+            trail_percent=round(trail_pct * 100, 2),
+            client_order_id=_order_id(ticker),
+        )
+        order = _client().submit_order(req)
+        print(f"  [alpaca] Trailing stop: {ticker} {shares}sh {trail_pct*100:.1f}% → {order.id}")
+        return str(order.id)
+    except Exception as e:
+        print(f"  [alpaca] submit_trailing_stop({ticker}): {e}")
+        return None
 
 
 # ── Positions ──────────────────────────────────────────────────────────────────

@@ -62,7 +62,7 @@ class TestExecuteTrades:
     def test_inserts_one_row_per_trade(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         with _ALPACA_PATCH:
-            _execute_trades([_TRADE], _SESSION_ID)
+            _execute_trades([_TRADE], _SESSION_ID, 0.008)
         assert mock_supabase.table.call_count >= 1
         table_call_args = [c[0][0] for c in mock_supabase.table.call_args_list]
         assert "c_positions" in table_call_args
@@ -79,7 +79,7 @@ class TestExecuteTrades:
         mock_supabase.table.return_value = q
 
         with _ALPACA_PATCH:
-            _execute_trades([_TRADE], _SESSION_ID)
+            _execute_trades([_TRADE], _SESSION_ID, 0.008)
         assert inserted.get("ticker") == "AAPL"
 
     def test_shares_fallback_computed(self, mock_supabase):
@@ -98,7 +98,7 @@ class TestExecuteTrades:
         mock_supabase.table.return_value = q
 
         with _ALPACA_PATCH:
-            _execute_trades([trade_no_shares], _SESSION_ID)
+            _execute_trades([trade_no_shares], _SESSION_ID, 0.008)
         assert inserted.get("shares") == int(3500 / 185.0)
 
     def test_status_is_open(self, mock_supabase):
@@ -113,13 +113,13 @@ class TestExecuteTrades:
         mock_supabase.table.return_value = q
 
         with _ALPACA_PATCH:
-            _execute_trades([_TRADE], _SESSION_ID)
+            _execute_trades([_TRADE], _SESSION_ID, 0.008)
         assert inserted.get("status") == "open"
 
     def test_skips_rejected_order(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
-            _execute_trades([_TRADE], _SESSION_ID)
+            _execute_trades([_TRADE], _SESSION_ID, 0.008)
         insert_calls = [c for c in mock_supabase.table.call_args_list
                         if c[0][0] == "c_positions"]
         assert len(insert_calls) == 0
@@ -127,7 +127,7 @@ class TestExecuteTrades:
     def test_no_inserts_for_empty_trades(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         with _ALPACA_PATCH:
-            _execute_trades([], _SESSION_ID)
+            _execute_trades([], _SESSION_ID, 0.008)
         mock_supabase.table.assert_not_called()
 
 

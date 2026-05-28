@@ -109,25 +109,29 @@ def classify_exit(fill_details: dict) -> str:
     """Infer exit reason from Alpaca fill details."""
     order_type = fill_details.get("order_type", "")
     side       = fill_details.get("side", "")
-    if order_type == "limit"  and side == "sell": return "target"
-    if order_type == "stop"   and side == "sell": return "stop"
-    if order_type == "market" and side == "sell": return "eod_forced"
+    if "trailing" in order_type and side == "sell": return "NATIVE_TRAIL"
+    if order_type == "limit"    and side == "sell": return "target"
+    if order_type == "stop"     and side == "sell": return "stop"
+    if order_type == "market"   and side == "sell": return "eod_forced"
     return "manual"
 
 
-def _sync_positions(session_id: str) -> None:
+def _sync_positions(session_id: str, trail_pct: float) -> None:
     """
     Sync open positions from Alpaca into c_positions:
     - updates unrealized_pnl with live data
-    - marks positions closed if Alpaca no longer holds them (bracket exit fired)
+    - submits trailing stop for newly-filled entries that don't have one yet
+    - marks positions closed if Alpaca no longer holds them (bracket or trail exit fired)
     """
-    from core.alpaca import get_open_alpaca_tickers, get_position_data, get_order_fill
+    from core.alpaca import (
+        get_open_alpaca_tickers, get_position_data, get_order_fill, submit_trailing_stop,
+    )
     from core.db import get_client
     db = get_client()
 
     rows = (
         db.table("c_positions")
-        .select("id,ticker,alpaca_order_id,entry_price,shares")
+        .select("id,ticker,alpaca_order_id,trail_order_id,entry_price,shares")
         .eq("session_id", session_id)
         .eq("status", "open")
         .eq("open_date", date.today().isoformat())
@@ -141,23 +145,34 @@ def _sync_positions(session_id: str) -> None:
     alpaca_tickers = get_open_alpaca_tickers()
 
     for pos in rows:
-        ticker   = pos["ticker"]
-        order_id = pos.get("alpaca_order_id")
+        ticker         = pos["ticker"]
+        order_id       = pos.get("alpaca_order_id")
+        trail_order_id = pos.get("trail_order_id")
+        shares         = int(pos.get("shares") or 0)
 
         if ticker in alpaca_tickers:
             data = get_position_data(ticker)
             if data:
-                db.table("c_positions").update({
-                    "entry_price": data["current_price"],  # reuse field as latest price
-                }).eq("id", pos["id"]).execute()
-        elif order_id:
-            # Not in Alpaca — bracket leg fired; fetch fill details
-            fill_price, exit_reason = get_order_fill(order_id)
+                update: dict = {"entry_price": data["current_price"]}
+                # Entry just filled and no trailing stop yet — submit one now
+                if not trail_order_id:
+                    new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
+                    if new_trail_id:
+                        update["trail_order_id"] = new_trail_id
+                        print(f"  [intraday] {ticker} trailing stop submitted (post-fill): {new_trail_id[:8]}")
+                db.table("c_positions").update(update).eq("id", pos["id"]).execute()
+        else:
+            # Not in Alpaca — check trail order first, then bracket
+            fill_price, exit_reason = None, None
+            if trail_order_id:
+                fill_price, exit_reason = get_order_fill(trail_order_id)
+            if fill_price is None and order_id:
+                fill_price, exit_reason = get_order_fill(order_id)
+
             if fill_price:
-                entry     = float(pos.get("entry_price") or 0)
-                shares    = int(pos.get("shares") or 0)
-                realized  = round((fill_price - entry) * shares, 2)
-                now_      = datetime.utcnow().isoformat()
+                entry    = float(pos.get("entry_price") or 0)
+                realized = round((fill_price - entry) * shares, 2)
+                now_     = datetime.utcnow().isoformat()
                 db.table("c_positions").update({
                     "status":       "closed",
                     "exit_reason":  exit_reason or "unknown",
@@ -172,9 +187,10 @@ def _place_intraday_trades(
     proposals: dict,
     approved_tickers: set[str],
     session_id: str,
+    trail_pct: float,
 ) -> int:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
-    from core.alpaca import submit_bracket_order
+    from core.alpaca import submit_bracket_order, submit_trailing_stop
     from core.db import get_client
     today = date.today().isoformat()
     now_  = datetime.utcnow().isoformat()
@@ -193,6 +209,11 @@ def _place_intraday_trades(
         if order_id is None:
             print(f"  [intraday] {p['ticker']} order rejected — skipping")
             continue
+
+        trail_order_id = None
+        if fill_price is not None:
+            trail_order_id = submit_trailing_stop(p["ticker"], shares, trail_pct)
+
         get_client().table("c_positions").insert({
             "session_id":      session_id,
             "ticker":          p["ticker"],
@@ -208,6 +229,7 @@ def _place_intraday_trades(
             "entry_time":      now_,
             "entry_context":   "intraday",
             "alpaca_order_id": order_id,
+            "trail_order_id":  trail_order_id,
         }).execute()
         count += 1
     return count
@@ -243,7 +265,7 @@ def main() -> None:
     params = load_params()
     tracer = TraceLogger(session_id)
 
-    _sync_positions(session_id)
+    _sync_positions(session_id, params.trail_pct)
 
     daily_pnl   = get_daily_pnl(session_id)
     goal_status = evaluate_goals(daily_pnl)
@@ -318,7 +340,7 @@ def main() -> None:
             print("[intraday] All proposals rejected.")
             return
 
-        count = _place_intraday_trades(proposals, {v["ticker"] for v in approved}, session_id)
+        count = _place_intraday_trades(proposals, {v["ticker"] for v in approved}, session_id, params.trail_pct)
         tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
         print(f"[intraday] {count} trade(s) placed: "
               f"{', '.join(v['ticker'] for v in approved)}")

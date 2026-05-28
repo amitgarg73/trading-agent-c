@@ -113,8 +113,15 @@ class TestClassifyExit:
     def test_unknown_is_manual(self):
         assert classify_exit({"order_type": "other", "side": "buy"}) == "manual"
 
+    def test_trailing_stop_sell_is_native_trail(self):
+        assert classify_exit({"order_type": "trailing_stop", "side": "sell"}) == "NATIVE_TRAIL"
 
-_ALPACA_PATCH = patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", 185.0))
+    def test_trailing_stop_buy_is_manual(self):
+        assert classify_exit({"order_type": "trailing_stop", "side": "buy"}) == "manual"
+
+
+_BRACKET_PATCH = patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", 185.0))
+_TRAIL_PATCH   = patch("core.alpaca.submit_trailing_stop", return_value="trail-intra-001")
 
 _INTRA_PROPOSAL = {
     "proposals": [
@@ -144,11 +151,31 @@ class TestPlaceIntradayTrades:
         mock_supabase.table.return_value = q
 
         from sessions.intraday import _place_intraday_trades
-        with _ALPACA_PATCH:
-            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID)
+        with _BRACKET_PATCH, _TRAIL_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 1
         assert inserted.get("entry_context") == "intraday"
         assert inserted.get("alpaca_order_id") == "ord-intra-001"
+        assert inserted.get("trail_order_id") == "trail-intra-001"
+
+    def test_trail_order_id_none_when_fill_pending(self, mock_supabase):
+        inserted = {}
+
+        def capture(data):
+            inserted.update(data)
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", None)), \
+             _TRAIL_PATCH as mock_trail:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
+        assert count == 1
+        mock_trail.assert_not_called()
+        assert inserted.get("trail_order_id") is None
 
     def test_skips_non_approved(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -166,16 +193,76 @@ class TestPlaceIntradayTrades:
             ]
         }
         from sessions.intraday import _place_intraday_trades
-        with _ALPACA_PATCH:
-            count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID)
+        with _BRACKET_PATCH, _TRAIL_PATCH:
+            count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
 
     def test_skips_rejected_order(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         from sessions.intraday import _place_intraday_trades
-        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
-            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID)
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
+
+
+class TestSyncPositions:
+    """Tests for _sync_positions: trail submission and exit detection."""
+
+    _OPEN_POS = {
+        "id": "pos-001",
+        "ticker": "AAPL",
+        "alpaca_order_id": "ord-001",
+        "trail_order_id": None,
+        "entry_price": 185.0,
+        "shares": 10,
+    }
+
+    def test_submits_trailing_stop_when_missing(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([self._OPEN_POS])
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-001") as mock_trail:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_trail.assert_called_once_with("AAPL", 10, 0.008)
+
+    def test_skips_trail_submission_when_already_set(self, mock_supabase):
+        pos = {**self._OPEN_POS, "trail_order_id": "trail-existing"}
+        mock_supabase.table.return_value = make_query([pos])
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.submit_trailing_stop") as mock_trail:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_trail.assert_not_called()
+
+    def test_closes_position_on_trail_exit(self, mock_supabase):
+        pos = {**self._OPEN_POS, "trail_order_id": "trail-001"}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(187.5, "NATIVE_TRAIL")):
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("status") == "closed"
+        assert updated.get("exit_reason") == "NATIVE_TRAIL"
+
+    def test_no_rows_returns_early(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        with patch("core.alpaca.get_open_alpaca_tickers") as mock_tickers:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_tickers.assert_not_called()
 
 
 class TestIntradayMain:

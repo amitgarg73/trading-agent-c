@@ -251,6 +251,30 @@ class TestGetOrderFill:
         assert price  == pytest.approx(183.0)
         assert reason == "STOP"
 
+    def test_native_trail_standalone_order(self):
+        order = MagicMock()
+        order.order_type       = "trailing_stop"
+        order.status           = "filled"
+        order.filled_avg_price = 188.5
+        order.legs             = []
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_order_fill
+            price, reason = get_order_fill("trail-001")
+        assert price  == pytest.approx(188.5)
+        assert reason == "NATIVE_TRAIL"
+
+    def test_native_trail_as_bracket_leg(self):
+        leg = self._leg("trailing_stop", "filled", 187.0)
+        order = _mock_order(legs=[leg])
+        order.order_type = "limit"
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_order_fill
+            price, reason = get_order_fill("ord-001")
+        assert price  == pytest.approx(187.0)
+        assert reason == "NATIVE_TRAIL"
+
     def test_returns_none_when_no_filled_leg(self):
         leg   = self._leg("limit", "new", None)
         order = _mock_order(legs=[leg])
@@ -260,6 +284,34 @@ class TestGetOrderFill:
             price, reason = get_order_fill("ord-001")
         assert price  is None
         assert reason is None
+
+
+# ── submit_trailing_stop ───────────────────────────────────────────────────────
+
+class TestSubmitTrailingStop:
+    def test_returns_order_id_on_success(self):
+        order = _mock_order(order_id="trail-001")
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.return_value = order
+            from core.alpaca import submit_trailing_stop
+            result = submit_trailing_stop("AAPL", 10, 0.008)
+        assert result == "trail-001"
+
+    def test_trail_percent_converted_correctly(self):
+        order = _mock_order()
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.return_value = order
+            from core.alpaca import submit_trailing_stop
+            submit_trailing_stop("AAPL", 10, 0.008)
+        call_args = mc.return_value.submit_order.call_args[0][0]
+        assert call_args.trail_percent == pytest.approx(0.8, rel=1e-3)
+
+    def test_returns_none_on_exception(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.side_effect = Exception("insufficient qty")
+            from core.alpaca import submit_trailing_stop
+            result = submit_trailing_stop("AAPL", 10, 0.008)
+        assert result is None
 
 
 # ── get_position_data ──────────────────────────────────────────────────────────

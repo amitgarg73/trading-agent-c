@@ -16,9 +16,9 @@ from trace.logger import TraceLogger
 _ET = pytz.timezone("America/New_York")
 
 
-def _execute_trades(trades: list[dict], session_id: str) -> None:
+def _execute_trades(trades: list[dict], session_id: str, trail_pct: float) -> None:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
-    from core.alpaca import submit_bracket_order
+    from core.alpaca import submit_bracket_order, submit_trailing_stop
     from core.db import get_client
     today  = date.today().isoformat()
     now_   = datetime.utcnow().isoformat()
@@ -35,6 +35,11 @@ def _execute_trades(trades: list[dict], session_id: str) -> None:
         if order_id is None:
             print(f"  [premarket] {trade['ticker']} order rejected — skipping")
             continue
+
+        trail_order_id = None
+        if fill_price is not None:
+            trail_order_id = submit_trailing_stop(trade["ticker"], shares, trail_pct)
+
         client.table("c_positions").insert({
             "session_id":      session_id,
             "ticker":          trade["ticker"],
@@ -50,6 +55,7 @@ def _execute_trades(trades: list[dict], session_id: str) -> None:
             "entry_time":      now_,
             "score_at_entry":  trade.get("score_at_entry"),
             "alpaca_order_id": order_id,
+            "trail_order_id":  trail_order_id,
         }).execute()
 
 
@@ -146,7 +152,7 @@ def main() -> None:
         terminal  = result["session_meta"]["terminal_reason"]
 
         if trades:
-            _execute_trades(trades, session_id)
+            _execute_trades(trades, session_id, params.trail_pct)
 
         # V1 shadow eval — non-blocking, does not affect trades
         try:

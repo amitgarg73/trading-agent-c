@@ -13,6 +13,7 @@ PARAM_DEFAULTS: dict[str, float] = {
     "caution_position_multiplier": 0.6,
     "caution_min_score":           7.0,
     "max_sector_concentration":    0.35,
+    "trail_pct":                   0.008,
 }
 
 
@@ -27,6 +28,7 @@ class StrategyParams:
     caution_position_multiplier: float = 0.6
     caution_min_score: int = 7
     max_sector_concentration: float = 0.35
+    trail_pct: float = 0.008
 
 
 @dataclass
@@ -71,6 +73,7 @@ def load_params() -> StrategyParams:
         caution_position_multiplier=values.get("caution_position_multiplier", PARAM_DEFAULTS["caution_position_multiplier"]),
         caution_min_score=int(values.get("caution_min_score", PARAM_DEFAULTS["caution_min_score"])),
         max_sector_concentration=values.get("max_sector_concentration", PARAM_DEFAULTS["max_sector_concentration"]),
+        trail_pct=values.get("trail_pct", PARAM_DEFAULTS["trail_pct"]),
     )
 
 
