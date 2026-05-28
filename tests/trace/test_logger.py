@@ -162,27 +162,26 @@ class TestLogError:
 
 # ── log_tokens ────────────────────────────────────────────────────────────────
 
+def _usage(input_tokens=0, output_tokens=0, cache_read=0, cache_write=0):
+    m = MagicMock()
+    m.input_tokens = input_tokens
+    m.output_tokens = output_tokens
+    m.cache_read_input_tokens = cache_read
+    m.cache_creation_input_tokens = cache_write
+    return m
+
+
 class TestLogTokens:
     def test_accumulates_tokens_per_agent(self, tracer):
-        usage1 = MagicMock()
-        usage1.input_tokens = 1000
-        usage1.output_tokens = 200
-        usage2 = MagicMock()
-        usage2.input_tokens = 500
-        usage2.output_tokens = 100
-
-        tracer.log_tokens("market", usage1)
-        tracer.log_tokens("market", usage2)
+        tracer.log_tokens("market", _usage(1000, 200))
+        tracer.log_tokens("market", _usage(500, 100))
 
         assert tracer._tokens["market"]["input"] == 1500
         assert tracer._tokens["market"]["output"] == 300
 
     def test_tracks_multiple_agents_separately(self, tracer):
-        market_usage = MagicMock(input_tokens=400, output_tokens=80)
-        research_usage = MagicMock(input_tokens=3000, output_tokens=600)
-
-        tracer.log_tokens("market", market_usage)
-        tracer.log_tokens("research", research_usage)
+        tracer.log_tokens("market",   _usage(400, 80))
+        tracer.log_tokens("research", _usage(3000, 600))
 
         assert tracer._tokens["market"]["input"] == 400
         assert tracer._tokens["research"]["input"] == 3000
@@ -192,6 +191,13 @@ class TestLogTokens:
         assert tracer._tokens["risk"]["input"] == 200
         assert tracer._tokens["risk"]["output"] == 50
 
+    def test_accumulates_cache_tokens(self, tracer):
+        tracer.log_tokens("research", _usage(1000, 200, cache_read=500, cache_write=100))
+        tracer.log_tokens("research", _usage(800,  150, cache_read=400, cache_write=0))
+
+        assert tracer._tokens["research"]["cache_read"]  == 900
+        assert tracer._tokens["research"]["cache_write"] == 100
+
 
 # ── close_session ─────────────────────────────────────────────────────────────
 
@@ -200,7 +206,7 @@ class TestCloseSession:
         query = make_query([])
         mock_supabase.table.return_value = query
 
-        tracer.log_tokens("market", MagicMock(input_tokens=400, output_tokens=80))
+        tracer.log_tokens("market", _usage(400, 80))
         tracer.close_session(
             terminal_reason="converged",
             trades_proposed=3,
@@ -222,10 +228,29 @@ class TestCloseSession:
 
     def test_cost_is_positive_float(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
-        tracer.log_tokens("market", MagicMock(input_tokens=1000, output_tokens=200))
+        tracer.log_tokens("market", _usage(1000, 200))
         tracer.close_session("converged")
         row = mock_supabase.table.return_value.upsert.call_args[0][0]
         assert row["total_cost_usd"] > 0
+
+    def test_cost_breakdown_stored(self, tracer, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer.log_tokens("market",   _usage(400, 80, cache_read=200))
+        tracer.log_tokens("research", _usage(3000, 600))
+        tracer.close_session("converged")
+        row = mock_supabase.table.return_value.upsert.call_args[0][0]
+        breakdown = row["cost_breakdown"]
+        assert "market"   in breakdown
+        assert "research" in breakdown
+        assert breakdown["market"]["cache_read"] == 200
+        assert breakdown["market"]["cost_usd"] > 0
+        assert breakdown["research"]["cost_usd"] > breakdown["market"]["cost_usd"]
+
+    def test_cache_tokens_reduce_cost_vs_uncached(self, tracer, mock_supabase):
+        from trace.logger import _estimate_cost
+        cost_uncached = _estimate_cost("claude-sonnet-4-6", 10_000, 1_000)
+        cost_cached   = _estimate_cost("claude-sonnet-4-6", 0, 1_000, cache_read_tokens=10_000)
+        assert cost_cached < cost_uncached
 
     def test_session_id_in_row(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])

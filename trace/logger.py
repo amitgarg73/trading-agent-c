@@ -6,16 +6,28 @@ from uuid import uuid4
 
 import pytz
 
-# Token cost per million tokens (approximate, as of mid-2026)
+# Token cost per million tokens (Anthropic pricing, mid-2026)
+# cache_read = prompt cache hit; cache_write = cache creation (first write)
 _COST_PER_MTOK: dict[str, dict[str, float]] = {
-    "claude-haiku-4-5-20251001": {"input": 0.80,  "output": 4.00},
-    "claude-sonnet-4-6":         {"input": 3.00,  "output": 15.00},
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cache_read": 0.08,  "cache_write": 1.00},
+    "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
 }
 
 
-def _estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    rates = _COST_PER_MTOK.get(model, {"input": 3.00, "output": 15.00})
-    return (input_tokens * rates["input"] + output_tokens * rates["output"]) / 1_000_000
+def _estimate_cost(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
+    rates = _COST_PER_MTOK.get(model, {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75})
+    return (
+        input_tokens       * rates["input"]       +
+        output_tokens      * rates["output"]       +
+        cache_read_tokens  * rates["cache_read"]   +
+        cache_write_tokens * rates["cache_write"]
+    ) / 1_000_000
 
 
 class TraceLogger:
@@ -133,19 +145,26 @@ class TraceLogger:
     def log_tokens(self, agent: str, usage: Any) -> None:
         """
         Accumulate token counts for an agent. `usage` is an Anthropic Usage object
-        with .input_tokens and .output_tokens, or a plain dict with the same keys.
+        or a plain dict. Captures cache tokens for accurate cost calculation.
         Written to c_sessions at close_session().
         """
         if hasattr(usage, "input_tokens"):
-            inp, out = usage.input_tokens, usage.output_tokens
+            inp   = usage.input_tokens
+            out   = usage.output_tokens
+            cr    = getattr(usage, "cache_read_input_tokens",    0) or 0
+            cw    = getattr(usage, "cache_creation_input_tokens", 0) or 0
         else:
             inp = usage.get("input_tokens", 0)
             out = usage.get("output_tokens", 0)
+            cr  = usage.get("cache_read_input_tokens",    0) or 0
+            cw  = usage.get("cache_creation_input_tokens", 0) or 0
 
         if agent not in self._tokens:
-            self._tokens[agent] = {"input": 0, "output": 0}
-        self._tokens[agent]["input"]  += inp
-        self._tokens[agent]["output"] += out
+            self._tokens[agent] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        self._tokens[agent]["input"]       += inp
+        self._tokens[agent]["output"]      += out
+        self._tokens[agent]["cache_read"]  += cr
+        self._tokens[agent]["cache_write"] += cw
 
     def ingest_otel_span(self, span: dict) -> None:
         """
@@ -173,18 +192,28 @@ class TraceLogger:
         """Write the c_sessions summary row. Call once at end of premarket session."""
         from core.db import get_client
 
-        total_input  = sum(v["input"]  for v in self._tokens.values())
-        total_output = sum(v["output"] for v in self._tokens.values())
+        total_input  = sum(v["input"]       for v in self._tokens.values())
+        total_output = sum(v["output"]      for v in self._tokens.values())
 
-        # Sum cost across agents (need to match agent→model for accuracy; use blended rate here)
-        total_cost = sum(
-            _estimate_cost(
-                _agent_model(agent),
+        agent_costs = {}
+        for agent, v in self._tokens.items():
+            model = _agent_model(agent)
+            cost  = _estimate_cost(
+                model,
                 v["input"],
                 v["output"],
+                v.get("cache_read",  0),
+                v.get("cache_write", 0),
             )
-            for agent, v in self._tokens.items()
-        )
+            agent_costs[agent] = {
+                "model":        model,
+                "input":        v["input"],
+                "output":       v["output"],
+                "cache_read":   v.get("cache_read",  0),
+                "cache_write":  v.get("cache_write", 0),
+                "cost_usd":     round(cost, 6),
+            }
+        total_cost = sum(a["cost_usd"] for a in agent_costs.values())
 
         completed_at = datetime.utcnow()
         latency_ms = int((completed_at - self._started_at).total_seconds() * 1000)
@@ -199,6 +228,7 @@ class TraceLogger:
             "total_tokens_input":  total_input,
             "total_tokens_output": total_output,
             "total_cost_usd":      round(total_cost, 6),
+            "cost_breakdown":      agent_costs,
             "total_latency_ms":    latency_ms,
             "trades_proposed":     trades_proposed,
             "trades_approved":     trades_approved,

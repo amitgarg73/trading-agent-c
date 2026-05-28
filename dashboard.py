@@ -106,7 +106,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["Overview", "P&L", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings"],
+        ["Overview", "P&L", "Costs", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -333,6 +333,101 @@ elif page == "P&L":
         c1.metric("Trades",   total)
         c2.metric("Win Rate", f"{wins/total:.0%}" if total else "—")
         c3.metric("Total P&L", f"${total_closed_pnl:+,.2f}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: COSTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "Costs":
+    import pandas as pd
+
+    st.header("Claude API Cost Tracking")
+
+    sessions = q("c_sessions", order="-date", limit=60)
+
+    if not sessions:
+        st.info("No sessions yet — costs will appear after the first premarket run")
+    else:
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        total_cost   = sum(s.get("total_cost_usd") or 0 for s in sessions)
+        session_count = len(sessions)
+        avg_cost     = total_cost / session_count if session_count else 0
+        days         = len({s["date"] for s in sessions})
+        daily_avg    = total_cost / days if days else 0
+
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Total Spent",      f"${total_cost:.4f}")
+        k2.metric("Sessions",         session_count)
+        k3.metric("Avg per Session",  f"${avg_cost:.4f}")
+        k4.metric("Avg per Day",      f"${daily_avg:.4f}")
+
+        st.markdown("---")
+
+        # ── Daily cost bar chart ───────────────────────────────────────────────
+        st.subheader("Daily Cost (last 30 days)")
+        daily_map: dict[str, float] = {}
+        for s in sessions:
+            d = s.get("date", "")
+            daily_map[d] = daily_map.get(d, 0) + (s.get("total_cost_usd") or 0)
+
+        df_daily = pd.DataFrame(
+            [{"Date": d, "Cost ($)": round(c, 6)} for d, c in sorted(daily_map.items())]
+        ).tail(30)
+        st.bar_chart(df_daily.set_index("Date"))
+
+        st.markdown("---")
+
+        # ── Per-agent cost breakdown ───────────────────────────────────────────
+        st.subheader("Cost by Agent (all sessions)")
+        agent_totals: dict[str, dict] = {}
+        for s in sessions:
+            breakdown = s.get("cost_breakdown") or {}
+            for agent, data in breakdown.items():
+                if agent not in agent_totals:
+                    agent_totals[agent] = {"input": 0, "output": 0, "cache_read": 0,
+                                           "cache_write": 0, "cost_usd": 0.0, "model": data.get("model", "")}
+                agent_totals[agent]["input"]       += data.get("input", 0)
+                agent_totals[agent]["output"]      += data.get("output", 0)
+                agent_totals[agent]["cache_read"]  += data.get("cache_read", 0)
+                agent_totals[agent]["cache_write"] += data.get("cache_write", 0)
+                agent_totals[agent]["cost_usd"]    += data.get("cost_usd", 0.0)
+
+        if agent_totals:
+            agent_rows = [
+                {
+                    "Agent":        agent,
+                    "Model":        v["model"].split("-")[1] if "-" in v["model"] else v["model"],
+                    "Input tok":    f"{v['input']:,}",
+                    "Output tok":   f"{v['output']:,}",
+                    "Cache read":   f"{v['cache_read']:,}",
+                    "Cache write":  f"{v['cache_write']:,}",
+                    "Cost ($)":     f"${v['cost_usd']:.4f}",
+                    "% of total":   f"{v['cost_usd']/total_cost*100:.1f}%" if total_cost else "—",
+                }
+                for agent, v in sorted(agent_totals.items(), key=lambda x: -x[1]["cost_usd"])
+            ]
+            st.dataframe(agent_rows, use_container_width=True, hide_index=True)
+        else:
+            st.info("Per-agent breakdown available after next session completes")
+
+        st.markdown("---")
+
+        # ── Session cost table ─────────────────────────────────────────────────
+        st.subheader("Session History")
+        session_rows = [
+            {
+                "Date":       s.get("date", ""),
+                "Session":    str(s.get("id", ""))[:8] + "…",
+                "Terminal":   s.get("terminal_reason", ""),
+                "Tokens in":  f"{s.get('total_tokens_input', 0):,}",
+                "Tokens out": f"{s.get('total_tokens_output', 0):,}",
+                "Cost ($)":   f"${s.get('total_cost_usd') or 0:.4f}",
+                "Trades":     s.get("trades_executed", 0),
+            }
+            for s in sessions
+        ]
+        st.dataframe(session_rows, use_container_width=True, hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

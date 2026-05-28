@@ -15,6 +15,7 @@ CREATE TABLE c_sessions (
   total_tokens_input   INT NOT NULL DEFAULT 0,
   total_tokens_output  INT NOT NULL DEFAULT 0,
   total_cost_usd       FLOAT NOT NULL DEFAULT 0,
+  cost_breakdown       JSONB,
   total_latency_ms     INT NOT NULL DEFAULT 0,
   trades_proposed      INT NOT NULL DEFAULT 0,
   trades_approved      INT NOT NULL DEFAULT 0,
