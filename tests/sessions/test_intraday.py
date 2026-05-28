@@ -114,6 +114,23 @@ class TestClassifyExit:
         assert classify_exit({"order_type": "other", "side": "buy"}) == "manual"
 
 
+_ALPACA_PATCH = patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", 185.0))
+
+_INTRA_PROPOSAL = {
+    "proposals": [
+        {
+            "ticker": "AAPL",
+            "entry_price": 185.0,
+            "target_price": 192.4,
+            "stop_loss": 183.78,
+            "position_size": 3500,
+            "shares": 18,
+            "confidence": "HIGH",
+        },
+    ]
+}
+
+
 class TestPlaceIntradayTrades:
     def test_inserts_approved_trades(self, mock_supabase):
         inserted = {}
@@ -126,23 +143,12 @@ class TestPlaceIntradayTrades:
         q.insert.side_effect = capture
         mock_supabase.table.return_value = q
 
-        proposals = {
-            "proposals": [
-                {
-                    "ticker": "AAPL",
-                    "entry_price": 185.0,
-                    "target_price": 192.4,
-                    "stop_loss": 183.78,
-                    "position_size": 3500,
-                    "shares": 18,
-                    "confidence": "HIGH",
-                },
-            ]
-        }
         from sessions.intraday import _place_intraday_trades
-        count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID)
+        with _ALPACA_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID)
         assert count == 1
         assert inserted.get("entry_context") == "intraday"
+        assert inserted.get("alpaca_order_id") == "ord-intra-001"
 
     def test_skips_non_approved(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -160,7 +166,15 @@ class TestPlaceIntradayTrades:
             ]
         }
         from sessions.intraday import _place_intraday_trades
-        count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID)
+        with _ALPACA_PATCH:
+            count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID)
+        assert count == 0
+
+    def test_skips_rejected_order(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID)
         assert count == 0
 
 

@@ -51,10 +51,14 @@ class TestRunNewsAnalyst:
         assert _run_news_analyst([{"ticker": "AAPL"}]) == []
 
 
+_ALPACA_PATCH = patch("core.alpaca.submit_bracket_order", return_value=("ord-001", 185.0))
+
+
 class TestExecuteTrades:
     def test_inserts_one_row_per_trade(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
-        _execute_trades([_TRADE], _SESSION_ID)
+        with _ALPACA_PATCH:
+            _execute_trades([_TRADE], _SESSION_ID)
         assert mock_supabase.table.call_count >= 1
         table_call_args = [c[0][0] for c in mock_supabase.table.call_args_list]
         assert "c_positions" in table_call_args
@@ -70,7 +74,8 @@ class TestExecuteTrades:
         q.insert.side_effect = capture_insert
         mock_supabase.table.return_value = q
 
-        _execute_trades([_TRADE], _SESSION_ID)
+        with _ALPACA_PATCH:
+            _execute_trades([_TRADE], _SESSION_ID)
         assert inserted.get("ticker") == "AAPL"
 
     def test_shares_fallback_computed(self, mock_supabase):
@@ -88,7 +93,8 @@ class TestExecuteTrades:
         q.insert.side_effect = capture_insert
         mock_supabase.table.return_value = q
 
-        _execute_trades([trade_no_shares], _SESSION_ID)
+        with _ALPACA_PATCH:
+            _execute_trades([trade_no_shares], _SESSION_ID)
         assert inserted.get("shares") == int(3500 / 185.0)
 
     def test_status_is_open(self, mock_supabase):
@@ -102,12 +108,22 @@ class TestExecuteTrades:
         q.insert.side_effect = capture_insert
         mock_supabase.table.return_value = q
 
-        _execute_trades([_TRADE], _SESSION_ID)
+        with _ALPACA_PATCH:
+            _execute_trades([_TRADE], _SESSION_ID)
         assert inserted.get("status") == "open"
+
+    def test_skips_rejected_order(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
+            _execute_trades([_TRADE], _SESSION_ID)
+        insert_calls = [c for c in mock_supabase.table.call_args_list
+                        if c[0][0] == "c_positions"]
+        assert len(insert_calls) == 0
 
     def test_no_inserts_for_empty_trades(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
-        _execute_trades([], _SESSION_ID)
+        with _ALPACA_PATCH:
+            _execute_trades([], _SESSION_ID)
         mock_supabase.table.assert_not_called()
 
 

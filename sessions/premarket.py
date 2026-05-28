@@ -16,27 +16,39 @@ _ET = pytz.timezone("America/New_York")
 
 
 def _execute_trades(trades: list[dict], session_id: str) -> None:
-    """Phase 0: write approved trades to c_positions (no broker calls)."""
+    """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
+    from core.alpaca import submit_bracket_order
     from core.db import get_client
-    today = date.today().isoformat()
-    now_  = datetime.utcnow().isoformat()
+    today  = date.today().isoformat()
+    now_   = datetime.utcnow().isoformat()
     client = get_client()
     for trade in trades:
         shares = trade.get("shares") or int(trade["position_size"] / trade["entry_price"])
+        order_id, fill_price = submit_bracket_order(
+            ticker=trade["ticker"],
+            shares=shares,
+            entry_price=trade["entry_price"],
+            target_price=trade["target_price"],
+            stop_price=trade["stop_loss"],
+        )
+        if order_id is None:
+            print(f"  [premarket] {trade['ticker']} order rejected — skipping")
+            continue
         client.table("c_positions").insert({
-            "session_id":    session_id,
-            "ticker":        trade["ticker"],
-            "action":        "BUY",
-            "entry_price":   trade["entry_price"],
-            "target_price":  trade["target_price"],
-            "stop_loss":     trade["stop_loss"],
-            "position_size": trade["position_size"],
-            "shares":        shares,
-            "confidence":    trade["confidence"],
-            "status":        "open",
-            "open_date":     today,
-            "entry_time":    now_,
-            "score_at_entry": trade.get("score_at_entry"),
+            "session_id":      session_id,
+            "ticker":          trade["ticker"],
+            "action":          "BUY",
+            "entry_price":     fill_price or trade["entry_price"],
+            "target_price":    trade["target_price"],
+            "stop_loss":       trade["stop_loss"],
+            "position_size":   trade["position_size"],
+            "shares":          shares,
+            "confidence":      trade["confidence"],
+            "status":          "open",
+            "open_date":       today,
+            "entry_time":      now_,
+            "score_at_entry":  trade.get("score_at_entry"),
+            "alpaca_order_id": order_id,
         }).execute()
 
 

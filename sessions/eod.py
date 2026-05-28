@@ -71,7 +71,7 @@ def get_open_positions(session_id: str) -> list[dict]:
     rows = (
         get_client()
         .table("c_positions")
-        .select("id,ticker,shares,entry_time")
+        .select("id,ticker,shares,entry_price,entry_time")
         .eq("session_id", session_id)
         .eq("status", "open")
         .eq("open_date", date.today().isoformat())
@@ -83,24 +83,35 @@ def get_open_positions(session_id: str) -> list[dict]:
 
 def force_close_positions(session_id: str) -> int:
     """
-    Phase 0: mark open positions as eod_forced with realized_pnl=0.
-    Phase 1: submit market sell orders via Alpaca, then poll for fills.
+    Cancel open bracket orders, then market-close any remaining positions via Alpaca.
+    Updates c_positions with actual fill prices and realized P&L.
     Returns count of positions force-closed.
     """
+    from core.alpaca import cancel_all_orders, close_all_strategy_positions
     from core.db import get_client
     positions = get_open_positions(session_id)
     if not positions:
         return 0
-    today = date.today().isoformat()
-    now_  = datetime.utcnow().isoformat()
+
+    cancel_all_orders()
+    closed = close_all_strategy_positions()
+    fills  = {r["ticker"]: r.get("fill_price") for r in closed}
+
+    today  = date.today().isoformat()
+    now_   = datetime.utcnow().isoformat()
     client = get_client()
     for pos in positions:
+        fill_price  = fills.get(pos["ticker"])
+        realized    = None
+        if fill_price:
+            entry = pos.get("entry_price") or 0.0
+            realized = round((fill_price - float(entry)) * int(pos["shares"]), 2)
         client.table("c_positions").update({
             "status":       "closed",
             "exit_reason":  "eod_forced",
             "close_date":   today,
             "close_time":   now_,
-            "realized_pnl": 0.0,
+            "realized_pnl": realized or 0.0,
         }).eq("id", pos["id"]).execute()
     return len(positions)
 

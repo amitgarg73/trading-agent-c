@@ -115,12 +115,66 @@ def classify_exit(fill_details: dict) -> str:
     return "manual"
 
 
+def _sync_positions(session_id: str) -> None:
+    """
+    Sync open positions from Alpaca into c_positions:
+    - updates unrealized_pnl with live data
+    - marks positions closed if Alpaca no longer holds them (bracket exit fired)
+    """
+    from core.alpaca import get_open_alpaca_tickers, get_position_data, get_order_fill
+    from core.db import get_client
+    db = get_client()
+
+    rows = (
+        db.table("c_positions")
+        .select("id,ticker,alpaca_order_id,entry_price,shares")
+        .eq("session_id", session_id)
+        .eq("status", "open")
+        .eq("open_date", date.today().isoformat())
+        .execute()
+        .data
+    ) or []
+
+    if not rows:
+        return
+
+    alpaca_tickers = get_open_alpaca_tickers()
+
+    for pos in rows:
+        ticker   = pos["ticker"]
+        order_id = pos.get("alpaca_order_id")
+
+        if ticker in alpaca_tickers:
+            data = get_position_data(ticker)
+            if data:
+                db.table("c_positions").update({
+                    "entry_price": data["current_price"],  # reuse field as latest price
+                }).eq("id", pos["id"]).execute()
+        elif order_id:
+            # Not in Alpaca — bracket leg fired; fetch fill details
+            fill_price, exit_reason = get_order_fill(order_id)
+            if fill_price:
+                entry     = float(pos.get("entry_price") or 0)
+                shares    = int(pos.get("shares") or 0)
+                realized  = round((fill_price - entry) * shares, 2)
+                now_      = datetime.utcnow().isoformat()
+                db.table("c_positions").update({
+                    "status":       "closed",
+                    "exit_reason":  exit_reason or "unknown",
+                    "close_date":   date.today().isoformat(),
+                    "close_time":   now_,
+                    "realized_pnl": realized,
+                }).eq("id", pos["id"]).execute()
+                print(f"  [intraday] {ticker} closed via {exit_reason} @ ${fill_price} P&L ${realized:+.2f}")
+
+
 def _place_intraday_trades(
     proposals: dict,
     approved_tickers: set[str],
     session_id: str,
 ) -> int:
-    """Phase 0: write approved intraday trades to c_positions."""
+    """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
+    from core.alpaca import submit_bracket_order
     from core.db import get_client
     today = date.today().isoformat()
     now_  = datetime.utcnow().isoformat()
@@ -128,21 +182,32 @@ def _place_intraday_trades(
     for p in proposals.get("proposals", []):
         if p["ticker"] not in approved_tickers:
             continue
-        shares = p.get("shares") or int(p["position_size"] / p["entry_price"])
+        shares   = p.get("shares") or int(p["position_size"] / p["entry_price"])
+        order_id, fill_price = submit_bracket_order(
+            ticker=p["ticker"],
+            shares=shares,
+            entry_price=p["entry_price"],
+            target_price=p["target_price"],
+            stop_price=p["stop_loss"],
+        )
+        if order_id is None:
+            print(f"  [intraday] {p['ticker']} order rejected — skipping")
+            continue
         get_client().table("c_positions").insert({
-            "session_id":    session_id,
-            "ticker":        p["ticker"],
-            "action":        "BUY",
-            "entry_price":   p["entry_price"],
-            "target_price":  p["target_price"],
-            "stop_loss":     p["stop_loss"],
-            "position_size": p["position_size"],
-            "shares":        shares,
-            "confidence":    p["confidence"],
-            "status":        "open",
-            "open_date":     today,
-            "entry_time":    now_,
-            "entry_context": "intraday",
+            "session_id":      session_id,
+            "ticker":          p["ticker"],
+            "action":          "BUY",
+            "entry_price":     fill_price or p["entry_price"],
+            "target_price":    p["target_price"],
+            "stop_loss":       p["stop_loss"],
+            "position_size":   p["position_size"],
+            "shares":          shares,
+            "confidence":      p["confidence"],
+            "status":          "open",
+            "open_date":       today,
+            "entry_time":      now_,
+            "entry_context":   "intraday",
+            "alpaca_order_id": order_id,
         }).execute()
         count += 1
     return count
@@ -178,7 +243,7 @@ def main() -> None:
     params = load_params()
     tracer = TraceLogger(session_id)
 
-    # Phase 0: position sync is DB-only (no Alpaca calls needed)
+    _sync_positions(session_id)
 
     daily_pnl   = get_daily_pnl(session_id)
     goal_status = evaluate_goals(daily_pnl)
