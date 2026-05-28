@@ -10,6 +10,7 @@ from sessions.intraday import (
     count_open_positions,
     get_daily_pnl,
     get_investigated_tickers,
+    get_last_entry_scan_time,
     get_today_session_id,
 )
 from tests.conftest import make_query
@@ -68,6 +69,35 @@ class TestGetInvestigatedTickers:
         mock_supabase.table.return_value = make_query(rows)
         result = get_investigated_tickers(_SESSION_ID)
         assert None not in result
+
+
+class TestGetLastEntryScanTime:
+    def test_returns_none_when_no_scan_decisions(self, mock_supabase):
+        rows = [{"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"}]
+        mock_supabase.table.return_value = make_query(rows)
+        assert get_last_entry_scan_time(_SESSION_ID) is None
+
+    def test_returns_datetime_for_scan_outcome(self, mock_supabase):
+        rows = [
+            {"created_at": "2026-05-27T14:30:00", "outcome": "intraday_entries_placed"},
+            {"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"},
+        ]
+        mock_supabase.table.return_value = make_query(rows)
+        result = get_last_entry_scan_time(_SESSION_ID)
+        assert result == datetime(2026, 5, 27, 14, 30, 0)
+
+    def test_returns_most_recent_scan_outcome(self, mock_supabase):
+        rows = [
+            {"created_at": "2026-05-27T15:00:00", "outcome": "no_intraday_candidates"},
+            {"created_at": "2026-05-27T14:00:00", "outcome": "intraday_all_rejected"},
+        ]
+        mock_supabase.table.return_value = make_query(rows)
+        result = get_last_entry_scan_time(_SESSION_ID)
+        assert result == datetime(2026, 5, 27, 15, 0, 0)
+
+    def test_returns_none_when_no_rows(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        assert get_last_entry_scan_time(_SESSION_ID) is None
 
 
 class TestClassifyExit:
@@ -222,6 +252,33 @@ class TestIntradayMain:
             main()
         assert "Lock-in mode" in capsys.readouterr().out
 
+    def test_skips_when_entry_scan_too_recent(self, mock_supabase, capsys):
+        import pytz
+        from datetime import timedelta
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 10, 30, tzinfo=_ET)
+        recent_scan = datetime.utcnow() - timedelta(minutes=20)
+        with patch("sessions.intraday.is_trading_day", return_value=True), \
+             patch("sessions.intraday.datetime") as mock_dt, \
+             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.intraday.load_agent_config",
+                   return_value={"enable_intraday_entries": True,
+                                 "intraday_entry_min_interval_mins": 55}), \
+             patch("sessions.intraday.load_params", return_value=self._mock_params()), \
+             patch("sessions.intraday.get_daily_pnl", return_value=0.0), \
+             patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
+             patch("sessions.intraday.get_last_entry_scan_time", return_value=recent_scan), \
+             patch("sessions.intraday.TraceLogger") as mock_tracer_cls:
+            mock_dt.now.return_value = fake_now
+            mock_dt.utcnow.return_value = datetime.utcnow()
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_tracer_cls.return_value = MagicMock()
+            from sessions.intraday import main
+            main()
+        assert "too recent" in capsys.readouterr().out
+
     def test_entries_disabled_exits_cleanly(self, mock_supabase, capsys):
         import pytz
         _ET = pytz.timezone("America/New_York")
@@ -270,6 +327,7 @@ class TestIntradayMain:
              patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
              patch("sessions.intraday.count_open_positions", return_value=0), \
              patch("sessions.intraday.get_investigated_tickers", return_value=[]), \
+             patch("sessions.intraday.get_last_entry_scan_time", return_value=None), \
              patch("agents.research_agent.run_research_agent", return_value=proposals), \
              patch("agents.risk_agent.run_risk_agent", return_value=verdicts), \
              patch("sessions.intraday._place_intraday_trades", return_value=1) as mock_place, \

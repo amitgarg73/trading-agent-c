@@ -16,6 +16,8 @@ _POLL_START  = time(9, 15)
 _POLL_END    = time(15, 50)
 _ENTRY_CLOSE = time(13, 0)
 
+_SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected", "intraday_entries_placed"}
+
 
 def get_today_session_id() -> Optional[str]:
     """Return today's premarket session_id from c_sessions, or None."""
@@ -79,6 +81,28 @@ def get_investigated_tickers(session_id: str) -> list[str]:
         .data
     ) or []
     return list({r["entity_id"] for r in rows if r.get("entity_id")})
+
+
+def get_last_entry_scan_time(session_id: str) -> Optional[datetime]:
+    """Return UTC datetime of the last intraday Research Agent scan, or None."""
+    from core.db import get_client
+    rows = (
+        get_client()
+        .table("c_traces")
+        .select("created_at, outcome")
+        .eq("session_id", session_id)
+        .eq("step_type", "decision")
+        .order("created_at", desc=True)
+        .execute()
+        .data
+    ) or []
+    for row in rows:
+        if row.get("outcome") in _SCAN_OUTCOMES:
+            ts = row["created_at"]
+            if isinstance(ts, str):
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+            return ts
+    return None
 
 
 def classify_exit(fill_details: dict) -> str:
@@ -170,11 +194,21 @@ def main() -> None:
         print(f"[intraday] P&L floor hit ({daily_pnl:.2f}). No new entries.")
         return
 
-    if not config.get("enable_intraday_entries", False):
+    if not config.get("enable_intraday_entries", True):
         tracer.log_decision("orchestrator", "normal_no_new_entries",
                             detail={"daily_pnl": daily_pnl})
         print(f"[intraday] Poll complete. P&L {daily_pnl:.2f}. Entries disabled.")
         return
+
+    min_interval = config.get("intraday_entry_min_interval_mins", 55)
+    last_scan = get_last_entry_scan_time(session_id)
+    if last_scan is not None:
+        elapsed_mins = (datetime.utcnow() - last_scan).total_seconds() / 60
+        if elapsed_mins < min_interval:
+            tracer.log_decision("orchestrator", "entry_scan_too_recent",
+                                detail={"elapsed_mins": round(elapsed_mins, 1), "min_interval": min_interval})
+            print(f"[intraday] Entry scan too recent ({elapsed_mins:.0f}m ago, min {min_interval}m). Skipping.")
+            return
 
     if now_t >= _ENTRY_CLOSE:
         tracer.log_decision("orchestrator", "past_entry_window", detail={"time": str(now_t)})

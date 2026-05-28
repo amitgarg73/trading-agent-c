@@ -12,11 +12,11 @@ and optionally trigger Research Agent for new entries when capacity is available
 
 The intraday session is a polling service, not a decision-making agent. Its primary
 job is position hygiene: detecting bracket exits that happened between polls and
-recording them. Research Agent is invoked only when explicitly enabled via c_agent_config
-and only before 1:00 PM ET.
+recording them. Research Agent runs at most once per hour (enforced by
+`intraday_entry_min_interval_mins = 55`) to scan for additional opportunities, but
+only before 1:00 PM ET.
 
-This keeps intraday cost low (most 15-min polls cost $0 in API calls) and avoids
-over-trading by limiting new entries to the morning window.
+Most 15-min polls cost $0 in API calls — only the hourly scan polls Claude.
 
 ---
 
@@ -88,9 +88,15 @@ Every 15 min GitHub Actions fires strategy_c_intraday.yml
      exit.  (Extra caution gate hit. No new entries today.)
 
 8. NEW ENTRY CHECK (conditional)
-   If NOT config.get("enable_intraday_entries", False):
+   If NOT config.get("enable_intraday_entries", True):
      log_status("normal_no_new_entries", daily_pnl=daily_pnl)
      exit.
+
+   min_interval = config.get("intraday_entry_min_interval_mins", 55)
+   last_scan = get_last_entry_scan_time(session_id)  # queries c_traces
+   If last_scan is not None AND (now_utc - last_scan).minutes < min_interval:
+     log_status("entry_scan_too_recent", elapsed_mins=..., min_interval=...)
+     exit.  (Hourly cadence gate — Research Agent ran less than 55 min ago.)
 
    If current_time_et.time() >= NEW_ENTRY_WINDOW_END:
      log_status("past_entry_window", current_time=current_time_et)
@@ -213,9 +219,10 @@ This avoids chasing weaker setups when the best candidates have already been eva
 
 | config_key | default | description |
 |---|---|---|
-| `enable_intraday_entries` | false | Master toggle for new intraday entries |
+| `enable_intraday_entries` | true | Master toggle for new intraday entries |
+| `intraday_entry_min_interval_mins` | 55 | Min minutes between entry scans — enforces hourly cadence |
 | `intraday_min_score_bonus` | 1 | Extra score required above strategy_min_score |
-| `intraday_max_new_positions` | 2 | Cap on new positions per intraday poll |
+| `intraday_max_new_positions` | 2 | Cap on new positions per scan |
 | `intraday_entry_window_end` | "13:00" | No new entries after this time (ET) |
 | `trading_days` | ["MON","TUE","WED","THU","FRI"] | Which days to run |
 
