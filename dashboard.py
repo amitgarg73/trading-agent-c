@@ -84,7 +84,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["Overview", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings"],
+        ["Overview", "P&L", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -180,6 +180,137 @@ if page == "Overview":
         st.dataframe(rows, use_container_width=True, hide_index=True)
     else:
         st.info("No sessions yet")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: P&L
+# ══════════════════════════════════════════════════════════════════════════════
+
+elif page == "P&L":
+    st.header("P&L Dashboard")
+
+    # ── Alpaca account equity ─────────────────────────────────────────────────
+    api_key    = os.environ.get("ALPACA_API_KEY_ID_C", "")
+    api_secret = os.environ.get("ALPACA_API_SECRET_KEY_C", "")
+
+    col_eq, col_bp, col_cash = st.columns(3)
+    if api_key and api_secret:
+        try:
+            from alpaca.trading.client import TradingClient
+            _tc   = TradingClient(api_key, api_secret, paper=True)
+            _acct = _tc.get_account()
+            equity       = round(float(_acct.equity), 2)
+            buying_power = round(float(_acct.buying_power), 2)
+            cash         = round(float(_acct.cash), 2)
+            start_equity = 100_000.0
+            total_pnl    = round(equity - start_equity, 2)
+            col_eq.metric("Account Equity",  f"${equity:,.2f}",
+                          delta=f"${total_pnl:+,.2f} vs start")
+            col_bp.metric("Buying Power",    f"${buying_power:,.2f}")
+            col_cash.metric("Cash",          f"${cash:,.2f}")
+        except Exception as e:
+            col_eq.warning(f"Alpaca unavailable: {e}")
+    else:
+        col_eq.info("Set ALPACA_API_KEY_ID_C + ALPACA_API_SECRET_KEY_C to see live equity")
+
+    st.markdown("---")
+
+    # ── Daily P&L bar chart ───────────────────────────────────────────────────
+    st.subheader("Daily P&L (last 30 days)")
+    perf_history = q("c_daily_performance", order="-date", limit=30)
+    if perf_history:
+        import pandas as pd
+        df_perf = pd.DataFrame([
+            {"Date": r["date"], "P&L": r.get("realized_pnl", 0.0)}
+            for r in reversed(perf_history)
+        ])
+        colors = ["#3fb950" if v >= 0 else "#f85149" for v in df_perf["P&L"]]
+        st.bar_chart(df_perf.set_index("Date")["P&L"])
+
+        # Summary stats
+        s1, s2, s3, s4 = st.columns(4)
+        days_traded = len(df_perf)
+        winning     = (df_perf["P&L"] > 0).sum()
+        total_pnl_db = df_perf["P&L"].sum()
+        avg_daily    = df_perf["P&L"].mean()
+        s1.metric("Days Traded",   days_traded)
+        s2.metric("Winning Days",  f"{winning}/{days_traded}")
+        s3.metric("Total P&L",     f"${total_pnl_db:+,.2f}")
+        s4.metric("Avg Daily P&L", f"${avg_daily:+,.2f}")
+    else:
+        st.info("No performance history yet — runs after first EOD session")
+
+    st.markdown("---")
+
+    # ── Open positions with live unrealized P&L ───────────────────────────────
+    st.subheader("Open Positions")
+    open_positions = q("c_positions", filters={"status": "open"})
+    if not open_positions:
+        st.info("No open positions")
+    else:
+        live_pnl = {}
+        if api_key and api_secret:
+            try:
+                alpaca_positions = _tc.get_all_positions()
+                live_pnl = {p.symbol: round(float(p.unrealized_pl), 2)
+                            for p in alpaca_positions}
+            except Exception:
+                pass
+
+        rows = []
+        for p in open_positions:
+            ticker    = p["ticker"]
+            entry     = p.get("entry_price", 0.0)
+            target    = p.get("target_price", 0.0)
+            stop      = p.get("stop_loss", 0.0)
+            shares    = p.get("shares", 0)
+            unr_pnl   = live_pnl.get(ticker)
+            rows.append({
+                "Ticker":        ticker,
+                "Shares":        shares,
+                "Entry":         f"${entry:.2f}",
+                "Target":        f"${target:.2f}",
+                "Stop":          f"${stop:.2f}",
+                "Unrealized P&L": f"${unr_pnl:+.2f}" if unr_pnl is not None else "—",
+                "Order ID":      (p.get("alpaca_order_id") or "")[:12] + "…" if p.get("alpaca_order_id") else "—",
+            })
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+
+    # ── Closed trades (last 30 days) ──────────────────────────────────────────
+    st.subheader("Closed Trades (last 30 days)")
+    cutoff = (date.today() - timedelta(days=30)).isoformat()
+    closed = q("c_positions",
+               filters={"status": "closed"},
+               order="-close_date",
+               limit=100)
+    closed = [r for r in closed if (r.get("close_date") or "") >= cutoff]
+
+    if not closed:
+        st.info("No closed trades in the last 30 days")
+    else:
+        trade_rows = []
+        for r in closed:
+            pnl = r.get("realized_pnl") or 0.0
+            trade_rows.append({
+                "Date":      r.get("close_date", ""),
+                "Ticker":    r["ticker"],
+                "Shares":    r.get("shares", ""),
+                "Entry":     f"${r.get('entry_price', 0):.2f}",
+                "P&L":       f"${pnl:+.2f}",
+                "Exit":      r.get("exit_reason", ""),
+                "Context":   r.get("entry_context", "premarket"),
+            })
+        st.dataframe(trade_rows, use_container_width=True, hide_index=True)
+
+        wins  = sum(1 for r in closed if (r.get("realized_pnl") or 0) > 0)
+        total = len(closed)
+        total_closed_pnl = sum(r.get("realized_pnl") or 0 for r in closed)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Trades",   total)
+        c2.metric("Win Rate", f"{wins/total:.0%}" if total else "—")
+        c3.metric("Total P&L", f"${total_closed_pnl:+,.2f}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
