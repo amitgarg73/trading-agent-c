@@ -14,6 +14,10 @@ from tests.conftest import make_query
 
 _SESSION_ID = "sess-pre-0001"
 
+_V1_REPORT = {"decision": "GO", "max_positions": 10, "bias": "BULLISH", "summary": "Clean open."}
+_V2_REPORT = {"decision": "GO", "max_positions": 8, "bias": "BULLISH",
+              "confidence": "MEDIUM", "key_factors": [], "summary": "Looks OK.", "circuit_breaker": None}
+
 _TRADE = {
     "ticker": "AAPL",
     "entry_price": 185.0,
@@ -187,6 +191,12 @@ class TestPremarketMain:
         mock_alert.assert_called_once()
         assert "Suspended" in mock_alert.call_args[0][0]
 
+    _SHADOW_PATCHES = (
+        patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT),
+        patch("sessions.premarket._log_market_eval"),
+        patch("scanner.scanner.run_scanner", return_value=5),
+    )
+
     def test_runs_pipeline_and_executes_trades(self, mock_supabase, capsys):
         mock_supabase.table.return_value = make_query([])
         with patch("sessions.premarket.is_trading_day", return_value=True), \
@@ -194,9 +204,13 @@ class TestPremarketMain:
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
              patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
-             patch("sessions.premarket.run_premarket_pipeline", return_value=_RESULT_WITH_TRADES), \
+             patch("sessions.premarket.run_premarket_pipeline",
+                   return_value={**_RESULT_WITH_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades") as mock_exec, \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
+             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket._log_market_eval"), \
+             patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert"):
             mock_tracer = MagicMock()
             mock_tracer_cls.return_value = mock_tracer
@@ -210,9 +224,13 @@ class TestPremarketMain:
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
              patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
-             patch("sessions.premarket.run_premarket_pipeline", return_value=_RESULT_NO_TRADES), \
+             patch("sessions.premarket.run_premarket_pipeline",
+                   return_value={**_RESULT_NO_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades") as mock_exec, \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
+             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket._log_market_eval"), \
+             patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert"):
             mock_tracer = MagicMock()
             mock_tracer_cls.return_value = mock_tracer
@@ -226,9 +244,13 @@ class TestPremarketMain:
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
              patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
-             patch("sessions.premarket.run_premarket_pipeline", return_value=_RESULT_NO_TRADES), \
+             patch("sessions.premarket.run_premarket_pipeline",
+                   return_value={**_RESULT_NO_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades"), \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
+             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket._log_market_eval"), \
+             patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert") as mock_alert:
             mock_tracer = MagicMock()
             mock_tracer_cls.return_value = mock_tracer
@@ -245,6 +267,7 @@ class TestPremarketMain:
              patch("sessions.premarket.run_premarket_pipeline",
                    side_effect=RuntimeError("boom")), \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
+             patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert") as mock_alert:
             mock_tracer = MagicMock()
             mock_tracer_cls.return_value = mock_tracer

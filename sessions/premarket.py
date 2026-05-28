@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import pytz
 
+from agents.market_agent import run_market_agent as run_market_agent_v1
 from agents.orchestrator import run_premarket_pipeline
 from core.agent_config import is_trading_day, load_agent_config
 from core.alerts import send_alert
@@ -50,6 +51,32 @@ def _execute_trades(trades: list[dict], session_id: str) -> None:
             "score_at_entry":  trade.get("score_at_entry"),
             "alpaca_order_id": order_id,
         }).execute()
+
+
+def _log_market_eval(session_id: str, v1: dict, v2: dict) -> None:
+    """Persist side-by-side V1 (baseline) vs V2 (shadow) market agent results."""
+    from core.db import get_client
+    try:
+        row = {
+            "eval_date":          date.today().isoformat(),
+            "session_id":         session_id,
+            "v1_decision":        v1.get("decision", "SKIP"),
+            "v1_max_positions":   v1.get("max_positions"),
+            "v1_bias":            v1.get("bias"),
+            "v1_summary":         v1.get("summary"),
+            "v2_decision":        v2.get("decision", "SKIP"),
+            "v2_max_positions":   v2.get("max_positions"),
+            "v2_bias":            v2.get("bias"),
+            "v2_confidence":      v2.get("confidence"),
+            "v2_key_factors":     v2.get("key_factors") or [],
+            "v2_summary":         v2.get("summary"),
+            "v2_circuit_breaker": v2.get("circuit_breaker"),
+            "decisions_agree":    v1.get("decision") == v2.get("decision"),
+            "v1_more_aggressive": (v1.get("max_positions") or 0) > (v2.get("max_positions") or 0),
+        }
+        get_client().table("c_market_evals").upsert(row).execute()
+    except Exception as e:
+        print(f"  [premarket] _log_market_eval failed (non-fatal): {e}")
 
 
 def _run_news_analyst(_candidates: list[dict]) -> list[dict]:
@@ -113,12 +140,20 @@ def main() -> None:
             )
             return
 
-        result   = run_premarket_pipeline(tracer, params)
-        trades   = result.get("trades", [])
-        terminal = result["session_meta"]["terminal_reason"]
+        result    = run_premarket_pipeline(tracer, params)
+        v2_report = result.pop("_v2_market_report", {})
+        trades    = result.get("trades", [])
+        terminal  = result["session_meta"]["terminal_reason"]
 
         if trades:
             _execute_trades(trades, session_id)
+
+        # V1 shadow eval — non-blocking, does not affect trades
+        try:
+            v1_report = run_market_agent_v1(tracer, params)
+            _log_market_eval(session_id, v1_report, v2_report)
+        except Exception as e:
+            print(f"  [premarket] Shadow eval failed (non-fatal): {e}")
             print(f"[premarket] {len(trades)} trade(s): "
                   f"{', '.join(t['ticker'] for t in trades)}")
         else:

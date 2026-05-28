@@ -8,7 +8,8 @@ from typing import Optional
 import anthropic
 
 from agents.base import parse_json_response
-from agents.market_agent import run_market_agent
+from agents.market_agent import run_market_agent as run_market_agent_v1
+from agents.market_agent_shadow import run_market_agent_shadow
 from agents.research_agent import run_research_agent
 from agents.risk_agent import run_risk_agent
 from core.params import StrategyParams
@@ -145,13 +146,15 @@ def run_premarket_pipeline(
     tracer.start_agent_span("orchestrator")
 
     # Step 1: Market Agent
-    market_report = run_market_agent(tracer, params)
+    market_report = run_market_agent_shadow(tracer, params)
     if market_report.get("decision") == "SKIP":
         tracer.log_decision(
             "orchestrator", "skip_propagated",
             detail={"skip_reason": market_report.get("skip_reason")},
         )
-        return _empty_session_output(market_report, "skip_propagated")
+        out = _empty_session_output(market_report, "skip_propagated")
+        out["_v2_market_report"] = market_report
+        return out
 
     # Step 2: Research Agent
     trade_proposals = run_research_agent(tracer, market_report, params)
@@ -166,6 +169,7 @@ def run_premarket_pipeline(
 
     if not result.get("retry_needed"):
         result.pop("retry_needed", None)
+        result["_v2_market_report"] = market_report
         tracer.log_decision(
             "orchestrator",
             result["session_meta"]["terminal_reason"],
@@ -187,6 +191,7 @@ def run_premarket_pipeline(
         tracer, loop_iteration=2
     )
     result.pop("retry_needed", None)
+    result["_v2_market_report"] = market_report
     result["session_meta"]["retry_triggered"] = True
 
     tracer.log_decision(

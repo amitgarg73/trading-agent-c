@@ -105,7 +105,7 @@ class TestRunPremarketPipeline:
         return client
 
     def test_skip_propagated_when_market_says_skip(self, tracer):
-        with patch("agents.orchestrator.run_market_agent",  return_value=_MARKET_SKIP), \
+        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_SKIP), \
              patch("agents.orchestrator.run_research_agent"), \
              patch("agents.orchestrator.run_risk_agent"), \
              patch("agents.orchestrator.anthropic.Anthropic"):
@@ -114,7 +114,7 @@ class TestRunPremarketPipeline:
         assert result["session_meta"]["terminal_reason"] == "skip_propagated"
 
     def test_research_not_called_on_skip(self, tracer):
-        with patch("agents.orchestrator.run_market_agent",   return_value=_MARKET_SKIP), \
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_SKIP), \
              patch("agents.orchestrator.run_research_agent") as mock_res, \
              patch("agents.orchestrator.run_risk_agent"), \
              patch("agents.orchestrator.anthropic.Anthropic"):
@@ -123,7 +123,7 @@ class TestRunPremarketPipeline:
 
     def test_returns_trades_on_converged(self, tracer):
         client = self._mock_synthesis(_FINAL_CONVERGED)
-        with patch("agents.orchestrator.run_market_agent",  return_value=_MARKET_REPORT), \
+        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent",return_value=_PROPOSALS), \
              patch("agents.orchestrator.run_risk_agent",    return_value=_VERDICTS_APPROVED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
@@ -134,7 +134,7 @@ class TestRunPremarketPipeline:
 
     def test_retry_needed_stripped_from_final_output(self, tracer):
         client = self._mock_synthesis(_FINAL_CONVERGED)
-        with patch("agents.orchestrator.run_market_agent",  return_value=_MARKET_REPORT), \
+        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent",return_value=_PROPOSALS), \
              patch("agents.orchestrator.run_risk_agent",    return_value=_VERDICTS_APPROVED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
@@ -149,7 +149,7 @@ class TestRunPremarketPipeline:
             # Second synthesis: converged
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
         ]
-        with patch("agents.orchestrator.run_market_agent",   return_value=_MARKET_REPORT), \
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_REJECTED) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
@@ -165,7 +165,7 @@ class TestRunPremarketPipeline:
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
         ]
-        with patch("agents.orchestrator.run_market_agent",   return_value=_MARKET_REPORT), \
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_REJECTED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
@@ -176,7 +176,7 @@ class TestRunPremarketPipeline:
 
     def test_structural_block_no_retry(self, tracer):
         client = self._mock_synthesis(_FINAL_STRUCTURAL)
-        with patch("agents.orchestrator.run_market_agent",   return_value=_MARKET_REPORT), \
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_STRUCTURAL), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
