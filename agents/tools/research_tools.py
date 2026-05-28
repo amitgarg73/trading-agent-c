@@ -284,6 +284,119 @@ def get_premarket_snapshot(tickers: list[str]) -> list[dict[str, Any]]:
         return [{"error": str(e)}]
 
 
+def get_premarket_volume(ticker: str) -> dict[str, Any]:
+    """
+    Compute total pre-market volume (4 AM–9:25 AM ET) vs 20-day avg daily volume.
+    HIGH conviction (>= 15% of avg daily) confirms the pre-market move is institutional.
+    LOW conviction (< 5%) means the move could be thin and fade at open.
+    """
+    try:
+        from core.alpaca import _dclient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        import pytz
+        from datetime import datetime, timezone, timedelta
+
+        et = pytz.timezone("America/New_York")
+        now_et = datetime.now(et)
+        pm_start = now_et.replace(hour=4, minute=0, second=0, microsecond=0)
+        pm_end   = now_et.replace(hour=9, minute=25, second=0, microsecond=0)
+        effective_end = now_et if now_et < pm_end else pm_end
+
+        pm_req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Minute,
+            start=pm_start.astimezone(timezone.utc),
+            end=effective_end.astimezone(timezone.utc),
+        )
+        pm_bars = _dclient().get_stock_bars(pm_req).data.get(ticker, [])
+        premarket_vol = int(sum(b.volume for b in pm_bars))
+
+        daily_start = (now_et - timedelta(days=30)).date()
+        daily_req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Day,
+            start=daily_start,
+        )
+        daily_bars = _dclient().get_stock_bars(daily_req).data.get(ticker, [])
+        recent = daily_bars[-20:] if len(daily_bars) >= 20 else daily_bars
+        avg_daily_vol = int(sum(b.volume for b in recent) / len(recent)) if recent else None
+
+        pct_of_daily = round(premarket_vol / avg_daily_vol * 100, 1) if avg_daily_vol else None
+        if pct_of_daily is None:
+            conviction = "unknown"
+        elif pct_of_daily >= 15:
+            conviction = "HIGH"
+        elif pct_of_daily >= 5:
+            conviction = "MODERATE"
+        else:
+            conviction = "LOW"
+
+        return {
+            "premarket_volume":  premarket_vol,
+            "avg_daily_volume":  avg_daily_vol,
+            "pct_of_avg_daily":  pct_of_daily,
+            "conviction":        conviction,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_float_short_interest(ticker: str) -> dict[str, Any]:
+    """
+    Fetch float shares, short % of float, and days-to-cover from yfinance.
+    Low float (< 20M shares) + high short interest (> 15%) = squeeze candidate.
+    Squeeze setups have asymmetric upside on positive catalysts.
+    """
+    try:
+        import yfinance as yf
+        info = yf.Ticker(ticker).info
+        float_shares   = info.get("floatShares")
+        short_pct      = info.get("shortPercentOfFloat")
+        short_ratio    = info.get("shortRatio")
+
+        float_m        = round(float_shares / 1_000_000, 1) if float_shares else None
+        short_pct_disp = round(short_pct * 100, 1) if short_pct is not None else None
+        low_float      = float_m is not None and float_m < 20
+        high_short     = short_pct is not None and short_pct > 0.15
+
+        return {
+            "float_shares_m":    float_m,
+            "short_pct_float":   short_pct_disp,
+            "short_ratio_days":  short_ratio,
+            "low_float":         low_float,
+            "squeeze_potential": low_float and high_short,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_prev_day_levels(ticker: str) -> dict[str, Any]:
+    """
+    Return previous trading day's high, low, close, and range %.
+    PDH/PDL are the most-watched intraday technical levels.
+    Price breaking above PDH on volume = bullish continuation.
+    Price below PDL = distribution, avoid entry.
+    """
+    try:
+        import yfinance as yf
+        hist = yf.Ticker(ticker).history(period="5d")
+        if len(hist) < 2:
+            return {"error": "insufficient history"}
+        prev = hist.iloc[-1]
+        pdh  = round(float(prev["High"]),  2)
+        pdl  = round(float(prev["Low"]),   2)
+        pdc  = round(float(prev["Close"]), 2)
+        return {
+            "prev_day_high":      pdh,
+            "prev_day_low":       pdl,
+            "prev_day_close":     pdc,
+            "prev_day_range_pct": round((pdh - pdl) / pdc * 100, 2) if pdc else 0.0,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_position_history(ticker: str, days: int = 30) -> dict[str, Any]:
     """Fetch recent trade history for a ticker from c_positions."""
     try:

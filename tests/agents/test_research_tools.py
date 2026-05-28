@@ -9,11 +9,14 @@ import pytest
 from agents.tools.research_tools import (
     get_atr,
     get_candidates,
+    get_float_short_interest,
     get_intraday_signals,
     get_live_price,
     get_news,
     get_position_history,
     get_premarket_snapshot,
+    get_premarket_volume,
+    get_prev_day_levels,
 )
 from tests.conftest import make_query
 
@@ -335,4 +338,122 @@ class TestGetPositionHistory:
     def test_returns_error_on_db_exception(self, mock_supabase):
         mock_supabase.table.side_effect = Exception("db error")
         result = get_position_history("AAPL")
+        assert "error" in result
+
+
+# ── get_premarket_volume ───────────────────────────────────────────────────────
+
+def _two_call_dclient(pm_bars, daily_bars):
+    resp1 = MagicMock(); resp1.data = {"AAPL": pm_bars}
+    resp2 = MagicMock(); resp2.data = {"AAPL": daily_bars}
+    client = MagicMock()
+    client.get_stock_bars.side_effect = [resp1, resp2]
+    return MagicMock(return_value=client)
+
+
+class TestGetPremarketVolume:
+    def test_high_conviction_above_15pct(self):
+        pm_bars    = [_make_bar(185.0, volume=300_000)] * 5   # 1.5M total
+        daily_bars = [_make_bar(185.0, volume=10_000_000)] * 20  # 10M avg
+        with patch("core.alpaca._dclient", _two_call_dclient(pm_bars, daily_bars)):
+            result = get_premarket_volume("AAPL")
+        assert result["conviction"] == "HIGH"
+        assert result["premarket_volume"] == 1_500_000
+
+    def test_low_conviction_below_5pct(self):
+        pm_bars    = [_make_bar(185.0, volume=10_000)] * 3    # 30K total
+        daily_bars = [_make_bar(185.0, volume=5_000_000)] * 20  # 5M avg
+        with patch("core.alpaca._dclient", _two_call_dclient(pm_bars, daily_bars)):
+            result = get_premarket_volume("AAPL")
+        assert result["conviction"] == "LOW"
+
+    def test_moderate_conviction_between_5_and_15pct(self):
+        pm_bars    = [_make_bar(185.0, volume=100_000)] * 5   # 500K total
+        daily_bars = [_make_bar(185.0, volume=5_000_000)] * 20  # 5M avg → 10%
+        with patch("core.alpaca._dclient", _two_call_dclient(pm_bars, daily_bars)):
+            result = get_premarket_volume("AAPL")
+        assert result["conviction"] == "MODERATE"
+
+    def test_returns_error_on_exception(self):
+        with patch("core.alpaca._dclient", MagicMock(side_effect=Exception("network"))):
+            result = get_premarket_volume("AAPL")
+        assert "error" in result
+
+
+# ── get_float_short_interest ───────────────────────────────────────────────────
+
+class TestGetFloatShortInterest:
+    def _mock_info(self, float_shares=None, short_pct=None, short_ratio=None):
+        info = {}
+        if float_shares is not None: info["floatShares"] = float_shares
+        if short_pct    is not None: info["shortPercentOfFloat"] = short_pct
+        if short_ratio  is not None: info["shortRatio"] = short_ratio
+        mock_t = MagicMock()
+        mock_t.info = info
+        return patch("yfinance.Ticker", return_value=mock_t)
+
+    def test_squeeze_potential_on_low_float_high_short(self):
+        with self._mock_info(float_shares=5_000_000, short_pct=0.25, short_ratio=3.5):
+            result = get_float_short_interest("AAPL")
+        assert result["squeeze_potential"] is True
+        assert result["low_float"] is True
+        assert result["float_shares_m"] == pytest.approx(5.0)
+        assert result["short_pct_float"] == pytest.approx(25.0)
+
+    def test_no_squeeze_on_large_float(self):
+        with self._mock_info(float_shares=200_000_000, short_pct=0.25):
+            result = get_float_short_interest("AAPL")
+        assert result["squeeze_potential"] is False
+        assert result["low_float"] is False
+
+    def test_no_squeeze_on_low_short_interest(self):
+        with self._mock_info(float_shares=5_000_000, short_pct=0.05):
+            result = get_float_short_interest("AAPL")
+        assert result["squeeze_potential"] is False
+
+    def test_returns_error_on_exception(self):
+        with patch("yfinance.Ticker", side_effect=Exception("network")):
+            result = get_float_short_interest("AAPL")
+        assert "error" in result
+
+
+# ── get_prev_day_levels ────────────────────────────────────────────────────────
+
+class TestGetPrevDayLevels:
+    def _mock_history(self, rows):
+        import pandas as pd
+        df = pd.DataFrame(rows, columns=["Open", "High", "Low", "Close", "Volume"])
+        mock_t = MagicMock()
+        mock_t.history.return_value = df
+        return patch("yfinance.Ticker", return_value=mock_t)
+
+    def test_returns_pdh_pdl_pdc(self):
+        rows = [
+            [183.0, 186.0, 182.5, 185.0, 1_000_000],
+            [185.0, 188.0, 184.0, 187.0, 1_200_000],
+        ]
+        with self._mock_history(rows):
+            result = get_prev_day_levels("AAPL")
+        assert result["prev_day_high"]  == pytest.approx(188.0)
+        assert result["prev_day_low"]   == pytest.approx(184.0)
+        assert result["prev_day_close"] == pytest.approx(187.0)
+
+    def test_range_pct_calculated(self):
+        rows = [
+            [183.0, 186.0, 182.5, 185.0, 1_000_000],
+            [185.0, 190.0, 180.0, 185.0, 1_000_000],  # 10pt range on 185 close
+        ]
+        with self._mock_history(rows):
+            result = get_prev_day_levels("AAPL")
+        assert result["prev_day_range_pct"] == pytest.approx(5.41, abs=0.1)
+
+    def test_returns_error_on_insufficient_history(self):
+        rows = [[185.0, 188.0, 184.0, 187.0, 1_000_000]]
+        with self._mock_history(rows):
+            result = get_prev_day_levels("AAPL")
+        assert "error" in result
+
+    def test_returns_error_on_exception(self):
+        with patch("yfinance.Ticker", side_effect=Exception("timeout")):
+            result = get_prev_day_levels("AAPL")
         assert "error" in result

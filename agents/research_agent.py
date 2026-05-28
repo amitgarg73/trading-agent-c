@@ -10,11 +10,14 @@ from agents.tools.market_tools import get_sector_rotation
 from agents.tools.research_tools import (
     get_atr,
     get_candidates,
+    get_float_short_interest,
     get_intraday_signals,
     get_live_price,
     get_news,
     get_position_history,
     get_premarket_snapshot,
+    get_premarket_volume,
+    get_prev_day_levels,
 )
 from core.params import StrategyParams
 from trace.logger import TraceLogger
@@ -44,14 +47,20 @@ Deprioritize tickers in sectors down more than 0.5% — even high scores
 in weak sectors are lower-probability setups.
 
 PHASE 2 — INVESTIGATE
-For each chosen ticker, call tools to build your evidence:
-- get_news: REQUIRED first. If blackout: true, drop this ticker immediately.
-- get_intraday_signals: is it above VWAP? outperforming SPY?
-  If response has available: false, you are running pre-market. VWAP and RS
-  data do not exist yet. Use score, pre-market move, ATR, and position history.
-- get_live_price: is the price still near the expected entry?
-- get_atr: is ATR compatible with a 0.67% stop? (above 5% is usually not)
-- get_position_history: has this ticker worked recently?
+For each chosen ticker, call tools in this order:
+- get_news: REQUIRED first. If blackout: true, drop immediately.
+- get_float_short_interest: flag squeeze setups. squeeze_potential: true on a
+  pre-market gap up = highest-priority setup regardless of score.
+- get_prev_day_levels: where is current price vs PDH/PDL?
+  Above PDH = breakout setup (bullish). Below PDL = distribution (avoid).
+  Entry near PDH with positive pre-market momentum is the strongest signal.
+- get_premarket_volume: HIGH conviction confirms the pre-market move is real.
+  LOW conviction on a big pre-market move = likely fades at open, downgrade confidence.
+- get_intraday_signals: VWAP and RS vs SPY. Returns available: false pre-market —
+  use score + pre-market move + PDH/PDL position instead.
+- get_live_price: confirm price is still near expected entry.
+- get_atr: ATR > 5% = skip. Our 0.67% stop gets hit by normal noise.
+- get_position_history: how has this ticker performed for us recently?
 
 PROPOSAL RULES
 - target_price = round(entry_price * 1.04, 2)
@@ -109,6 +118,42 @@ TOOL_SCHEMAS: list[dict] = [
         },
     },
     {
+        "name": "get_float_short_interest",
+        "description": (
+            "Fetch float shares (millions), short % of float, and days-to-cover. "
+            "squeeze_potential: true when float < 20M and short > 15% — highest priority on gap-ups."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_prev_day_levels",
+        "description": (
+            "Return previous day's high (PDH), low (PDL), and close. "
+            "Entry above PDH on volume = breakout. Entry below PDL = avoid."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_premarket_volume",
+        "description": (
+            "Pre-market volume (4 AM–9:25 AM ET) as % of 20-day avg daily volume. "
+            "HIGH (>= 15%) confirms institutional conviction. LOW (< 5%) = move may fade."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"ticker": {"type": "string"}},
+            "required": ["ticker"],
+        },
+    },
+    {
         "name": "get_news",
         "description": "Check earnings blackout and recent headlines for a ticker.",
         "input_schema": {
@@ -160,13 +205,16 @@ TOOL_SCHEMAS: list[dict] = [
 
 
 def _dispatch(name: str, inp: dict) -> dict | list:
-    if name == "get_candidates":        return get_candidates(inp.get("min_score", 5))
-    if name == "get_premarket_snapshot": return get_premarket_snapshot(inp["tickers"])
-    if name == "get_news":              return get_news(inp["ticker"])
-    if name == "get_live_price":        return get_live_price(inp["ticker"])
-    if name == "get_intraday_signals":  return get_intraday_signals(inp["ticker"])
-    if name == "get_atr":               return get_atr(inp["ticker"])
-    if name == "get_position_history":  return get_position_history(inp["ticker"], inp.get("days", 30))
+    if name == "get_candidates":           return get_candidates(inp.get("min_score", 5))
+    if name == "get_premarket_snapshot":   return get_premarket_snapshot(inp["tickers"])
+    if name == "get_float_short_interest": return get_float_short_interest(inp["ticker"])
+    if name == "get_prev_day_levels":      return get_prev_day_levels(inp["ticker"])
+    if name == "get_premarket_volume":     return get_premarket_volume(inp["ticker"])
+    if name == "get_news":                 return get_news(inp["ticker"])
+    if name == "get_live_price":           return get_live_price(inp["ticker"])
+    if name == "get_intraday_signals":     return get_intraday_signals(inp["ticker"])
+    if name == "get_atr":                  return get_atr(inp["ticker"])
+    if name == "get_position_history":     return get_position_history(inp["ticker"], inp.get("days", 30))
     return {"error": f"unknown tool: {name}"}
 
 

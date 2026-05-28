@@ -32,13 +32,19 @@ _PRICE    = {"price": 185.0, "source": "alpaca", "stale_minutes": 0}
 _SIGNALS  = {"above_vwap": True, "vwap": 183.5, "rs_vs_spy": 1.8, "today_pct_change": 0.6}
 _ATR      = {"atr_pct": 1.2, "orb_pct": 0.4}
 _HIST     = {"trades": 5, "wins": 4, "win_rate_pct": 80.0, "avg_pnl": 45.0, "last_exit": "TARGET"}
-_SNAPSHOT = [{"ticker": "AAPL", "score": 8, "scanner_price": 185.0,
-              "premarket_price": 186.85, "premarket_change_pct": 1.0}]
-_SECTOR   = [
+_SNAPSHOT  = [{"ticker": "AAPL", "score": 8, "scanner_price": 185.0,
+               "premarket_price": 186.85, "premarket_change_pct": 1.0}]
+_SECTOR    = [
     {"etf": "XLK", "name": "Technology",  "change_pct": 1.2},
     {"etf": "XLF", "name": "Financials",  "change_pct": 0.4},
     {"etf": "XLU", "name": "Utilities",   "change_pct": -0.8},
 ]
+_FLOAT     = {"float_shares_m": 15.8, "short_pct_float": 8.2, "short_ratio_days": 2.1,
+              "low_float": True, "squeeze_potential": False}
+_PREV_LVLS = {"prev_day_high": 187.5, "prev_day_low": 183.0,
+              "prev_day_close": 185.0, "prev_day_range_pct": 2.43}
+_PM_VOL    = {"premarket_volume": 450_000, "avg_daily_volume": 5_000_000,
+              "pct_of_avg_daily": 9.0, "conviction": "MODERATE"}
 
 
 def _setup_client():
@@ -61,15 +67,18 @@ def _setup_client():
 
 def _run(tracer, mock_client=None, market_report=None, rejected_context=None):
     client = mock_client or _setup_client()
-    with patch("agents.research_agent.anthropic.Anthropic", return_value=client), \
-         patch("agents.research_agent.get_candidates",        return_value=_CANDIDATES), \
-         patch("agents.research_agent.get_premarket_snapshot",return_value=_SNAPSHOT), \
-         patch("agents.research_agent.get_sector_rotation",   return_value=_SECTOR), \
-         patch("agents.research_agent.get_news",              return_value=_NEWS), \
-         patch("agents.research_agent.get_live_price",        return_value=_PRICE), \
-         patch("agents.research_agent.get_intraday_signals",  return_value=_SIGNALS), \
-         patch("agents.research_agent.get_atr",               return_value=_ATR), \
-         patch("agents.research_agent.get_position_history",  return_value=_HIST):
+    with patch("agents.research_agent.anthropic.Anthropic",      return_value=client), \
+         patch("agents.research_agent.get_candidates",            return_value=_CANDIDATES), \
+         patch("agents.research_agent.get_premarket_snapshot",    return_value=_SNAPSHOT), \
+         patch("agents.research_agent.get_sector_rotation",       return_value=_SECTOR), \
+         patch("agents.research_agent.get_float_short_interest",  return_value=_FLOAT), \
+         patch("agents.research_agent.get_prev_day_levels",       return_value=_PREV_LVLS), \
+         patch("agents.research_agent.get_premarket_volume",      return_value=_PM_VOL), \
+         patch("agents.research_agent.get_news",                  return_value=_NEWS), \
+         patch("agents.research_agent.get_live_price",            return_value=_PRICE), \
+         patch("agents.research_agent.get_intraday_signals",      return_value=_SIGNALS), \
+         patch("agents.research_agent.get_atr",                   return_value=_ATR), \
+         patch("agents.research_agent.get_position_history",      return_value=_HIST):
         return run_research_agent(
             tracer, market_report or _MARKET_REPORT,
             StrategyParams(), rejected_context=rejected_context,
@@ -102,7 +111,7 @@ class TestRunResearchAgent:
 
     def test_no_candidates_returns_empty_proposals(self, tracer):
         from unittest.mock import MagicMock
-        with patch("agents.research_agent.get_candidates", return_value=[]), \
+        with patch("agents.research_agent.get_candidates",      return_value=[]), \
              patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic"):
             result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
@@ -112,14 +121,14 @@ class TestRunResearchAgent:
     def test_no_candidates_does_not_call_claude(self, tracer):
         from unittest.mock import MagicMock
         mock_anthropic = MagicMock()
-        with patch("agents.research_agent.get_candidates", return_value=[]), \
+        with patch("agents.research_agent.get_candidates",      return_value=[]), \
              patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic", return_value=mock_anthropic):
             run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
         mock_anthropic.messages.create.assert_not_called()
 
     def test_db_error_on_candidates_returns_empty_proposals(self, tracer):
-        with patch("agents.research_agent.get_candidates", return_value=[{"error": "db timeout"}]), \
+        with patch("agents.research_agent.get_candidates",      return_value=[{"error": "db timeout"}]), \
              patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic"):
             result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
