@@ -94,21 +94,26 @@ CREATE INDEX idx_c_positions_ticker     ON c_positions(ticker, open_date);
 
 -- ── Scanner ────────────────────────────────────────────────────────────────────
 
--- Populated by the daily scanner (external process). Research Agent reads from
--- here via get_candidates(). Must have rows for today before premarket runs.
+-- Populated by scanner/scanner.py at premarket start. Research Agent reads via
+-- get_candidates(). Must have rows for today before agent pipeline runs.
 CREATE TABLE c_scan_results (
-  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id  UUID,
-  date        DATE NOT NULL,
-  ticker      TEXT NOT NULL,
-  score       INT NOT NULL,
-  price       FLOAT NOT NULL,
-  sector      TEXT,
-  created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  scan_date       DATE NOT NULL,
+  ticker          TEXT NOT NULL,
+  technical_score INT NOT NULL,
+  current_price   FLOAT NOT NULL,
+  avg_volume      BIGINT,
+  sector          TEXT,
+  rsi             FLOAT,
+  volume_ratio    FLOAT,
+  atr_pct         FLOAT,
+  above_sma20     BOOLEAN,
+  above_sma50     BOOLEAN,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_c_scan_results_date   ON c_scan_results(date DESC);
-CREATE INDEX idx_c_scan_results_score  ON c_scan_results(date, score DESC);
+CREATE INDEX idx_c_scan_results_date   ON c_scan_results(scan_date DESC);
+CREATE INDEX idx_c_scan_results_score  ON c_scan_results(scan_date, technical_score DESC);
 
 
 -- ── Adaptive Parameters ────────────────────────────────────────────────────────

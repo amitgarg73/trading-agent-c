@@ -18,7 +18,7 @@ def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
         rows = (
             get_client()
             .table("c_scan_results")
-            .select("ticker,technical_score,current_price,avg_volume")
+            .select("ticker,technical_score,current_price,avg_volume,sector,rsi,volume_ratio,atr_pct")
             .eq("scan_date", today)
             .gte("technical_score", min_score)
             .order("technical_score", desc=True)

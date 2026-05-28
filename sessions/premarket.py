@@ -87,6 +87,20 @@ def main() -> None:
     print(f"[premarket] Session {session_id} — {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
     try:
+        from scanner.scanner import run_scanner
+        print("[premarket] Running scanner...")
+        candidate_count = run_scanner(scan_date=date.today())
+        print(f"[premarket] Scanner: {candidate_count} candidates ready")
+
+        if candidate_count == 0:
+            print("[premarket] No scanner candidates today. Exiting.")
+            tracer.close_session(terminal_reason="no_candidates")
+            send_alert(
+                f"Strategy C — No Candidates {now_et.strftime('%Y-%m-%d')}",
+                "Scanner returned 0 results. Market data issue or all tickers filtered.",
+            )
+            return
+
         result   = run_premarket_pipeline(tracer, params)
         trades   = result.get("trades", [])
         terminal = result["session_meta"]["terminal_reason"]
