@@ -209,8 +209,8 @@ class TestCloseSession:
             retry_triggered=False,
         )
 
-        assert query.insert.called
-        row = query.insert.call_args[0][0]
+        assert query.upsert.called
+        row = query.upsert.call_args[0][0]
         assert row["id"] == "test-session-id-1234"
         assert row["terminal_reason"] == "converged"
         assert row["trades_proposed"] == 3
@@ -224,13 +224,13 @@ class TestCloseSession:
         mock_supabase.table.return_value = make_query([])
         tracer.log_tokens("market", MagicMock(input_tokens=1000, output_tokens=200))
         tracer.close_session("converged")
-        row = mock_supabase.table.return_value.insert.call_args[0][0]
+        row = mock_supabase.table.return_value.upsert.call_args[0][0]
         assert row["total_cost_usd"] > 0
 
     def test_session_id_in_row(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         tracer.close_session("structural_block")
-        row = mock_supabase.table.return_value.insert.call_args[0][0]
+        row = mock_supabase.table.return_value.upsert.call_args[0][0]
         assert row["id"] == "test-session-id-1234"
 
     def test_total_steps_reflects_logged_calls(self, tracer, mock_supabase):
@@ -239,7 +239,7 @@ class TestCloseSession:
         tracer.log_tool_call("market", "get_futures", {}, {})
         tracer.log_decision("orchestrator", "converged")
         tracer.close_session("converged")
-        row = mock_supabase.table.return_value.insert.call_args[0][0]
+        row = mock_supabase.table.return_value.upsert.call_args[0][0]
         assert row["total_steps"] == 3
 
 
