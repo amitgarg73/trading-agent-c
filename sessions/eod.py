@@ -71,7 +71,7 @@ def get_open_positions(session_id: str) -> list[dict]:
     rows = (
         get_client()
         .table("c_positions")
-        .select("id,ticker,shares,entry_price,entry_time")
+        .select("id,ticker,shares,entry_price,entry_time,alpaca_order_id")
         .eq("session_id", session_id)
         .eq("status", "open")
         .eq("open_date", date.today().isoformat())
@@ -114,6 +114,69 @@ def force_close_positions(session_id: str) -> int:
             "realized_pnl": realized or 0.0,
         }).eq("id", pos["id"]).execute()
     return len(positions)
+
+
+def reconcile_positions(session_id: str) -> dict:
+    """
+    Reconcile open DB positions against Alpaca bracket fills.
+    - Backfills actual entry_price where the pre-market submission returned fill=None.
+    - Closes positions whose bracket exit leg has already settled between intraday polls.
+    Returns {"entry_updated": int, "exits_synced": int, "errors": int}.
+    """
+    from core.alpaca import get_bracket_status
+    from core.db import get_client
+
+    positions = get_open_positions(session_id)
+    if not positions:
+        return {"entry_updated": 0, "exits_synced": 0, "errors": 0}
+
+    today         = date.today().isoformat()
+    now_          = datetime.utcnow().isoformat()
+    client        = get_client()
+    entry_updated = exits_synced = errors = 0
+
+    for pos in positions:
+        order_id = pos.get("alpaca_order_id")
+        if not order_id:
+            continue
+
+        status = get_bracket_status(order_id)
+        if "error" in status:
+            print(f"  [reconcile] {pos['ticker']} bracket_status error: {status['error']}")
+            errors += 1
+            continue
+
+        updates: dict = {}
+
+        if status["entry_filled"] and status["entry_price"]:
+            stored = float(pos.get("entry_price") or 0)
+            actual = status["entry_price"]
+            if abs(actual - stored) > 0.001:
+                updates["entry_price"] = actual
+                entry_updated += 1
+                print(f"  [reconcile] {pos['ticker']} entry_price {stored} → {actual}")
+
+        if status["exit_filled"] and status["exit_price"]:
+            effective_entry = updates.get("entry_price") or float(pos.get("entry_price") or 0)
+            shares          = int(pos.get("shares") or 0)
+            realized        = round(
+                (status["exit_price"] - effective_entry) * shares, 2
+            ) if effective_entry and shares else 0.0
+            updates.update({
+                "status":       "closed",
+                "exit_reason":  status["exit_reason"] or "bracket_exit_detected",
+                "close_date":   today,
+                "close_time":   now_,
+                "realized_pnl": realized,
+            })
+            exits_synced += 1
+            print(f"  [reconcile] {pos['ticker']} exit synced: "
+                  f"{status['exit_reason']} @ ${status['exit_price']}, P&L ${realized:+.2f}")
+
+        if updates:
+            client.table("c_positions").update(updates).eq("id", pos["id"]).execute()
+
+    return {"entry_updated": entry_updated, "exits_synced": exits_synced, "errors": errors}
 
 
 def compute_performance(session_id: str, trades: list[dict]) -> DailyPerformance:
@@ -229,10 +292,11 @@ def main() -> None:
     if n_forced:
         print(f"[eod] Force-closed {n_forced} position(s).")
 
-    # Phase 0: no Alpaca reconciliation needed
-    # Phase 1: reconcile_positions(session_id)
-    tracer.log_decision("orchestrator", "reconcile_skipped",
-                        detail={"phase": "0_simulation"})
+    recon = reconcile_positions(session_id)
+    tracer.log_decision("orchestrator", "reconcile_complete", detail=recon)
+    if recon["exits_synced"] or recon["entry_updated"]:
+        print(f"[eod] Reconciled: {recon['entry_updated']} entry fill(s), "
+              f"{recon['exits_synced']} bracket exit(s).")
 
     # Daily performance
     trades = get_today_trades(session_id)

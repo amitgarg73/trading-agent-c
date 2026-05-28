@@ -143,6 +143,40 @@ def submit_bracket_order(
     return str(order.id), None
 
 
+def get_bracket_status(order_id: str) -> dict:
+    """
+    Return the fill state of a bracket order: entry fill and exit leg fill.
+    Used by reconcile_positions to backfill actual entry prices and sync exits.
+    """
+    try:
+        order        = _client().get_order_by_id(order_id)
+        order_status = str(order.status).lower()
+        entry_filled = order_status in ("filled", "partially_filled")
+        entry_price  = round(float(order.filled_avg_price), 4) if order.filled_avg_price else None
+
+        exit_price = None
+        exit_reason = None
+        exit_filled = False
+        for leg in (order.legs or []):
+            if "filled" in str(leg.status).lower() and leg.filled_avg_price:
+                type_str    = str(leg.order_type).lower()
+                exit_reason = "STOP" if "stop" in type_str else "TARGET"
+                exit_price  = round(float(leg.filled_avg_price), 4)
+                exit_filled = True
+                break
+
+        return {
+            "entry_filled": entry_filled,
+            "entry_price":  entry_price,
+            "exit_filled":  exit_filled,
+            "exit_price":   exit_price,
+            "exit_reason":  exit_reason,
+            "order_status": order_status,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 def get_order_fill(order_id: str) -> tuple[Optional[float], Optional[str]]:
     """
     For a completed bracket, return (close_price, exit_reason).

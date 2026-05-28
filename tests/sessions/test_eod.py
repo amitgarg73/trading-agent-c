@@ -13,6 +13,7 @@ from sessions.eod import (
     get_open_positions,
     get_today_session_id,
     get_today_trades,
+    reconcile_positions,
     save_performance,
 )
 from tests.conftest import make_query
@@ -355,3 +356,98 @@ class TestEodMain:
             from sessions.eod import main
             main()  # must NOT raise
         mock_alert.assert_called_once()  # daily summary still sent
+
+
+# ── reconcile_positions ────────────────────────────────────────────────────────
+
+_OPEN_POS_WITH_ORDER = [
+    {
+        "id": "p1", "ticker": "AAPL", "shares": 18,
+        "entry_price": 185.0, "entry_time": "2026-05-27T09:30:00Z",
+        "alpaca_order_id": "ord-bracket-1",
+    },
+]
+
+_STATUS_ENTRY_ONLY = {
+    "entry_filled": True,  "entry_price": 185.22,
+    "exit_filled":  False, "exit_price": None,
+    "exit_reason":  None,  "order_status": "filled",
+}
+
+_STATUS_FULL_EXIT = {
+    "entry_filled": True,  "entry_price": 185.10,
+    "exit_filled":  True,  "exit_price": 192.40,
+    "exit_reason":  "TARGET", "order_status": "filled",
+}
+
+
+class TestReconcilePositions:
+    def test_returns_zeros_when_no_open_positions(self, mock_supabase):
+        with patch("sessions.eod.get_open_positions", return_value=[]):
+            result = reconcile_positions(_SESSION_ID)
+        assert result == {"entry_updated": 0, "exits_synced": 0, "errors": 0}
+        mock_supabase.table.assert_not_called()
+
+    def test_backfills_entry_price_when_fill_differs(self, mock_supabase):
+        q = make_query([])
+        mock_supabase.table.return_value = q
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_ORDER), \
+             patch("core.alpaca.get_bracket_status", return_value=_STATUS_ENTRY_ONLY):
+            result = reconcile_positions(_SESSION_ID)
+        assert result["entry_updated"] == 1
+        assert result["exits_synced"]  == 0
+
+    def test_closes_position_when_exit_leg_filled(self, mock_supabase):
+        updates_captured = {}
+
+        def capture(data):
+            updates_captured.update(data)
+            r = make_query([])
+            r.eq.return_value = r
+            return r
+
+        q = make_query([])
+        q.update.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_ORDER), \
+             patch("core.alpaca.get_bracket_status", return_value=_STATUS_FULL_EXIT):
+            result = reconcile_positions(_SESSION_ID)
+
+        assert result["exits_synced"] == 1
+        assert updates_captured.get("status")      == "closed"
+        assert updates_captured.get("exit_reason") == "TARGET"
+
+    def test_realized_pnl_calculated_from_actual_fills(self, mock_supabase):
+        # entry_price=185.10, exit=192.40, shares=18 → (192.40-185.10)*18 = $131.40
+        updates_captured = {}
+
+        def capture(data):
+            updates_captured.update(data)
+            r = make_query([])
+            r.eq.return_value = r
+            return r
+
+        q = make_query([])
+        q.update.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_ORDER), \
+             patch("core.alpaca.get_bracket_status", return_value=_STATUS_FULL_EXIT):
+            reconcile_positions(_SESSION_ID)
+
+        assert updates_captured.get("realized_pnl") == pytest.approx(131.4)
+
+    def test_counts_error_when_bracket_status_fails(self, mock_supabase):
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_ORDER), \
+             patch("core.alpaca.get_bracket_status", return_value={"error": "not found"}):
+            result = reconcile_positions(_SESSION_ID)
+        assert result["errors"] == 1
+        mock_supabase.table.assert_not_called()
+
+    def test_skips_position_without_alpaca_order_id(self, mock_supabase):
+        pos = [{**_OPEN_POS_WITH_ORDER[0], "alpaca_order_id": None}]
+        with patch("sessions.eod.get_open_positions", return_value=pos):
+            result = reconcile_positions(_SESSION_ID)
+        assert result == {"entry_updated": 0, "exits_synced": 0, "errors": 0}
+        mock_supabase.table.assert_not_called()

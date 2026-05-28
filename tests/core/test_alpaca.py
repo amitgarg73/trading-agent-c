@@ -155,6 +155,72 @@ class TestSubmitBracketOrder:
         mc.return_value.get_order_by_id.assert_not_called()
 
 
+# ── get_bracket_status ────────────────────────────────────────────────────────
+
+class TestGetBracketStatus:
+    def _leg(self, order_type, status, filled_avg_price):
+        leg = MagicMock()
+        leg.order_type       = order_type
+        leg.status           = status
+        leg.filled_avg_price = filled_avg_price
+        return leg
+
+    def test_entry_filled_true_when_order_filled(self):
+        order = _mock_order(status="filled", filled_avg_price=185.10)
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["entry_filled"] is True
+        assert result["entry_price"]  == pytest.approx(185.10)
+
+    def test_entry_filled_false_when_pending(self):
+        order = _mock_order(status="pending_new", filled_avg_price=None)
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["entry_filled"] is False
+        assert result["entry_price"]  is None
+
+    def test_exit_filled_on_target_leg(self):
+        leg   = self._leg("limit", "filled", 192.40)
+        order = _mock_order(status="filled", filled_avg_price=185.10, legs=[leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["exit_filled"] is True
+        assert result["exit_reason"] == "TARGET"
+        assert result["exit_price"]  == pytest.approx(192.40)
+
+    def test_exit_reason_stop_on_stop_leg(self):
+        leg   = self._leg("stop_limit", "filled", 183.78)
+        order = _mock_order(status="filled", filled_avg_price=185.10, legs=[leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["exit_reason"] == "STOP"
+
+    def test_no_exit_when_legs_unfilled(self):
+        leg   = self._leg("limit", "new", None)
+        order = _mock_order(status="filled", filled_avg_price=185.10, legs=[leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["exit_filled"] is False
+        assert result["exit_price"]  is None
+
+    def test_returns_error_on_exception(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.side_effect = Exception("not found")
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert "error" in result
+
+
 # ── get_order_fill ─────────────────────────────────────────────────────────────
 
 class TestGetOrderFill:
