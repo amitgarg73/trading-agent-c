@@ -27,11 +27,18 @@ _PROPOSALS = {
 _CANDIDATES = [
     {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0, "avg_volume": 50_000_000},
 ]
-_NEWS = {"blackout": False, "reason": None, "headlines": ["Strong earnings"]}
-_PRICE = {"price": 185.0, "source": "alpaca", "stale_minutes": 0}
-_SIGNALS = {"above_vwap": True, "vwap": 183.5, "rs_vs_spy": 1.8, "today_pct_change": 0.6}
-_ATR = {"atr_pct": 1.2, "orb_pct": 0.4}
-_HIST = {"trades": 5, "wins": 4, "win_rate_pct": 80.0, "avg_pnl": 45.0, "last_exit": "TARGET"}
+_NEWS     = {"blackout": False, "reason": None, "headlines": ["Strong earnings"]}
+_PRICE    = {"price": 185.0, "source": "alpaca", "stale_minutes": 0}
+_SIGNALS  = {"above_vwap": True, "vwap": 183.5, "rs_vs_spy": 1.8, "today_pct_change": 0.6}
+_ATR      = {"atr_pct": 1.2, "orb_pct": 0.4}
+_HIST     = {"trades": 5, "wins": 4, "win_rate_pct": 80.0, "avg_pnl": 45.0, "last_exit": "TARGET"}
+_SNAPSHOT = [{"ticker": "AAPL", "score": 8, "scanner_price": 185.0,
+              "premarket_price": 186.85, "premarket_change_pct": 1.0}]
+_SECTOR   = [
+    {"etf": "XLK", "name": "Technology",  "change_pct": 1.2},
+    {"etf": "XLF", "name": "Financials",  "change_pct": 0.4},
+    {"etf": "XLU", "name": "Utilities",   "change_pct": -0.8},
+]
 
 
 def _setup_client():
@@ -55,12 +62,14 @@ def _setup_client():
 def _run(tracer, mock_client=None, market_report=None, rejected_context=None):
     client = mock_client or _setup_client()
     with patch("agents.research_agent.anthropic.Anthropic", return_value=client), \
-         patch("agents.research_agent.get_candidates",       return_value=_CANDIDATES), \
-         patch("agents.research_agent.get_news",             return_value=_NEWS), \
-         patch("agents.research_agent.get_live_price",       return_value=_PRICE), \
-         patch("agents.research_agent.get_intraday_signals", return_value=_SIGNALS), \
-         patch("agents.research_agent.get_atr",              return_value=_ATR), \
-         patch("agents.research_agent.get_position_history", return_value=_HIST):
+         patch("agents.research_agent.get_candidates",        return_value=_CANDIDATES), \
+         patch("agents.research_agent.get_premarket_snapshot",return_value=_SNAPSHOT), \
+         patch("agents.research_agent.get_sector_rotation",   return_value=_SECTOR), \
+         patch("agents.research_agent.get_news",              return_value=_NEWS), \
+         patch("agents.research_agent.get_live_price",        return_value=_PRICE), \
+         patch("agents.research_agent.get_intraday_signals",  return_value=_SIGNALS), \
+         patch("agents.research_agent.get_atr",               return_value=_ATR), \
+         patch("agents.research_agent.get_position_history",  return_value=_HIST):
         return run_research_agent(
             tracer, market_report or _MARKET_REPORT,
             StrategyParams(), rejected_context=rejected_context,
@@ -94,6 +103,7 @@ class TestRunResearchAgent:
     def test_no_candidates_returns_empty_proposals(self, tracer):
         from unittest.mock import MagicMock
         with patch("agents.research_agent.get_candidates", return_value=[]), \
+             patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic"):
             result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
         assert result["proposals"] == []
@@ -103,12 +113,14 @@ class TestRunResearchAgent:
         from unittest.mock import MagicMock
         mock_anthropic = MagicMock()
         with patch("agents.research_agent.get_candidates", return_value=[]), \
+             patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic", return_value=mock_anthropic):
             run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
         mock_anthropic.messages.create.assert_not_called()
 
     def test_db_error_on_candidates_returns_empty_proposals(self, tracer):
         with patch("agents.research_agent.get_candidates", return_value=[{"error": "db timeout"}]), \
+             patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic"):
             result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
         assert result["proposals"] == []
@@ -135,3 +147,19 @@ class TestBuildUserMessage:
         caution_report = {**_MARKET_REPORT, "decision": "CAUTION"}
         msg = _build_user_message(caution_report)
         assert "CAUTION" in msg
+
+    def test_sector_rotation_leading_and_lagging_included(self):
+        msg = _build_user_message(_MARKET_REPORT, sector_rotation=_SECTOR)
+        assert "Leading" in msg
+        assert "XLK" in msg
+        assert "Lagging" in msg
+        assert "XLU" in msg
+
+    def test_no_sector_block_when_sector_rotation_empty(self):
+        msg = _build_user_message(_MARKET_REPORT, sector_rotation=[])
+        assert "Leading" not in msg
+        assert "Lagging" not in msg
+
+    def test_sector_error_skipped_gracefully(self):
+        msg = _build_user_message(_MARKET_REPORT, sector_rotation=[{"error": "timeout"}])
+        assert "Leading" not in msg

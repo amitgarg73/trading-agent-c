@@ -13,6 +13,7 @@ from agents.tools.research_tools import (
     get_live_price,
     get_news,
     get_position_history,
+    get_premarket_snapshot,
 )
 from tests.conftest import make_query
 
@@ -228,6 +229,70 @@ class TestGetAtr:
         with patch("core.alpaca._dclient", mock_dc):
             result = get_atr("AAPL")
         assert "error" in result
+
+
+# ── get_premarket_snapshot ─────────────────────────────────────────────────────
+
+def _mock_quote(ask=0.0, bid=0.0):
+    q = MagicMock()
+    q.ask_price = str(ask)
+    q.bid_price = str(bid)
+    return q
+
+
+class TestGetPremarketSnapshot:
+    def _setup(self, mock_supabase, rows, quotes_by_ticker):
+        mock_supabase.table.return_value = make_query(rows)
+        resp = MagicMock()
+        resp_data = {t: _mock_quote(**kw) for t, kw in quotes_by_ticker.items()}
+        client = MagicMock()
+        client.get_stock_latest_quote.return_value = resp_data
+        return patch("core.alpaca._dclient", MagicMock(return_value=client))
+
+    def test_change_pct_calculated_correctly(self, mock_supabase):
+        rows = [{"ticker": "AAPL", "score": 8, "price": 185.0}]
+        dc = self._setup(mock_supabase, rows, {"AAPL": {"ask": 187.035}})
+        with dc:
+            result = get_premarket_snapshot(["AAPL"])
+        assert result[0]["ticker"] == "AAPL"
+        assert result[0]["premarket_change_pct"] == pytest.approx(1.1, abs=0.05)
+
+    def test_sorted_best_to_worst(self, mock_supabase):
+        rows = [
+            {"ticker": "AAPL", "score": 8, "price": 185.0},
+            {"ticker": "MSFT", "score": 7, "price": 420.0},
+        ]
+        dc = self._setup(mock_supabase, rows, {
+            "AAPL": {"ask": 183.0},   # -1.1% (loser)
+            "MSFT": {"ask": 424.2},   # +1.0% (winner)
+        })
+        with dc:
+            result = get_premarket_snapshot(["AAPL", "MSFT"])
+        assert result[0]["ticker"] == "MSFT"
+        assert result[1]["ticker"] == "AAPL"
+
+    def test_falls_back_to_bid_when_ask_zero(self, mock_supabase):
+        rows = [{"ticker": "AAPL", "score": 8, "price": 185.0}]
+        dc = self._setup(mock_supabase, rows, {"AAPL": {"ask": 0.0, "bid": 186.0}})
+        with dc:
+            result = get_premarket_snapshot(["AAPL"])
+        assert result[0]["premarket_price"] == pytest.approx(186.0)
+
+    def test_no_price_when_ticker_not_in_quotes(self, mock_supabase):
+        rows = [{"ticker": "AAPL", "score": 8, "price": 185.0}]
+        mock_supabase.table.return_value = make_query(rows)
+        resp = MagicMock()
+        client = MagicMock()
+        client.get_stock_latest_quote.return_value = {}   # empty — no quotes
+        with patch("core.alpaca._dclient", MagicMock(return_value=client)):
+            result = get_premarket_snapshot(["AAPL"])
+        assert result[0]["premarket_price"] is None
+        assert result[0]["premarket_change_pct"] is None
+
+    def test_returns_error_on_exception(self, mock_supabase):
+        mock_supabase.table.side_effect = Exception("db down")
+        result = get_premarket_snapshot(["AAPL"])
+        assert "error" in result[0]
 
 
 # ── get_position_history ───────────────────────────────────────────────────────

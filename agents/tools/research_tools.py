@@ -226,6 +226,64 @@ def get_atr(ticker: str) -> dict[str, Any]:
         return {"error": str(e)}
 
 
+def get_premarket_snapshot(tickers: list[str]) -> list[dict[str, Any]]:
+    """
+    Fetch current pre-market quotes for a list of tickers in one Alpaca batch call.
+    Returns overnight % change vs scanner price (yesterday's close), sorted best to worst.
+    Call after get_candidates() with all returned tickers before deciding which to investigate.
+    """
+    try:
+        from core.alpaca import _dclient
+        from alpaca.data.requests import StockLatestQuoteRequest
+        from core.db import get_client
+        from datetime import date
+
+        today = date.today().isoformat()
+        rows = (
+            get_client()
+            .table("c_scan_results")
+            .select("ticker,score,price")
+            .eq("date", today)
+            .in_("ticker", tickers)
+            .execute()
+            .data
+        ) or []
+        scanner_map = {r["ticker"]: r for r in rows}
+
+        req = StockLatestQuoteRequest(symbol_or_symbols=tickers)
+        quotes = _dclient().get_stock_latest_quote(req)
+
+        result = []
+        for ticker in tickers:
+            q = quotes.get(ticker)
+            row = scanner_map.get(ticker, {})
+            scanner_price = row.get("price")
+            score = row.get("score")
+
+            premarket_price = None
+            if q:
+                ask = float(getattr(q, "ask_price", 0) or 0)
+                bid = float(getattr(q, "bid_price", 0) or 0)
+                px = ask if ask > 0 else bid
+                premarket_price = round(px, 2) if px > 0 else None
+
+            change_pct = None
+            if premarket_price and scanner_price:
+                change_pct = round((premarket_price - scanner_price) / scanner_price * 100, 2)
+
+            result.append({
+                "ticker":               ticker,
+                "score":                score,
+                "scanner_price":        scanner_price,
+                "premarket_price":      premarket_price,
+                "premarket_change_pct": change_pct,
+            })
+
+        return sorted(result, key=lambda x: (x["premarket_change_pct"] or -99), reverse=True)
+    except Exception as e:
+        return [{"error": str(e)}]
+
+
 def get_position_history(ticker: str, days: int = 30) -> dict[str, Any]:
     """Fetch recent trade history for a ticker from c_positions."""
     try:

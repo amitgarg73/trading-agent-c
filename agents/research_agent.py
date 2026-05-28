@@ -6,6 +6,7 @@ from typing import Optional
 import anthropic
 
 from agents.base import parse_json_response, run_tool_loop
+from agents.tools.market_tools import get_sector_rotation
 from agents.tools.research_tools import (
     get_atr,
     get_candidates,
@@ -13,6 +14,7 @@ from agents.tools.research_tools import (
     get_live_price,
     get_news,
     get_position_history,
+    get_premarket_snapshot,
 )
 from core.params import StrategyParams
 from trace.logger import TraceLogger
@@ -23,20 +25,30 @@ _SYSTEM = """
 You are a quantitative stock analyst. Your job is to identify the best intraday
 trading setups from today's universe and propose specific trades.
 
-You receive today's market conditions as context. Use them to calibrate your
-selectivity — on CAUTION days, only the strongest setups qualify.
+You receive today's market conditions and sector rotation as context.
+Use them to calibrate your selectivity — on CAUTION days, only the strongest
+setups qualify.
 
-PHASE 1 — SCREEN
-Call get_candidates() once. You receive ticker, score, and price only.
-Read the scores. Choose at most 5 tickers to investigate further.
-Prefer high scores (7+). Do not call any other tools yet.
+PHASE 1 — SCREEN AND SNAPSHOT
+1. Call get_candidates() once. You receive ticker, score, and price.
+2. Call get_premarket_snapshot() with ALL tickers returned. This shows
+   overnight price moves vs yesterday's close in one call.
+3. Using score AND premarket_change_pct together, select at most 10 tickers
+   to investigate. Prefer score >= 7 with positive pre-market movement.
+   On CAUTION days: score >= 8 AND premarket_change_pct > 0.3% only.
+
+SECTOR CONTEXT
+Today's sector rotation is included in your market context above.
+Prefer tickers in sectors with positive 1-day change.
+Deprioritize tickers in sectors down more than 0.5% — even high scores
+in weak sectors are lower-probability setups.
 
 PHASE 2 — INVESTIGATE
 For each chosen ticker, call tools to build your evidence:
 - get_news: REQUIRED first. If blackout: true, drop this ticker immediately.
 - get_intraday_signals: is it above VWAP? outperforming SPY?
   If response has available: false, you are running pre-market. VWAP and RS
-  data do not exist yet. Use score, ATR, news, and position history instead.
+  data do not exist yet. Use score, pre-market move, ATR, and position history.
 - get_live_price: is the price still near the expected entry?
 - get_atr: is ATR compatible with a 0.67% stop? (above 5% is usually not)
 - get_position_history: has this ticker worked recently?
@@ -46,13 +58,13 @@ PROPOSAL RULES
 - stop_loss = round(entry_price * 0.9933, 2)
 - position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
 - confidence HIGH: score >=7, above_vwap, rs_vs_spy >= 1.5
-  (pre-market: score >=8, strong ATR profile, clean news)
+  (pre-market: score >=8, premarket_change_pct > 0.5%, clean ATR and news)
 - confidence MEDIUM: score 5-6, or above_vwap with rs_vs_spy >= 0.8
-  (pre-market: score 6-7, no blackout, ATR in range)
+  (pre-market: score 6-7, positive premarket move, no blackout)
 - confidence LOW: score 5-6, mixed signals
 - max proposals = market_report.max_positions
-- On CAUTION days: only propose tickers with score >= 7 and above_vwap = true
-  (pre-market CAUTION: score >= 8 only)
+- On CAUTION days: score >= 7 and above_vwap = true required
+  (pre-market CAUTION: score >= 8 and premarket_change_pct > 0.3%)
 
 Return JSON only:
 {
@@ -69,13 +81,31 @@ Return JSON only:
 TOOL_SCHEMAS: list[dict] = [
     {
         "name": "get_candidates",
-        "description": "Fetch today's scan results with scores. Call once at the start.",
+        "description": "Fetch today's scan results with scores. Call once at the start of Phase 1.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "min_score": {"type": "integer", "description": "Minimum technical score (default 5)"},
             },
             "required": [],
+        },
+    },
+    {
+        "name": "get_premarket_snapshot",
+        "description": (
+            "Fetch current pre-market quotes and overnight % change for a list of tickers "
+            "in one batch call. Call immediately after get_candidates() with all returned tickers."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "tickers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "All ticker symbols from get_candidates",
+                },
+            },
+            "required": ["tickers"],
         },
     },
     {
@@ -131,6 +161,7 @@ TOOL_SCHEMAS: list[dict] = [
 
 def _dispatch(name: str, inp: dict) -> dict | list:
     if name == "get_candidates":        return get_candidates(inp.get("min_score", 5))
+    if name == "get_premarket_snapshot": return get_premarket_snapshot(inp["tickers"])
     if name == "get_news":              return get_news(inp["ticker"])
     if name == "get_live_price":        return get_live_price(inp["ticker"])
     if name == "get_intraday_signals":  return get_intraday_signals(inp["ticker"])
@@ -141,12 +172,30 @@ def _dispatch(name: str, inp: dict) -> dict | list:
 
 def _build_user_message(
     market_report: dict,
+    sector_rotation: Optional[list[dict]] = None,
     rejected_context: Optional[list[dict]] = None,
 ) -> str:
+    sector_block = ""
+    if sector_rotation and not (len(sector_rotation) == 1 and "error" in sector_rotation[0]):
+        leading = [s for s in sector_rotation if (s.get("change_pct") or 0) > 0][:3]
+        lagging = [s for s in sector_rotation if (s.get("change_pct") or 0) < 0][-3:]
+        if leading or lagging:
+            sector_block = "\n\nSector rotation (1-day):\n"
+            if leading:
+                sector_block += "  Leading: " + "  ".join(
+                    f"{s['etf']} {s['name']} {s['change_pct']:+.1f}%" for s in leading
+                ) + "\n"
+            if lagging:
+                sector_block += "  Lagging: " + "  ".join(
+                    f"{s['etf']} {s['name']} {s['change_pct']:+.1f}%" for s in lagging
+                )
+
     msg = (
         "Today's market conditions (from Market Agent):\n"
-        f"{json.dumps(market_report, indent=2)}\n\n"
+        f"{json.dumps(market_report, indent=2)}"
+        f"{sector_block}\n\n"
     )
+
     if rejected_context:
         tickers = [r["ticker"] for r in rejected_context]
         reasons = "\n".join(f"  {r['ticker']}: {r['reason']}" for r in rejected_context)
@@ -168,14 +217,20 @@ def run_research_agent(
     rejected_context: Optional[list[dict]] = None,
 ) -> dict:
     """
-    Run Research Agent. Screens candidates, investigates up to 5 tickers,
-    returns trade_proposals dict. On retry, receives rejected_context.
+    Run Research Agent. Screens candidates via pre-market snapshot and sector
+    context, investigates up to 10 tickers, returns trade_proposals dict.
+    On retry, receives rejected_context.
     """
     candidates = get_candidates(min_score=5)
     valid = [c for c in candidates if "error" not in c]
     if not valid:
         tracer.log_decision("research", "no_candidates", detail={"raw": len(candidates)})
         return {"proposals": [], "skipped": [], "summary": "No scan candidates today."}
+
+    try:
+        sector_data = get_sector_rotation()
+    except Exception:
+        sector_data = []
 
     tracer.start_agent_span("research")
     client = anthropic.Anthropic()
@@ -184,10 +239,10 @@ def run_research_agent(
         model=_MODEL,
         system=_SYSTEM,
         tools=TOOL_SCHEMAS,
-        initial_message=_build_user_message(market_report, rejected_context),
+        initial_message=_build_user_message(market_report, sector_data, rejected_context),
         dispatch=_dispatch,
         tracer=tracer,
         agent_name="research",
-        max_turns=30,
+        max_turns=60,
     )
     return parse_json_response(text)
