@@ -41,15 +41,25 @@ def run_tool_loop(
     tracer: TraceLogger,
     agent_name: str,
     max_turns: int = 15,
+    wall_clock_timeout_s: int | None = None,
 ) -> str:
     """
     Drive a Claude tool-use loop until end_turn or max_turns.
     Returns final text content. Raises RuntimeError if limit exceeded.
     Every tool call and the final message are logged via tracer.
+    wall_clock_timeout_s caps total elapsed time across all turns and tool calls.
     """
     messages: list[dict] = [{"role": "user", "content": initial_message}]
+    loop_start = time.monotonic()
 
-    for _ in range(max_turns):
+    for turn in range(max_turns):
+        if wall_clock_timeout_s is not None:
+            elapsed = time.monotonic() - loop_start
+            if elapsed >= wall_clock_timeout_s:
+                raise RuntimeError(
+                    f"{agent_name}: wall-clock timeout after {elapsed:.0f}s "
+                    f"(limit {wall_clock_timeout_s}s, turn {turn})"
+                )
         t0 = time.monotonic()
         response = client.messages.create(
             model=model,
