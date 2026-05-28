@@ -110,7 +110,7 @@ with st.sidebar:
         label_visibility="collapsed",
     )
     st.markdown("---")
-    if st.button("Refresh", use_container_width=True):
+    if st.button("Refresh", width="stretch"):
         st.cache_data.clear()
         st.rerun()
     st.caption(f"Updated {datetime.now().strftime('%H:%M:%S')}")
@@ -199,7 +199,7 @@ if page == "Overview":
                 "Tokens Out": s.get("total_tokens_output", 0),
                 "Latency s":  round(s.get("total_latency_ms", 0) / 1000, 1),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
     else:
         st.info("No sessions yet")
 
@@ -296,7 +296,7 @@ elif page == "P&L":
                 "Unrealized P&L": f"${unr_pnl:+.2f}" if unr_pnl is not None else "—",
                 "Order ID":      (p.get("alpaca_order_id") or "")[:12] + "…" if p.get("alpaca_order_id") else "—",
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
     st.markdown("---")
 
@@ -324,7 +324,7 @@ elif page == "P&L":
                 "Exit":      r.get("exit_reason", ""),
                 "Context":   r.get("entry_context", "premarket"),
             })
-        st.dataframe(trade_rows, use_container_width=True, hide_index=True)
+        st.dataframe(trade_rows, width="stretch", hide_index=True)
 
         wins  = sum(1 for r in closed if (r.get("realized_pnl") or 0) > 0)
         total = len(closed)
@@ -407,7 +407,7 @@ elif page == "Costs":
                 }
                 for agent, v in sorted(agent_totals.items(), key=lambda x: -x[1]["cost_usd"])
             ]
-            st.dataframe(agent_rows, use_container_width=True, hide_index=True)
+            st.dataframe(agent_rows, width="stretch", hide_index=True)
         else:
             st.info("Per-agent breakdown available after next session completes")
 
@@ -427,7 +427,7 @@ elif page == "Costs":
             }
             for s in sessions
         ]
-        st.dataframe(session_rows, use_container_width=True, hide_index=True)
+        st.dataframe(session_rows, width="stretch", hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -470,7 +470,7 @@ elif page == "Positions":
                 "Closed":    fmt_ts(p.get("close_time")),
                 "Score":     p.get("score_at_entry"),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
         st.caption(f"{len(rows)} positions")
 
 
@@ -585,7 +585,7 @@ elif page == "Observability":
             for src, dst, label in handoffs:
                 g.edge(src, dst, label=label)
 
-            st.graphviz_chart(g, use_container_width=True)
+            st.graphviz_chart(g, width="stretch")
 
             # Drill-down: pick an agent to inspect
             st.markdown("---")
@@ -684,7 +684,7 @@ elif page == "Observability":
                 legend=dict(orientation="h", y=1.1),
                 font=dict(color="#ccc"),
             )
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             st.caption("Marker size ∝ output tokens. Hover for details.")
 
     # ── TAB: TRACE STREAM ─────────────────────────────────────────────────────
@@ -771,7 +771,7 @@ elif page == "Sessions":
                 "Latency s":   round(s.get("total_latency_ms", 0) / 1000, 1),
                 "Started":     fmt_ts(s.get("started_at")),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
     # Protection events
     st.subheader("Protection Events")
@@ -789,7 +789,7 @@ elif page == "Sessions":
                 "Description": e.get("description"),
                 "Unlocked":    e.get("human_unlocked"),
             })
-        st.dataframe(ev_rows, use_container_width=True, hide_index=True)
+        st.dataframe(ev_rows, width="stretch", hide_index=True)
     else:
         st.info("No protection events")
 
@@ -831,7 +831,7 @@ elif page == "Parameters":
                 "Active":     c["is_active"],
                 "Note":       c.get("change_note", ""),
             })
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -869,7 +869,7 @@ elif page == "Goals & Learnings":
             "From":    g.get("effective_from"),
             "Until":   g.get("effective_until", "—"),
         } for g in all_goals]
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        st.dataframe(rows, width="stretch", hide_index=True)
 
     st.header("Learnings")
 
