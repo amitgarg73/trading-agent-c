@@ -634,6 +634,16 @@ elif page == "Observability":
                 pts = [t for t in traces if t["step_type"] == step_type]
                 if not pts:
                     continue
+                hover = [
+                    (
+                        f"<b>{t.get('tool_name') or t['step_type']}</b><br>"
+                        f"outcome: {t.get('outcome') or '—'}<br>"
+                        f"latency: {t.get('latency_ms', 0)}ms<br>"
+                        f"tokens: {t.get('tokens_input', 0)}→{t.get('tokens_output', 0)}<br>"
+                        f"{(t.get('agent_reasoning') or '')[:120]}"
+                    )
+                    for t in pts
+                ]
                 fig.add_trace(go.Scatter(
                     x=[t["sequence"] for t in pts],
                     y=[t["agent"] for t in pts],
@@ -645,22 +655,8 @@ elif page == "Observability":
                         symbol="circle",
                         line=dict(width=1, color="#fff"),
                     ),
-                    customdata=[[
-                        t.get("tool_name") or t["step_type"],
-                        t.get("outcome") or "—",
-                        t.get("latency_ms", 0),
-                        t.get("tokens_input", 0),
-                        t.get("tokens_output", 0),
-                        (t.get("agent_reasoning") or "")[:120],
-                    ] for t in pts],
-                    hovertemplate=(
-                        "<b>%{customdata[0]}</b><br>"
-                        "outcome: %{customdata[1]}<br>"
-                        "latency: %{customdata[2]}ms<br>"
-                        "tokens: %{customdata[3]}→%{customdata[4]}<br>"
-                        "%{customdata[5]}"
-                        "<extra></extra>"
-                    ),
+                    hovertext=hover,
+                    hoverinfo="text",
                 ))
 
             # Draw sequence connectors
