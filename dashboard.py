@@ -190,8 +190,8 @@ elif page == "P&L":
     st.header("P&L Dashboard")
 
     # ── Alpaca account equity ─────────────────────────────────────────────────
-    api_key    = os.environ.get("ALPACA_API_KEY_ID_C", "")
-    api_secret = os.environ.get("ALPACA_API_SECRET_KEY_C", "")
+    api_key    = os.environ.get("ALPACA_API_KEY_ID_C") or st.secrets.get("ALPACA_API_KEY_ID_C", "")
+    api_secret = os.environ.get("ALPACA_API_SECRET_KEY_C") or st.secrets.get("ALPACA_API_SECRET_KEY_C", "")
 
     col_eq, col_bp, col_cash = st.columns(3)
     if api_key and api_secret:

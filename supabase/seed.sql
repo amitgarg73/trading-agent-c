@@ -33,7 +33,7 @@ INSERT INTO c_agent_config (config_key, config_value, applies_to, change_note) V
   ('enable_learning_agent',      'true',                            'eod',       'active from day 1'),
   ('enable_news_analyst',        'true',                            'premarket', 'TypeScript agent enabled'),
   ('auto_approve_goal_recs',     'false',                           'all',       'require human approval'),
-  ('phase',                      '"simulation"',                    'all',       'Phase 0: simulation mode');
+  ('phase',                      '"paper"',                         'all',       'Phase 1: Alpaca paper trading');
 
 
 -- ── Starter Goals ─────────────────────────────────────────────────────────────
