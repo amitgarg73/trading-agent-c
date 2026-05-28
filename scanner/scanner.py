@@ -149,7 +149,7 @@ def run_scanner(
     existing = (
         db.table("c_scan_results")
         .select("ticker")
-        .eq("scan_date", today_iso)
+        .eq("date", today_iso)
         .execute()
         .data
     ) or []
@@ -190,17 +190,11 @@ def run_scanner(
                 continue
 
             db.table("c_scan_results").insert({
-                "scan_date":       today_iso,
-                "ticker":          ticker,
-                "technical_score": fields["technical_score"],
-                "current_price":   fields["current_price"],
-                "avg_volume":      fields["avg_volume"],
-                "sector":          get_sector(ticker),
-                "rsi":             fields["rsi"],
-                "volume_ratio":    fields["volume_ratio"],
-                "atr_pct":         fields["atr_pct"],
-                "above_sma20":     fields["above_sma20"],
-                "above_sma50":     fields["above_sma50"],
+                "date":    today_iso,
+                "ticker":  ticker,
+                "score":   fields["technical_score"],
+                "price":   fields["current_price"],
+                "sector":  get_sector(ticker),
             }).execute()
             rows_written += 1
 

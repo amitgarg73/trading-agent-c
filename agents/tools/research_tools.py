@@ -18,15 +18,24 @@ def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
         rows = (
             get_client()
             .table("c_scan_results")
-            .select("ticker,technical_score,current_price,avg_volume,sector,rsi,volume_ratio,atr_pct")
-            .eq("scan_date", today)
-            .gte("technical_score", min_score)
-            .order("technical_score", desc=True)
+            .select("ticker,score,price,sector")
+            .eq("date", today)
+            .gte("score", min_score)
+            .order("score", desc=True)
             .limit(100)
             .execute()
             .data
         )
-        return rows or []
+        # Normalize to field names the Research Agent expects
+        return [
+            {
+                "ticker":          r["ticker"],
+                "technical_score": r["score"],
+                "current_price":   r["price"],
+                "sector":          r.get("sector"),
+            }
+            for r in (rows or [])
+        ]
     except Exception as e:
         return [{"error": str(e)}]
 

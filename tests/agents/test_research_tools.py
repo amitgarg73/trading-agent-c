@@ -46,13 +46,15 @@ def _hist_daily(prices):
 class TestGetCandidates:
     def test_returns_db_rows(self, mock_supabase):
         rows = [
-            {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0, "avg_volume": 50_000_000},
-            {"ticker": "MSFT", "technical_score": 7, "current_price": 420.0, "avg_volume": 30_000_000},
+            {"ticker": "AAPL", "score": 8, "price": 185.0, "sector": "Technology"},
+            {"ticker": "MSFT", "score": 7, "price": 420.0, "sector": "Technology"},
         ]
         mock_supabase.table.return_value = make_query(rows)
         result = get_candidates(min_score=5)
         assert len(result) == 2
         assert result[0]["ticker"] == "AAPL"
+        assert result[0]["technical_score"] == 8
+        assert result[0]["current_price"] == 185.0
 
     def test_returns_empty_when_no_results(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
