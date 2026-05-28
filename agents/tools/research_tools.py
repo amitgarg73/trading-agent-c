@@ -3,8 +3,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 from typing import Any
 
-import yfinance as yf
-
 
 def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
     """
@@ -46,6 +44,7 @@ def get_news(ticker: str) -> dict[str, Any]:
     Blackout = earnings today or tomorrow.
     """
     try:
+        import yfinance as yf
         t = yf.Ticker(ticker)
         cal = t.calendar
 
@@ -81,55 +80,68 @@ def get_news(ticker: str) -> dict[str, Any]:
 
 
 def get_live_price(ticker: str) -> dict[str, Any]:
-    """
-    Fetch best available current price. Phase 1 uses yfinance 1-min close.
-    """
+    """Fetch latest ask/bid price from Alpaca quote stream."""
     try:
-        hist = yf.Ticker(ticker).history(period="1d", interval="1m")
-        if hist.empty:
+        from core.alpaca import get_live_price as _alpaca_price
+        price = _alpaca_price(ticker)
+        if price is None:
             return {"error": "no price data"}
-        price = round(float(hist["Close"].iloc[-1]), 2)
-        stale = 1
-        return {"price": price, "source": "yfinance", "stale_minutes": stale}
+        return {"price": price, "source": "alpaca", "stale_minutes": 0}
     except Exception as e:
         return {"error": str(e)}
 
 
 def get_intraday_signals(ticker: str) -> dict[str, Any]:
     """
-    Compute VWAP, relative strength vs SPY, and today's % change from intraday bars.
+    Compute VWAP, relative strength vs SPY, and today's % change from Alpaca 1-min bars.
     """
     try:
-        bars = yf.Ticker(ticker).history(period="1d", interval="1m")
-        spy  = yf.Ticker("SPY").history(period="1d", interval="1m")
+        from core.alpaca import _dclient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import datetime, timezone
+        import pytz
 
-        if bars.empty:
+        et = pytz.timezone("America/New_York")
+        market_open = datetime.now(et).replace(hour=9, minute=30, second=0, microsecond=0)
+
+        req = StockBarsRequest(
+            symbol_or_symbols=[ticker, "SPY"],
+            timeframe=TimeFrame.Minute,
+            start=market_open.astimezone(timezone.utc),
+        )
+        bars_by_symbol = _dclient().get_stock_bars(req).data
+
+        stock_bars = bars_by_symbol.get(ticker, [])
+        spy_bars   = bars_by_symbol.get("SPY", [])
+
+        if not stock_bars:
             return {"error": "no intraday data"}
 
-        # VWAP = sum(price * volume) / sum(volume)
-        tp      = (bars["High"] + bars["Low"] + bars["Close"]) / 3
-        vwap    = float((tp * bars["Volume"]).sum() / bars["Volume"].sum()) if bars["Volume"].sum() > 0 else 0.0
-        vwap    = round(vwap, 2)
+        # Cumulative VWAP = sum((H+L+C)/3 * vol) / sum(vol)
+        total_pv  = sum((b.high + b.low + b.close) / 3 * b.volume for b in stock_bars)
+        total_vol = sum(b.volume for b in stock_bars)
+        vwap = round(total_pv / total_vol, 2) if total_vol > 0 else 0.0
 
-        curr_price       = float(bars["Close"].iloc[-1])
-        open_price       = float(bars["Open"].iloc[0])
+        curr_price       = float(stock_bars[-1].close)
+        open_price       = float(stock_bars[0].open)
         above_vwap       = curr_price > vwap
         today_pct_change = round((curr_price - open_price) / open_price * 100, 2) if open_price else 0.0
 
         rs_vs_spy: float | None = None
-        if not spy.empty:
-            spy_open = float(spy["Open"].iloc[0])
-            spy_curr = float(spy["Close"].iloc[-1])
+        if spy_bars:
+            spy_open = float(spy_bars[0].open)
+            spy_curr = float(spy_bars[-1].close)
             if spy_open and spy_curr != spy_open:
                 spy_chg   = (spy_curr - spy_open) / spy_open
                 stock_chg = (curr_price - open_price) / open_price if open_price else 0.0
                 rs_vs_spy = round(stock_chg / spy_chg, 2) if spy_chg != 0 else None
 
         return {
-            "above_vwap":        above_vwap,
-            "vwap":              vwap,
-            "rs_vs_spy":         rs_vs_spy,
-            "today_pct_change":  today_pct_change,
+            "above_vwap":       above_vwap,
+            "vwap":             vwap,
+            "rs_vs_spy":        rs_vs_spy,
+            "today_pct_change": today_pct_change,
         }
     except Exception as e:
         return {"error": str(e)}
@@ -138,35 +150,53 @@ def get_intraday_signals(ticker: str) -> dict[str, Any]:
 def get_atr(ticker: str) -> dict[str, Any]:
     """
     Compute 14-day ATR as % of price, and opening range breakout % (first 30 min).
+    Uses Alpaca daily + 1-min bars.
     """
     try:
-        daily = yf.Ticker(ticker).history(period="30d")
-        if len(daily) < 2:
+        from core.alpaca import _dclient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import datetime, timedelta, timezone
+        import pytz
+
+        start = (datetime.now(timezone.utc) - timedelta(days=45)).date()
+        req = StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Day,
+            start=start,
+        )
+        bars = _dclient().get_stock_bars(req).data.get(ticker, [])
+
+        if len(bars) < 2:
             return {"error": "insufficient history"}
 
-        # True range per bar
-        highs  = daily["High"]
-        lows   = daily["Low"]
-        closes = daily["Close"]
-        prev_c = closes.shift(1)
+        tr_values = []
+        for i in range(1, len(bars)):
+            h      = float(bars[i].high)
+            lo     = float(bars[i].low)
+            prev_c = float(bars[i - 1].close)
+            tr_values.append(max(h - lo, abs(h - prev_c), abs(lo - prev_c)))
 
-        tr = (
-            (highs - lows).abs()
-            .combine((highs - prev_c).abs(), max)
-            .combine((lows  - prev_c).abs(), max)
-        )
-        atr      = float(tr.iloc[-14:].mean())
-        price    = float(closes.iloc[-1])
-        atr_pct  = round(atr / price * 100, 2) if price else 0.0
+        atr     = sum(tr_values[-14:]) / min(14, len(tr_values))
+        price   = float(bars[-1].close)
+        atr_pct = round(atr / price * 100, 2) if price else 0.0
 
         # ORB: first 30 min of today's session
         orb_pct: float | None = None
         try:
-            intra = yf.Ticker(ticker).history(period="1d", interval="1m")
-            if len(intra) >= 30:
-                orb_high = float(intra["High"].iloc[:30].max())
-                orb_low  = float(intra["Low"].iloc[:30].min())
-                orb_open = float(intra["Open"].iloc[0])
+            et = pytz.timezone("America/New_York")
+            market_open = datetime.now(et).replace(hour=9, minute=30, second=0, microsecond=0)
+            intra_req = StockBarsRequest(
+                symbol_or_symbols=[ticker],
+                timeframe=TimeFrame.Minute,
+                start=market_open.astimezone(timezone.utc),
+                limit=30,
+            )
+            intra_bars = _dclient().get_stock_bars(intra_req).data.get(ticker, [])
+            if len(intra_bars) >= 30:
+                orb_high = max(float(b.high) for b in intra_bars[:30])
+                orb_low  = min(float(b.low)  for b in intra_bars[:30])
+                orb_open = float(intra_bars[0].open)
                 if orb_open:
                     orb_pct = round((orb_high - orb_low) / orb_open * 100, 2)
         except Exception:

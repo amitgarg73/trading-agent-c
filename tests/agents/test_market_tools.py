@@ -6,12 +6,32 @@ import pandas as pd
 import pytest
 
 from agents.tools.market_tools import (
+    _SECTOR_ETFS,
     _vix_level,
     get_fear_greed,
     get_futures,
     get_sector_rotation,
     get_vix,
 )
+
+
+def _make_alpaca_bar(close, prev_close=None):
+    b = MagicMock()
+    b.close  = close
+    b.high   = close * 1.005
+    b.low    = close * 0.995
+    b.open   = close * 0.998
+    b.volume = 1_000_000
+    return b
+
+
+def _alpaca_dclient(bars_by_symbol: dict):
+    """Return a patched _dclient whose get_stock_bars().data == bars_by_symbol."""
+    resp = MagicMock()
+    resp.data = bars_by_symbol
+    client = MagicMock()
+    client.get_stock_bars.return_value = resp
+    return MagicMock(return_value=client)
 
 
 def _make_hist(*closes, open_val=None):
@@ -127,31 +147,34 @@ class TestGetFearGreed:
 # ── get_sector_rotation ────────────────────────────────────────────────────────
 
 class TestGetSectorRotation:
+    def _uniform_bars(self, prev=100.0, curr=101.0):
+        return {etf: [_make_alpaca_bar(prev), _make_alpaca_bar(curr)] for etf in _SECTOR_ETFS}
+
     def test_returns_list_with_all_etfs(self):
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = _make_hist(100, 101)
-        with patch("agents.tools.market_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("core.alpaca._dclient", _alpaca_dclient(self._uniform_bars())):
             result = get_sector_rotation()
         assert len(result) == 11
         assert all("etf" in r and "change_pct" in r for r in result)
 
     def test_sorted_best_to_worst(self):
-        call_count = [0]
         changes = [1.0, -1.0, 0.5, -0.5, 2.0, -2.0, 0.1, -0.1, 1.5, -1.5, 0.0]
-
-        def factory(symbol):
-            mock = MagicMock()
-            idx = call_count[0] % len(changes)
-            mock.history.return_value = _make_hist(100, 100 * (1 + changes[idx] / 100))
-            call_count[0] += 1
-            return mock
-
-        with patch("agents.tools.market_tools.yf.Ticker", side_effect=factory):
+        bars_map = {
+            etf: [_make_alpaca_bar(100.0), _make_alpaca_bar(100.0 * (1 + changes[i] / 100))]
+            for i, etf in enumerate(_SECTOR_ETFS)
+        }
+        with patch("core.alpaca._dclient", _alpaca_dclient(bars_map)):
             result = get_sector_rotation()
         pcts = [r["change_pct"] for r in result]
         assert pcts == sorted(pcts, reverse=True)
 
+    def test_zero_change_when_only_one_bar(self):
+        bars_map = {etf: [_make_alpaca_bar(100.0)] for etf in _SECTOR_ETFS}
+        with patch("core.alpaca._dclient", _alpaca_dclient(bars_map)):
+            result = get_sector_rotation()
+        assert all(r["change_pct"] == 0.0 for r in result)
+
     def test_returns_error_list_on_exception(self):
-        with patch("agents.tools.market_tools.yf.Ticker", side_effect=Exception("err")):
+        mock_dc = MagicMock(side_effect=Exception("network"))
+        with patch("core.alpaca._dclient", mock_dc):
             result = get_sector_rotation()
         assert "error" in result[0]

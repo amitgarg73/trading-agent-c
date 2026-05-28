@@ -28,7 +28,7 @@ _CANDIDATES = [
     {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0, "avg_volume": 50_000_000},
 ]
 _NEWS = {"blackout": False, "reason": None, "headlines": ["Strong earnings"]}
-_PRICE = {"price": 185.0, "source": "yfinance", "stale_minutes": 1}
+_PRICE = {"price": 185.0, "source": "alpaca", "stale_minutes": 0}
 _SIGNALS = {"above_vwap": True, "vwap": 183.5, "rs_vs_spy": 1.8, "today_pct_change": 0.6}
 _ATR = {"atr_pct": 1.2, "orb_pct": 0.4}
 _HIST = {"trades": 5, "wins": 4, "win_rate_pct": 80.0, "avg_pnl": 45.0, "last_exit": "TARGET"}

@@ -17,17 +17,22 @@ from agents.tools.research_tools import (
 from tests.conftest import make_query
 
 
-def _hist_1m(prices, volumes=None):
-    n = len(prices)
-    if volumes is None:
-        volumes = [500_000] * n
-    return pd.DataFrame({
-        "Open":   [prices[0]] * n,
-        "High":   [p * 1.005 for p in prices],
-        "Low":    [p * 0.995 for p in prices],
-        "Close":  prices,
-        "Volume": volumes,
-    })
+def _make_bar(close, open_=None, high=None, low=None, volume=500_000):
+    b = MagicMock()
+    b.close  = close
+    b.open   = open_ if open_ is not None else close * 0.998
+    b.high   = high  if high  is not None else close * 1.005
+    b.low    = low   if low   is not None else close * 0.995
+    b.volume = volume
+    return b
+
+
+def _alpaca_dclient(bars_by_symbol: dict):
+    resp = MagicMock()
+    resp.data = bars_by_symbol
+    client = MagicMock()
+    client.get_stock_bars.return_value = resp
+    return MagicMock(return_value=client)
 
 
 def _hist_daily(prices):
@@ -73,7 +78,7 @@ class TestGetNews:
         mock_ticker = MagicMock()
         mock_ticker.calendar = None
         mock_ticker.news = []
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("yfinance.Ticker", return_value=mock_ticker):
             result = get_news("AAPL")
         assert result["blackout"] is False
         assert result["reason"] is None
@@ -84,7 +89,7 @@ class TestGetNews:
         cal = pd.DataFrame({"Earnings Date": [today_ts]}, index=["Earnings Date"])
         mock_ticker.calendar = cal
         mock_ticker.news = []
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("yfinance.Ticker", return_value=mock_ticker):
             result = get_news("AAPL")
         assert result["blackout"] is True
         assert "earnings" in result["reason"]
@@ -95,7 +100,7 @@ class TestGetNews:
         cal = pd.DataFrame({"Earnings Date": [tomorrow_ts]}, index=["Earnings Date"])
         mock_ticker.calendar = cal
         mock_ticker.news = []
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("yfinance.Ticker", return_value=mock_ticker):
             result = get_news("AAPL")
         assert result["blackout"] is True
 
@@ -105,7 +110,7 @@ class TestGetNews:
         cal = pd.DataFrame({"Earnings Date": [future_ts]}, index=["Earnings Date"])
         mock_ticker.calendar = cal
         mock_ticker.news = []
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("yfinance.Ticker", return_value=mock_ticker):
             result = get_news("AAPL")
         assert result["blackout"] is False
 
@@ -118,12 +123,12 @@ class TestGetNews:
             {"title": "Analyst upgrade"},
             {"title": "Fourth headline"},
         ]
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        with patch("yfinance.Ticker", return_value=mock_ticker):
             result = get_news("AAPL")
         assert len(result["headlines"]) == 3
 
     def test_returns_error_on_exception(self):
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=Exception("err")):
+        with patch("yfinance.Ticker", side_effect=Exception("err")):
             result = get_news("AAPL")
         assert "error" in result
 
@@ -131,23 +136,20 @@ class TestGetNews:
 # ── get_live_price ─────────────────────────────────────────────────────────────
 
 class TestGetLivePrice:
-    def test_returns_price_from_1min_bar(self):
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = _hist_1m([185.50, 185.75, 186.00])
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+    def test_returns_price_from_alpaca(self):
+        with patch("core.alpaca.get_live_price", return_value=186.00):
             result = get_live_price("AAPL")
         assert result["price"] == pytest.approx(186.00)
-        assert result["source"] == "yfinance"
+        assert result["source"] == "alpaca"
+        assert result["stale_minutes"] == 0
 
-    def test_returns_error_on_empty_history(self):
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = pd.DataFrame()
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+    def test_returns_error_when_alpaca_returns_none(self):
+        with patch("core.alpaca.get_live_price", return_value=None):
             result = get_live_price("AAPL")
         assert "error" in result
 
     def test_returns_error_on_exception(self):
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=Exception("err")):
+        with patch("core.alpaca.get_live_price", side_effect=Exception("network")):
             result = get_live_price("AAPL")
         assert "error" in result
 
@@ -155,37 +157,33 @@ class TestGetLivePrice:
 # ── get_intraday_signals ───────────────────────────────────────────────────────
 
 class TestGetIntradaySignals:
-    def _setup_mock(self, stock_prices, spy_prices=None):
-        def factory(symbol):
-            mock = MagicMock()
-            prices = stock_prices if symbol != "SPY" else (spy_prices or [100] * len(stock_prices))
-            mock.history.return_value = _hist_1m(prices)
-            return mock
-        return factory
+    def _bars_map(self, stock_closes, spy_closes=None):
+        stock = [_make_bar(c, open_=stock_closes[0]) for c in stock_closes]
+        spy   = [_make_bar(c, open_=spy_closes[0] if spy_closes else 400.0)
+                 for c in (spy_closes or [400.0] * len(stock_closes))]
+        return {"AAPL": stock, "SPY": spy}
 
     def test_above_vwap_when_price_above_average(self):
-        prices = [100.0] * 30 + [105.0] * 30
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=self._setup_mock(prices)):
+        closes = [100.0] * 30 + [105.0] * 30
+        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
             result = get_intraday_signals("AAPL")
         assert result["above_vwap"] is True
 
     def test_today_pct_change_calculated(self):
-        prices = [100.0] + [102.0] * 59
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=self._setup_mock(prices)):
+        closes = [100.0] + [102.0] * 59
+        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes))):
             result = get_intraday_signals("AAPL")
         assert result["today_pct_change"] == pytest.approx(2.0, rel=1e-2)
 
     def test_rs_vs_spy_is_none_when_spy_flat(self):
-        stock_prices = [100.0] * 60
-        spy_prices   = [400.0] * 60
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=self._setup_mock(stock_prices, spy_prices)):
+        closes = [100.0] * 60
+        spy_c  = [400.0] * 60
+        with patch("core.alpaca._dclient", _alpaca_dclient(self._bars_map(closes, spy_c))):
             result = get_intraday_signals("AAPL")
         assert result["rs_vs_spy"] is None
 
-    def test_returns_error_on_empty_data(self):
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = pd.DataFrame()
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+    def test_returns_error_when_no_bars(self):
+        with patch("core.alpaca._dclient", _alpaca_dclient({"AAPL": [], "SPY": []})):
             result = get_intraday_signals("AAPL")
         assert "error" in result
 
@@ -193,23 +191,30 @@ class TestGetIntradaySignals:
 # ── get_atr ────────────────────────────────────────────────────────────────────
 
 class TestGetAtr:
+    def _daily_bars(self, prices):
+        return [_make_bar(p, open_=p * 0.99, high=p * 1.01, low=p * 0.98) for p in prices]
+
     def test_atr_pct_is_positive(self):
         prices = [100.0 + i * 0.5 for i in range(20)]
-        mock_ticker = MagicMock()
-        mock_ticker.history.side_effect = [_hist_daily(prices), pd.DataFrame()]
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        bars_map = {"AAPL": self._daily_bars(prices)}
+        # Second _dclient call (ORB) returns empty
+        resp1 = MagicMock(); resp1.data = bars_map
+        resp2 = MagicMock(); resp2.data = {"AAPL": []}
+        client = MagicMock()
+        client.get_stock_bars.side_effect = [resp1, resp2]
+        with patch("core.alpaca._dclient", MagicMock(return_value=client)):
             result = get_atr("AAPL")
         assert result["atr_pct"] > 0
 
     def test_returns_error_on_insufficient_history(self):
-        mock_ticker = MagicMock()
-        mock_ticker.history.return_value = _hist_daily([100.0])
-        with patch("agents.tools.research_tools.yf.Ticker", return_value=mock_ticker):
+        bars_map = {"AAPL": self._daily_bars([100.0])}
+        with patch("core.alpaca._dclient", _alpaca_dclient(bars_map)):
             result = get_atr("AAPL")
         assert "error" in result
 
     def test_returns_error_on_exception(self):
-        with patch("agents.tools.research_tools.yf.Ticker", side_effect=Exception("err")):
+        mock_dc = MagicMock(side_effect=Exception("network"))
+        with patch("core.alpaca._dclient", mock_dc):
             result = get_atr("AAPL")
         assert "error" in result
 

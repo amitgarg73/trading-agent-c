@@ -89,12 +89,25 @@ def get_fear_greed() -> dict[str, Any]:
 def get_sector_rotation() -> list[dict[str, Any]]:
     """Fetch 1-day % change for all 11 sector ETFs, sorted best to worst."""
     try:
+        from core.alpaca import _dclient
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+        from datetime import datetime, timedelta, timezone
+
+        start = (datetime.now(timezone.utc) - timedelta(days=7)).date()
+        req = StockBarsRequest(
+            symbol_or_symbols=_SECTOR_ETFS,
+            timeframe=TimeFrame.Day,
+            start=start,
+        )
+        bars_by_symbol = _dclient().get_stock_bars(req).data
+
         rows = []
         for etf in _SECTOR_ETFS:
-            hist = yf.Ticker(etf).history(period="2d")
-            if len(hist) >= 2:
-                prev = float(hist["Close"].iloc[-2])
-                curr = float(hist["Close"].iloc[-1])
+            bars = bars_by_symbol.get(etf, [])
+            if len(bars) >= 2:
+                prev = float(bars[-2].close)
+                curr = float(bars[-1].close)
                 chg  = round((curr - prev) / prev * 100, 2) if prev else 0.0
             else:
                 chg = 0.0
