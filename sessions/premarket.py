@@ -74,7 +74,7 @@ def _log_market_eval(session_id: str, v1: dict, v2: dict) -> None:
             "decisions_agree":    v1.get("decision") == v2.get("decision"),
             "v1_more_aggressive": (v1.get("max_positions") or 0) > (v2.get("max_positions") or 0),
         }
-        get_client().table("c_market_evals").upsert(row).execute()
+        get_client().table("c_market_evals").upsert(row, on_conflict="eval_date").execute()
     except Exception as e:
         print(f"  [premarket] _log_market_eval failed (non-fatal): {e}")
 

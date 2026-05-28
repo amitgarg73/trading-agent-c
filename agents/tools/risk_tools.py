@@ -29,7 +29,7 @@ def get_open_positions() -> list[dict[str, Any]]:
         rows = (
             get_client()
             .table("c_positions")
-            .select("ticker,position_size,entry_price,unrealized_pnl")
+            .select("ticker,position_size,entry_price,realized_pnl")
             .eq("status", "open")
             .eq("open_date", today)
             .execute()
@@ -41,7 +41,7 @@ def get_open_positions() -> list[dict[str, Any]]:
                 "ticker":         r["ticker"],
                 "position_size":  r.get("position_size", 0),
                 "entry_price":    r.get("entry_price", 0),
-                "unrealized_pnl": r.get("unrealized_pnl", 0),
+                "unrealized_pnl": r.get("realized_pnl", 0),
                 "sector":         _get_sector(r["ticker"]),
             }
             for r in rows
