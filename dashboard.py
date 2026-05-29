@@ -47,6 +47,15 @@ def get_client() -> Client:
     return create_client(url, key)
 
 
+@st.cache_resource
+def get_client_ab() -> Client | None:
+    url = os.environ.get("SUPABASE_URL_AB") or st.secrets.get("SUPABASE_URL_AB", "")
+    key = os.environ.get("SUPABASE_KEY_AB") or st.secrets.get("SUPABASE_KEY_AB", "")
+    if not url or not key:
+        return None
+    return create_client(url, key)
+
+
 def q(table: str, cols: str = "*", filters: dict | None = None,
       order: str | None = None, limit: int | None = None) -> list[dict]:
     try:
@@ -59,6 +68,26 @@ def q(table: str, cols: str = "*", filters: dict | None = None,
             req = req.order(order.lstrip("-"), desc=desc)
         if limit:
             req = req.limit(limit)
+        return req.execute().data or []
+    except Exception as e:
+        st.warning(f"{table}: {e}")
+        return []
+
+
+def q_ab(table: str, cols: str = "*", filters: dict | None = None,
+         gte: dict | None = None, order: str | None = None) -> list[dict]:
+    try:
+        db = get_client_ab()
+        if db is None:
+            return []
+        req = db.table(table).select(cols)
+        for k, v in (filters or {}).items():
+            req = req.eq(k, v)
+        for k, v in (gte or {}).items():
+            req = req.gte(k, v)
+        if order:
+            desc = order.startswith("-")
+            req = req.order(order.lstrip("-"), desc=desc)
         return req.execute().data or []
     except Exception as e:
         st.warning(f"{table}: {e}")
@@ -106,7 +135,7 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigate",
-        ["Overview", "P&L", "Costs", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings", "Market Intel"],
+        ["Today", "Overview", "P&L", "Costs", "Positions", "Observability", "Sessions", "Parameters", "Goals & Learnings", "Market Intel"],
         label_visibility="collapsed",
     )
     st.markdown("---")
@@ -142,6 +171,219 @@ k4.metric("Protection Tier", tier, delta_color="inverse")
 k5.metric("Phase", phase.upper())
 
 st.markdown("---")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PAGE: TODAY — consolidated view across all three strategies
+# ══════════════════════════════════════════════════════════════════════════════
+
+if page == "Today":
+    st.header(f"Today — {today}")
+
+    # ── Fetch data ──────────────────────────────────────────────────────────
+    a_open   = q_ab("positions",   "ticker,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
+                    filters={"status": "OPEN"})
+    a_closed = q_ab("positions",   "ticker,entry_price,close_price,shares,realized_pnl,opened_at,closed_at,close_reason",
+                    filters={"status": "CLOSED"}, gte={"opened_at": today})
+    b_open   = q_ab("b_positions", "ticker,pool,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
+                    filters={"status": "OPEN"})
+    b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,shares,realized_pnl,opened_at,closed_at,close_reason",
+                    filters={"status": "CLOSED"}, gte={"opened_at": today})
+    c_open   = [p for p in open_pos if p.get("open_date") == today]
+    c_closed = q("c_positions",    "ticker,entry_price,exit_price,shares,realized_pnl,entry_time,close_time,exit_reason",
+                 filters={"status": "closed", "close_date": today})
+
+    # ── Summary bar ─────────────────────────────────────────────────────────
+    def _sum(rows, key):
+        return sum(r.get(key) or 0 for r in rows)
+
+    a_unreal = _sum(a_open,   "unrealized_pnl")
+    b_unreal = _sum(b_open,   "unrealized_pnl")
+    c_unreal = _sum(c_open,   "unrealized_pnl")
+    a_real   = _sum(a_closed, "realized_pnl")
+    b_real   = _sum(b_closed, "realized_pnl")
+    c_real   = _sum(c_closed, "realized_pnl")
+
+    total_real   = a_real   + b_real   + c_real
+    total_unreal = a_unreal + b_unreal + c_unreal
+
+    s1, s2, s3, s4, s5 = st.columns(5)
+    s1.metric("Total Realized P&L",   fmt_pnl(total_real),
+              delta=f"{fmt_pnl(total_unreal)} unrealized", delta_color="normal")
+    s2.metric("Strategy A",  f"{len(a_open)} open",
+              delta=fmt_pnl(a_real + a_unreal), delta_color="normal")
+    s3.metric("Strategy B",  f"{len(b_open)} open",
+              delta=fmt_pnl(b_real + b_unreal), delta_color="normal")
+    s4.metric("Strategy C",  f"{len(c_open)} open",
+              delta=fmt_pnl(c_real + c_unreal), delta_color="normal")
+    s5.metric("Closed Today", len(a_closed) + len(b_closed) + len(c_closed))
+
+    st.markdown("---")
+
+    # ── Per-strategy sections ───────────────────────────────────────────────
+    def _pct_to_target(entry, target):
+        if not entry or not target or entry == 0:
+            return "—"
+        pct = (target - entry) / entry * 100
+        return f"{pct:+.1f}%"
+
+    def _exit_badge(reason):
+        if not reason:
+            return ""
+        colors = {"STOP": "#f85149", "TARGET": "#3fb950", "TRAIL": "#3fb950",
+                  "NATIVE_TRAIL": "#3fb950", "EOD": "#888", "UNFILLED": "#888",
+                  "MANUAL": "#888", "eod_forced": "#888", "stale_midnight_catchup": "#888"}
+        color = colors.get(str(reason).upper(), "#d29922")
+        label = str(reason).replace("_", " ").upper()
+        return badge(label, color)
+
+    def _trail_badge(row):
+        if row.get("trail_order_id") or row.get("exit_mechanism") in ("NATIVE_TRAIL", "TRAIL"):
+            return badge("TRAIL", "#d29922")
+        return ""
+
+    col_a, col_b, col_c = st.columns(3)
+
+    # ── Strategy A ──────────────────────────────────────────────────────────
+    with col_a:
+        st.subheader("Strategy A")
+        if a_open:
+            for p in a_open:
+                unreal = p.get("unrealized_pnl") or 0
+                color  = "#3fb950" if unreal >= 0 else "#f85149"
+                st.markdown(
+                    f"**{p['ticker']}** &nbsp; {_trail_badge(p)}<br>"
+                    f"<span style='font-size:0.85rem'>"
+                    f"Entry ${p.get('entry_price', 0):.2f} · "
+                    f"Now ${p.get('current_price') or 0:.2f} · "
+                    f"{p.get('shares', 0)} sh<br>"
+                    f"Stop ${p.get('stop_loss', 0):.2f} · "
+                    f"Target ${p.get('target_price', 0):.2f} "
+                    f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
+                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("")
+        else:
+            st.caption("No open positions")
+
+        if a_closed:
+            st.markdown("**Closed today**")
+            for p in a_closed:
+                real  = p.get("realized_pnl") or 0
+                rc    = "#3fb950" if real >= 0 else "#f85149"
+                st.markdown(
+                    f"{p['ticker']} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'>"
+                    f"**{fmt_pnl(real)}**</span> "
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"@ ${p.get('close_price') or 0:.2f}</span>",
+                    unsafe_allow_html=True,
+                )
+        elif not a_open:
+            st.caption("No trades today")
+
+    # ── Strategy B ──────────────────────────────────────────────────────────
+    with col_b:
+        st.subheader("Strategy B")
+        if b_open:
+            for p in b_open:
+                unreal = p.get("unrealized_pnl") or 0
+                color  = "#3fb950" if unreal >= 0 else "#f85149"
+                pool_badge = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                st.markdown(
+                    f"**{p['ticker']}** &nbsp; {pool_badge} &nbsp; {_trail_badge(p)}<br>"
+                    f"<span style='font-size:0.85rem'>"
+                    f"Entry ${p.get('entry_price', 0):.2f} · "
+                    f"Now ${p.get('current_price') or 0:.2f} · "
+                    f"{p.get('shares', 0)} sh<br>"
+                    f"Stop ${p.get('stop_loss', 0):.2f} · "
+                    f"Target ${p.get('target_price', 0):.2f} "
+                    f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
+                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("")
+        else:
+            st.caption("No open positions")
+
+        if b_closed:
+            st.markdown("**Closed today**")
+            for p in b_closed:
+                real       = p.get("realized_pnl") or 0
+                rc         = "#3fb950" if real >= 0 else "#f85149"
+                pool_badge = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                st.markdown(
+                    f"{p['ticker']} &nbsp; {pool_badge} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'>"
+                    f"**{fmt_pnl(real)}**</span> "
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"@ ${p.get('close_price') or 0:.2f}</span>",
+                    unsafe_allow_html=True,
+                )
+        elif not b_open:
+            st.caption("No trades today")
+
+    # ── Strategy C ──────────────────────────────────────────────────────────
+    with col_c:
+        st.subheader("Strategy C")
+        if c_open:
+            for p in c_open:
+                unreal = p.get("unrealized_pnl") or 0
+                color  = "#3fb950" if unreal >= 0 else "#f85149"
+                conf   = p.get("confidence", "")
+                conf_color = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
+                st.markdown(
+                    f"**{p['ticker']}** &nbsp; "
+                    f"<span style='color:{conf_color};font-size:0.75rem'>{conf}</span><br>"
+                    f"<span style='font-size:0.85rem'>"
+                    f"Entry ${p.get('entry_price', 0):.2f} · "
+                    f"{p.get('shares', 0)} sh<br>"
+                    f"Stop ${p.get('stop_loss', 0):.2f} · "
+                    f"Target ${p.get('target_price', 0):.2f} "
+                    f"({_pct_to_target(p.get('entry_price'), p.get('target_price'))})<br>"
+                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown("")
+        else:
+            st.caption("No open positions")
+
+        if c_closed:
+            st.markdown("**Closed today**")
+            for p in c_closed:
+                real = p.get("realized_pnl") or 0
+                rc   = "#3fb950" if real >= 0 else "#f85149"
+                st.markdown(
+                    f"{p['ticker']} &nbsp; {_exit_badge(p.get('exit_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'>"
+                    f"**{fmt_pnl(real)}**</span> "
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"@ ${p.get('exit_price') or 0:.2f}</span>",
+                    unsafe_allow_html=True,
+                )
+        elif not c_open:
+            st.caption("No trades today")
+
+    st.markdown("---")
+
+    # ── Session activity strip (C only, since A/B don't have session logs) ──
+    c_session = q("c_sessions", filters={"date": today}, order="-started_at", limit=1)
+    if c_session:
+        sess = c_session[0]
+        s = sess
+        st.markdown(
+            f"**Strategy C session** · "
+            f"{s.get('terminal_reason','—')} · "
+            f"{s.get('trades_executed',0)} executed · "
+            f"{s.get('agents_invoked') or []} · "
+            f"Cost ${s.get('total_cost_usd') or 0:.3f} · "
+            f"Started {fmt_ts(s.get('started_at'))}",
+            unsafe_allow_html=False,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════════════════
