@@ -19,7 +19,7 @@ from agents.tools.research_tools import (
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
-_MODEL = "claude-sonnet-4-6"
+_MODEL = "claude-haiku-4-5-20251001"
 
 # Per-ticker agent cap: 4 tools × ~15s each + reasoning = ~90s is plenty
 _TICKER_TIMEOUT_S  = 120
