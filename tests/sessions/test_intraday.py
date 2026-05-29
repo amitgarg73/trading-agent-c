@@ -316,6 +316,22 @@ class TestIntradayMain:
             main()
         assert "No premarket session" in capsys.readouterr().out
 
+    def test_dispatches_premarket_when_no_session_in_window(self, mock_supabase, capsys):
+        """At 9:30 AM with no session yet, intraday dispatches to premarket pipeline."""
+        import pytz
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 9, 30, tzinfo=_ET)
+        with patch("sessions.intraday.is_trading_day", return_value=True), \
+             patch("sessions.intraday.datetime") as mock_dt, \
+             patch("sessions.intraday.get_today_session_id", return_value=None), \
+             patch("sessions.premarket.main") as mock_pm:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            from sessions.intraday import main
+            main()
+        mock_pm.assert_called_once()
+        assert "premarket pipeline" in capsys.readouterr().out
+
     def test_exits_when_protection_suspended(self, mock_supabase, capsys):
         import pytz
         _ET = pytz.timezone("America/New_York")
