@@ -64,7 +64,7 @@ For each chosen ticker, call tools in this order:
 - get_position_history: how has this ticker performed for us recently?
 
 PROPOSAL RULES
-- target_price = round(entry_price * 1.04, 2)
+- target_price = round(entry_price * 1.08, 2)
 - stop_loss = round(entry_price * 0.9933, 2)
 - position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
 - confidence HIGH: score >=7, above_vwap, rs_vs_spy >= 1.5
