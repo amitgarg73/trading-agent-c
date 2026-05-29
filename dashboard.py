@@ -180,6 +180,10 @@ st.markdown("---")
 if page == "Today":
     st.header(f"Today — {today}")
 
+    ab_ok = get_client_ab() is not None
+    if not ab_ok:
+        st.warning("Strategy A/B data unavailable — add SUPABASE_URL_AB and SUPABASE_KEY_AB to Streamlit Cloud secrets.")
+
     # ── Fetch data ──────────────────────────────────────────────────────────
     a_open   = q_ab("positions",   "ticker,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
                     filters={"status": "OPEN"})
@@ -190,7 +194,7 @@ if page == "Today":
     b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
     c_open   = [p for p in open_pos if p.get("open_date") == today]
-    c_closed = q("c_positions",    "ticker,entry_price,exit_price,shares,realized_pnl,entry_time,close_time,exit_reason",
+    c_closed = q("c_positions", "ticker,entry_price,shares,realized_pnl,entry_time,close_time,exit_reason",
                  filters={"status": "closed", "close_date": today})
 
     # ── Summary bar ─────────────────────────────────────────────────────────
@@ -208,14 +212,14 @@ if page == "Today":
     total_unreal = a_unreal + b_unreal + c_unreal
 
     s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("Total Realized P&L",   fmt_pnl(total_real),
-              delta=f"{fmt_pnl(total_unreal)} unrealized", delta_color="normal")
-    s2.metric("Strategy A",  f"{len(a_open)} open",
-              delta=fmt_pnl(a_real + a_unreal), delta_color="normal")
-    s3.metric("Strategy B",  f"{len(b_open)} open",
-              delta=fmt_pnl(b_real + b_unreal), delta_color="normal")
-    s4.metric("Strategy C",  f"{len(c_open)} open",
-              delta=fmt_pnl(c_real + c_unreal), delta_color="normal")
+    s1.metric("Combined P&L", fmt_pnl(total_real + total_unreal),
+              delta=f"{fmt_pnl(total_real)} realized", delta_color="normal")
+    s2.metric("Strategy A", fmt_pnl(a_real),
+              delta=f"{fmt_pnl(a_unreal)} unrealized · {len(a_open)} open", delta_color="normal")
+    s3.metric("Strategy B", fmt_pnl(b_real),
+              delta=f"{fmt_pnl(b_unreal)} unrealized · {len(b_open)} open", delta_color="normal")
+    s4.metric("Strategy C", fmt_pnl(c_real),
+              delta=f"{fmt_pnl(c_unreal)} unrealized · {len(c_open)} open", delta_color="normal")
     s5.metric("Closed Today", len(a_closed) + len(b_closed) + len(c_closed))
 
     st.markdown("---")
@@ -232,7 +236,7 @@ if page == "Today":
             return ""
         colors = {"STOP": "#f85149", "TARGET": "#3fb950", "TRAIL": "#3fb950",
                   "NATIVE_TRAIL": "#3fb950", "EOD": "#888", "UNFILLED": "#888",
-                  "MANUAL": "#888", "eod_forced": "#888", "stale_midnight_catchup": "#888"}
+                  "MANUAL": "#888", "EOD_FORCED": "#888", "STALE_MIDNIGHT_CATCHUP": "#888"}
         color = colors.get(str(reason).upper(), "#d29922")
         label = str(reason).replace("_", " ").upper()
         return badge(label, color)
@@ -247,10 +251,12 @@ if page == "Today":
     # ── Strategy A ──────────────────────────────────────────────────────────
     with col_a:
         st.subheader("Strategy A")
-        if a_open:
+        if not ab_ok:
+            st.caption("Connect A/B database to see positions")
+        elif a_open:
             for p in a_open:
                 unreal = p.get("unrealized_pnl") or 0
-                color  = "#3fb950" if unreal >= 0 else "#f85149"
+                uc     = "#3fb950" if unreal >= 0 else "#f85149"
                 st.markdown(
                     f"**{p['ticker']}** &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
@@ -260,7 +266,7 @@ if page == "Today":
                     f"Stop ${p.get('stop_loss', 0):.2f} · "
                     f"Target ${p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -271,29 +277,40 @@ if page == "Today":
         if a_closed:
             st.markdown("**Closed today**")
             for p in a_closed:
-                real  = p.get("realized_pnl") or 0
-                rc    = "#3fb950" if real >= 0 else "#f85149"
+                real = p.get("realized_pnl") or 0
+                rc   = "#3fb950" if real >= 0 else "#f85149"
                 st.markdown(
                     f"{p['ticker']} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>"
-                    f"**{fmt_pnl(real)}**</span> "
-                    f"<span style='font-size:0.8rem;color:#888'>"
-                    f"@ ${p.get('close_price') or 0:.2f}</span>",
+                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span> "
+                    f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
                     unsafe_allow_html=True,
                 )
-        elif not a_open:
+        elif ab_ok and not a_open:
             st.caption("No trades today")
+
+        if ab_ok:
+            a_total = a_real + a_unreal
+            atc  = "#3fb950" if a_total  >= 0 else "#f85149"
+            a_uc = ("#3fb950" if a_unreal >= 0 else "#f85149") if a_open else "#888"
+            st.markdown(
+                f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
+                f"Realized <b>{fmt_pnl(a_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{a_uc}'>{fmt_pnl(a_unreal)}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
     # ── Strategy B ──────────────────────────────────────────────────────────
     with col_b:
         st.subheader("Strategy B")
-        if b_open:
+        if not ab_ok:
+            st.caption("Connect A/B database to see positions")
+        elif b_open:
             for p in b_open:
                 unreal = p.get("unrealized_pnl") or 0
-                color  = "#3fb950" if unreal >= 0 else "#f85149"
-                pool_badge = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                uc     = "#3fb950" if unreal >= 0 else "#f85149"
+                pb     = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
                 st.markdown(
-                    f"**{p['ticker']}** &nbsp; {pool_badge} &nbsp; {_trail_badge(p)}<br>"
+                    f"**{p['ticker']}** &nbsp; {pb} &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
                     f"Entry ${p.get('entry_price', 0):.2f} · "
                     f"Now ${p.get('current_price') or 0:.2f} · "
@@ -301,7 +318,7 @@ if page == "Today":
                     f"Stop ${p.get('stop_loss', 0):.2f} · "
                     f"Target ${p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -312,19 +329,27 @@ if page == "Today":
         if b_closed:
             st.markdown("**Closed today**")
             for p in b_closed:
-                real       = p.get("realized_pnl") or 0
-                rc         = "#3fb950" if real >= 0 else "#f85149"
-                pool_badge = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                real = p.get("realized_pnl") or 0
+                rc   = "#3fb950" if real >= 0 else "#f85149"
+                pb   = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
                 st.markdown(
-                    f"{p['ticker']} &nbsp; {pool_badge} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>"
-                    f"**{fmt_pnl(real)}**</span> "
-                    f"<span style='font-size:0.8rem;color:#888'>"
-                    f"@ ${p.get('close_price') or 0:.2f}</span>",
+                    f"{p['ticker']} &nbsp; {pb} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span> "
+                    f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
                     unsafe_allow_html=True,
                 )
-        elif not b_open:
+        elif ab_ok and not b_open:
             st.caption("No trades today")
+
+        if ab_ok:
+            b_total = b_real + b_unreal
+            btc = "#3fb950" if b_total >= 0 else "#f85149"
+            st.markdown(
+                f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
+                f"Realized <b>{fmt_pnl(b_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{btc}'>{fmt_pnl(b_unreal)}</span>"
+                f"</div>",
+                unsafe_allow_html=True,
+            )
 
     # ── Strategy C ──────────────────────────────────────────────────────────
     with col_c:
@@ -332,19 +357,19 @@ if page == "Today":
         if c_open:
             for p in c_open:
                 unreal = p.get("unrealized_pnl") or 0
-                color  = "#3fb950" if unreal >= 0 else "#f85149"
+                uc     = "#3fb950" if unreal >= 0 else "#f85149"
                 conf   = p.get("confidence", "")
-                conf_color = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
+                cc     = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
                 st.markdown(
                     f"**{p['ticker']}** &nbsp; "
-                    f"<span style='color:{conf_color};font-size:0.75rem'>{conf}</span><br>"
+                    f"<span style='color:{cc};font-size:0.75rem'>{conf}</span><br>"
                     f"<span style='font-size:0.85rem'>"
                     f"Entry ${p.get('entry_price', 0):.2f} · "
                     f"{p.get('shares', 0)} sh<br>"
                     f"Stop ${p.get('stop_loss', 0):.2f} · "
                     f"Target ${p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('entry_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{color};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -359,30 +384,33 @@ if page == "Today":
                 rc   = "#3fb950" if real >= 0 else "#f85149"
                 st.markdown(
                     f"{p['ticker']} &nbsp; {_exit_badge(p.get('exit_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>"
-                    f"**{fmt_pnl(real)}**</span> "
-                    f"<span style='font-size:0.8rem;color:#888'>"
-                    f"@ ${p.get('exit_price') or 0:.2f}</span>",
+                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span>",
                     unsafe_allow_html=True,
                 )
         elif not c_open:
             st.caption("No trades today")
 
+        c_total = c_real + c_unreal
+        ctc = "#3fb950" if c_total >= 0 else "#f85149"
+        st.markdown(
+            f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
+            f"Realized <b>{fmt_pnl(c_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{ctc}'>{fmt_pnl(c_unreal)}</span>"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     st.markdown("---")
 
-    # ── Session activity strip (C only, since A/B don't have session logs) ──
+    # ── Strategy C session strip ─────────────────────────────────────────────
     c_session = q("c_sessions", filters={"date": today}, order="-started_at", limit=1)
     if c_session:
-        sess = c_session[0]
-        s = sess
+        s = c_session[0]
         st.markdown(
             f"**Strategy C session** · "
             f"{s.get('terminal_reason','—')} · "
             f"{s.get('trades_executed',0)} executed · "
-            f"{s.get('agents_invoked') or []} · "
             f"Cost ${s.get('total_cost_usd') or 0:.3f} · "
             f"Started {fmt_ts(s.get('started_at'))}",
-            unsafe_allow_html=False,
         )
 
 
