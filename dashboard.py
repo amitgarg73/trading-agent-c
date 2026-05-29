@@ -258,7 +258,7 @@ if page == "Today":
                 unreal = p.get("unrealized_pnl") or 0
                 uc     = "#3fb950" if unreal >= 0 else "#f85149"
                 st.markdown(
-                    f"**{p['ticker']}** &nbsp; {_trail_badge(p)}<br>"
+                    f"<b>{p['ticker']}</b> &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
                     f"Entry ${p.get('entry_price', 0):.2f} · "
                     f"Now ${p.get('current_price') or 0:.2f} · "
@@ -280,8 +280,8 @@ if page == "Today":
                 real = p.get("realized_pnl") or 0
                 rc   = "#3fb950" if real >= 0 else "#f85149"
                 st.markdown(
-                    f"{p['ticker']} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span> "
+                    f"<b>{p['ticker']}</b> &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span> "
                     f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
                     unsafe_allow_html=True,
                 )
@@ -289,11 +289,9 @@ if page == "Today":
             st.caption("No trades today")
 
         if ab_ok:
-            a_total = a_real + a_unreal
-            atc  = "#3fb950" if a_total  >= 0 else "#f85149"
             a_uc = ("#3fb950" if a_unreal >= 0 else "#f85149") if a_open else "#888"
             st.markdown(
-                f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
+                f"<div style='margin-top:12px;padding:8px;border:1px solid #d0d7de;border-radius:6px;font-size:0.85rem'>"
                 f"Realized <b>{fmt_pnl(a_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{a_uc}'>{fmt_pnl(a_unreal)}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -310,7 +308,7 @@ if page == "Today":
                 uc     = "#3fb950" if unreal >= 0 else "#f85149"
                 pb     = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
                 st.markdown(
-                    f"**{p['ticker']}** &nbsp; {pb} &nbsp; {_trail_badge(p)}<br>"
+                    f"<b>{p['ticker']}</b> &nbsp; {pb} &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
                     f"Entry ${p.get('entry_price', 0):.2f} · "
                     f"Now ${p.get('current_price') or 0:.2f} · "
@@ -333,8 +331,8 @@ if page == "Today":
                 rc   = "#3fb950" if real >= 0 else "#f85149"
                 pb   = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
                 st.markdown(
-                    f"{p['ticker']} &nbsp; {pb} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span> "
+                    f"<b>{p['ticker']}</b> &nbsp; {pb} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span> "
                     f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
                     unsafe_allow_html=True,
                 )
@@ -342,11 +340,10 @@ if page == "Today":
             st.caption("No trades today")
 
         if ab_ok:
-            b_total = b_real + b_unreal
-            btc = "#3fb950" if b_total >= 0 else "#f85149"
+            b_uc = ("#3fb950" if b_unreal >= 0 else "#f85149") if b_open else "#888"
             st.markdown(
-                f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
-                f"Realized <b>{fmt_pnl(b_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{btc}'>{fmt_pnl(b_unreal)}</span>"
+                f"<div style='margin-top:12px;padding:8px;border:1px solid #d0d7de;border-radius:6px;font-size:0.85rem'>"
+                f"Realized <b>{fmt_pnl(b_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{b_uc}'>{fmt_pnl(b_unreal)}</span>"
                 f"</div>",
                 unsafe_allow_html=True,
             )
@@ -361,7 +358,7 @@ if page == "Today":
                 conf   = p.get("confidence", "")
                 cc     = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
                 st.markdown(
-                    f"**{p['ticker']}** &nbsp; "
+                    f"<b>{p['ticker']}</b> &nbsp; "
                     f"<span style='color:{cc};font-size:0.75rem'>{conf}</span><br>"
                     f"<span style='font-size:0.85rem'>"
                     f"Entry ${p.get('entry_price', 0):.2f} · "
@@ -383,18 +380,17 @@ if page == "Today":
                 real = p.get("realized_pnl") or 0
                 rc   = "#3fb950" if real >= 0 else "#f85149"
                 st.markdown(
-                    f"{p['ticker']} &nbsp; {_exit_badge(p.get('exit_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'>**{fmt_pnl(real)}**</span>",
+                    f"<b>{p['ticker']}</b> &nbsp; {_exit_badge(p.get('exit_reason'))} &nbsp;"
+                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span>",
                     unsafe_allow_html=True,
                 )
         elif not c_open:
             st.caption("No trades today")
 
-        c_total = c_real + c_unreal
-        ctc = "#3fb950" if c_total >= 0 else "#f85149"
+        c_uc = ("#3fb950" if c_unreal >= 0 else "#f85149") if c_open else "#888"
         st.markdown(
-            f"<div style='margin-top:12px;padding:8px;background:#161b22;border-radius:6px;font-size:0.85rem'>"
-            f"Realized <b>{fmt_pnl(c_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{ctc}'>{fmt_pnl(c_unreal)}</span>"
+            f"<div style='margin-top:12px;padding:8px;border:1px solid #d0d7de;border-radius:6px;font-size:0.85rem'>"
+            f"Realized <b>{fmt_pnl(c_real)}</b> &nbsp;·&nbsp; Unrealized <span style='color:{c_uc}'>{fmt_pnl(c_unreal)}</span>"
             f"</div>",
             unsafe_allow_html=True,
         )
