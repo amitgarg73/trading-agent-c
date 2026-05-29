@@ -244,14 +244,14 @@ class TraceLogger:
     # ── Private ────────────────────────────────────────────────────────────────
 
     def _insert_session_stub(self) -> None:
-        """Insert a minimal c_sessions row so c_traces FK is satisfied from the start."""
+        """Upsert a minimal c_sessions row so c_traces FK is satisfied from the start."""
         from core.db import get_client
-        get_client().table("c_sessions").insert({
+        get_client().table("c_sessions").upsert({
             "id":              self.session_id,
             "date":            date.today().isoformat(),
             "terminal_reason": "in_progress",
             "started_at":      self._started_at.isoformat(),
-        }).execute()
+        }, on_conflict="id", ignore_duplicates=True).execute()
 
     def _write(self, fields: dict) -> str:
         from core.db import get_client
