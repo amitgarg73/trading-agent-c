@@ -204,6 +204,7 @@ class TestPremarketMain:
         with patch("sessions.premarket.is_trading_day", return_value=True), \
              patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
              patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket._MARKET_OPEN", time(0, 0)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -221,6 +222,33 @@ class TestPremarketMain:
             from sessions.premarket import main
             main()
         mock_exec.assert_called_once()
+
+    def test_skips_execution_before_market_open(self, mock_supabase, capsys):
+        """Trades are selected but not submitted before 9:30 AM market open."""
+        mock_supabase.table.return_value = make_query([])
+        with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket._MARKET_OPEN", time(23, 59)), \
+             patch("sessions.premarket.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.premarket.load_params", return_value=self._mock_params()), \
+             patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
+             patch("sessions.premarket.run_premarket_pipeline",
+                   return_value={**_RESULT_WITH_TRADES, "_v2_market_report": _V2_REPORT}), \
+             patch("sessions.premarket._execute_trades") as mock_exec, \
+             patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
+             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket._log_market_eval"), \
+             patch("scanner.scanner.run_scanner", return_value=5), \
+             patch("sessions.premarket.send_alert"):
+            mock_tracer = MagicMock()
+            mock_tracer_cls.return_value = mock_tracer
+            from sessions.premarket import main
+            main()
+        mock_exec.assert_not_called()
+        out = capsys.readouterr().out
+        assert "deferred" in out
 
     def test_no_execute_when_no_trades(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \

@@ -13,9 +13,10 @@ from core.params import load_params
 from core.protection import check_protection_status
 from trace.logger import TraceLogger
 
-_ET             = pytz.timezone("America/New_York")
+_ET              = pytz.timezone("America/New_York")
 _PREMARKET_START = time(6, 0)   # 6:00 AM ET — earliest reasonable premarket
-_PREMARKET_END   = time(9, 25)  # 9:25 AM ET — must finish before market open
+_PREMARKET_END   = time(9, 45)  # 9:45 AM ET — covers 9:30 and 9:45 cron fires
+_MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
 def _execute_trades(trades: list[dict], session_id: str, trail_pct: float) -> None:
@@ -158,8 +159,11 @@ def main() -> None:
         trades    = result.get("trades", [])
         terminal  = result["session_meta"]["terminal_reason"]
 
-        if trades:
+        if trades and now_t >= _MARKET_OPEN:
             _execute_trades(trades, session_id, params.trail_pct)
+        elif trades:
+            print(f"[premarket] Market not yet open ({now_et.strftime('%H:%M ET')}) "
+                  f"— analysis complete, {len(trades)} trade(s) queued; execution deferred to 9:30 AM")
 
         # V1 shadow eval — non-blocking, does not affect trades
         try:
