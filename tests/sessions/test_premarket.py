@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -182,6 +182,8 @@ class TestPremarketMain:
 
     def test_exits_when_protection_suspended(self, mock_supabase, capsys):
         with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection(suspended=True, tier=5,
                                                        reason="drawdown", resume_at="2026-06-01")), \
@@ -200,6 +202,8 @@ class TestPremarketMain:
     def test_runs_pipeline_and_executes_trades(self, mock_supabase, capsys):
         mock_supabase.table.return_value = make_query([])
         with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -220,6 +224,8 @@ class TestPremarketMain:
 
     def test_no_execute_when_no_trades(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -240,6 +246,8 @@ class TestPremarketMain:
 
     def test_sends_alert_on_success(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -260,6 +268,8 @@ class TestPremarketMain:
 
     def test_sends_error_alert_and_reraises_on_exception(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from uuid import uuid4
 
 import pytz
@@ -13,7 +13,9 @@ from core.params import load_params
 from core.protection import check_protection_status
 from trace.logger import TraceLogger
 
-_ET = pytz.timezone("America/New_York")
+_ET             = pytz.timezone("America/New_York")
+_PREMARKET_START = time(6, 0)   # 6:00 AM ET — earliest reasonable premarket
+_PREMARKET_END   = time(9, 25)  # 9:25 AM ET — must finish before market open
 
 
 def _execute_trades(trades: list[dict], session_id: str, trail_pct: float) -> None:
@@ -113,6 +115,11 @@ def main() -> None:
 
     if not is_trading_day(weekday):
         print(f"[premarket] Not a trading day ({weekday}). Exiting.")
+        return
+
+    now_t = now_et.time()
+    if not (_PREMARKET_START <= now_t <= _PREMARKET_END):
+        print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}). Exiting.")
         return
 
     protection = check_protection_status()
