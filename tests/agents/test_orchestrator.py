@@ -25,12 +25,39 @@ _PROPOSALS = {
     ],
     "skipped": [], "summary": "One strong setup.",
 }
+_PROPOSALS_TWO = {
+    "proposals": [
+        {"ticker": "AAPL", "entry_price": 185.0, "target_price": 192.4,
+         "stop_loss": 183.78, "position_size": 3500, "confidence": "HIGH",
+         "evidence": ["above_vwap"]},
+        {"ticker": "MSFT", "entry_price": 420.0, "target_price": 453.6,
+         "stop_loss": 417.19, "position_size": 3000, "confidence": "MEDIUM",
+         "evidence": ["rs_vs_spy"]},
+    ],
+    "skipped": [], "summary": "Two setups.",
+}
 _VERDICTS_APPROVED = {
     "verdicts": [{"ticker": "AAPL", "verdict": "APPROVED", "reason": "all constraints passed"}],
     "portfolio_state": {"buying_power": 46500.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
 }
 _VERDICTS_REJECTED = {
     "verdicts": [{"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"}],
+    "portfolio_state": {"buying_power": 50000.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
+}
+# AAPL rejected, MSFT approved — used to test partial-rejection fast path
+_VERDICTS_PARTIAL_REJECT = {
+    "verdicts": [
+        {"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"},
+        {"ticker": "MSFT", "verdict": "APPROVED", "reason": "all constraints passed"},
+    ],
+    "portfolio_state": {"buying_power": 50000.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
+}
+# Both proposals rejected — all tickers removed, forces research re-run
+_VERDICTS_ALL_REJECTED = {
+    "verdicts": [
+        {"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"},
+        {"ticker": "MSFT", "verdict": "REJECTED", "reason": "count limit exceeded"},
+    ],
     "portfolio_state": {"buying_power": 50000.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
 }
 _VERDICTS_STRUCTURAL = {
@@ -142,11 +169,10 @@ class TestRunPremarketPipeline:
         assert "retry_needed" not in result
 
     def test_retry_triggered_on_fixable_rejections(self, tracer):
+        # All proposals rejected: research must be re-run to get new candidates.
         client = MagicMock()
         client.messages.create.side_effect = [
-            # First synthesis: retry_needed
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
-            # Second synthesis: converged
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
         ]
         with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
@@ -154,12 +180,13 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_REJECTED) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        # Research and risk called twice (original + retry)
+        # All proposals rejected: research re-run, risk called twice
         assert mock_res.call_count == 2
         assert mock_risk.call_count == 2
         assert result["session_meta"]["retry_triggered"] is True
 
-    def test_retry_passes_rejection_context(self, tracer):
+    def test_retry_passes_rejection_context_when_research_rerun(self, tracer):
+        # When all proposals are rejected, research re-runs with rejected_context.
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -173,6 +200,59 @@ class TestRunPremarketPipeline:
         # Second call should include rejected_context
         second_call_kwargs = mock_res.call_args_list[1][1]
         assert second_call_kwargs.get("rejected_context") is not None
+
+    def test_retry_skips_research_when_proposals_remain(self, tracer):
+        # Partial rejection: some proposals survive filtering.
+        # Research should NOT be re-run — results are still valid.
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
+        ]
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS_TWO) as mock_res, \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_PARTIAL_REJECT) as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        # Research called once; risk called twice (original + retry with filtered proposals)
+        assert mock_res.call_count == 1
+        assert mock_risk.call_count == 2
+        assert result["session_meta"]["retry_triggered"] is True
+
+    def test_retry_filtered_proposals_exclude_rejected_tickers(self, tracer):
+        # When proposals are filtered, rejected tickers must not appear in retry risk call.
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
+        ]
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS_TWO), \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_PARTIAL_REJECT) as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
+            run_premarket_pipeline(tracer, StrategyParams())
+        # Second risk call receives only the non-rejected ticker (MSFT)
+        retry_proposals = mock_risk.call_args_list[1][0][1]  # positional arg: trade_proposals
+        tickers = [p["ticker"] for p in retry_proposals["proposals"]]
+        assert "AAPL" not in tickers
+        assert "MSFT" in tickers
+
+    def test_retry_reruns_research_when_all_proposals_rejected(self, tracer):
+        # All proposals rejected: no remaining candidates, research must re-run.
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
+            make_api_response("end_turn", [text_block(json.dumps(_FINAL_CONVERGED))]),
+        ]
+        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS_TWO) as mock_res, \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_ALL_REJECTED) as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        # Research re-run (both rejected) and risk called twice
+        assert mock_res.call_count == 2
+        assert mock_risk.call_count == 2
+        assert result["session_meta"]["retry_triggered"] is True
 
     def test_structural_block_no_retry(self, tracer):
         client = self._mock_synthesis(_FINAL_STRUCTURAL)

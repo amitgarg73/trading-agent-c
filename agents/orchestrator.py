@@ -177,14 +177,37 @@ def run_premarket_pipeline(
         )
         return result
 
-    # Step 5: One retry on fixable rejections
+    # Step 5: One retry on fixable rejections.
+    # If proposals remain after removing rejected tickers, skip re-running the
+    # research agent — its findings are still valid. Pass the filtered proposals
+    # directly to the risk agent instead.
     rejected = [
         v for v in risk_verdicts.get("verdicts", [])
         if v.get("verdict") == "REJECTED"
     ]
-    trade_proposals_retry = run_research_agent(
-        tracer, market_report, params, rejected_context=rejected
-    )
+    rejected_tickers = {v["ticker"] for v in rejected}
+    remaining_proposals = [
+        p for p in trade_proposals.get("proposals", [])
+        if p["ticker"] not in rejected_tickers
+    ]
+
+    if remaining_proposals:
+        # Re-use first-run research results with rejected tickers removed.
+        # No need to re-investigate tickers the research agent already analysed.
+        trade_proposals_retry = {
+            "proposals": remaining_proposals,
+            "skipped": trade_proposals.get("skipped", []),
+            "summary": (
+                f"Retry (filtered): {len(remaining_proposals)} proposal(s) "
+                f"after removing {len(rejected_tickers)} rejected ticker(s)."
+            ),
+        }
+    else:
+        # All proposals were rejected — need fresh candidates from the research agent.
+        trade_proposals_retry = run_research_agent(
+            tracer, market_report, params, rejected_context=rejected
+        )
+
     risk_verdicts_retry = run_risk_agent(tracer, trade_proposals_retry, params)
     result = _run_synthesis_call(
         client, market_report, trade_proposals_retry, risk_verdicts_retry,
