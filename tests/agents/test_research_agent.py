@@ -1,84 +1,71 @@
 from __future__ import annotations
 
-import json
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.research_agent import _build_user_message, run_research_agent
+from agents.research_agent import run_research_agent, _screen_candidates
 from core.params import StrategyParams
-from tests.conftest import make_api_response, text_block, tool_block
 
 _MARKET_REPORT = {
-    "decision": "GO", "max_positions": 5, "bias": "BULLISH",
+    "decision": "GO", "max_positions": 2, "bias": "BULLISH",
     "skip_reason": None, "summary": "Clean open.",
 }
 
-_PROPOSALS = {
-    "proposals": [
-        {"ticker": "AAPL", "entry_price": 185.0, "target_price": 192.4,
-         "stop_loss": 183.78, "position_size": 3500, "confidence": "HIGH",
-         "evidence": ["above_vwap", "rs=1.8"]},
-    ],
-    "skipped": [],
-    "summary": "One strong setup.",
-}
+_CAUTION_REPORT = {**_MARKET_REPORT, "decision": "CAUTION"}
 
 _CANDIDATES = [
-    {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0, "avg_volume": 50_000_000},
+    {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0,
+     "avg_volume": 50_000_000, "sector": "Technology"},
+    {"ticker": "MSFT", "technical_score": 7, "current_price": 420.0,
+     "avg_volume": 30_000_000, "sector": "Technology"},
 ]
-_NEWS     = {"blackout": False, "reason": None, "headlines": ["Strong earnings"]}
-_PRICE    = {"price": 185.0, "source": "alpaca", "stale_minutes": 0}
-_SIGNALS  = {"above_vwap": True, "vwap": 183.5, "rs_vs_spy": 1.8, "today_pct_change": 0.6}
-_ATR      = {"atr_pct": 1.2, "orb_pct": 0.4}
-_HIST     = {"trades": 5, "wins": 4, "win_rate_pct": 80.0, "avg_pnl": 45.0, "last_exit": "TARGET"}
-_SNAPSHOT  = [{"ticker": "AAPL", "score": 8, "scanner_price": 185.0,
-               "premarket_price": 186.85, "premarket_change_pct": 1.0}]
-_SECTOR    = [
-    {"etf": "XLK", "name": "Technology",  "change_pct": 1.2},
-    {"etf": "XLF", "name": "Financials",  "change_pct": 0.4},
-    {"etf": "XLU", "name": "Utilities",   "change_pct": -0.8},
+
+_SNAPSHOT = [
+    {"ticker": "AAPL", "scanner_price": 185.0, "premarket_price": 186.85,
+     "premarket_change_pct": 1.0},
+    {"ticker": "MSFT", "scanner_price": 420.0, "premarket_price": 422.0,
+     "premarket_change_pct": 0.5},
 ]
-_FLOAT     = {"float_shares_m": 15.8, "short_pct_float": 8.2, "short_ratio_days": 2.1,
-              "low_float": True, "squeeze_potential": False}
-_PREV_LVLS = {"prev_day_high": 187.5, "prev_day_low": 183.0,
-              "prev_day_close": 185.0, "prev_day_range_pct": 2.43}
-_PM_VOL    = {"premarket_volume": 450_000, "avg_daily_volume": 5_000_000,
-              "pct_of_avg_daily": 9.0, "conviction": "MODERATE"}
+
+_SECTOR = [
+    {"etf": "XLK", "name": "Technology", "change_pct": 1.2},
+    {"etf": "XLF", "name": "Financials", "change_pct": 0.4},
+    {"etf": "XLU", "name": "Utilities",  "change_pct": -0.8},
+]
+
+_PROPOSE_AAPL = {
+    "action": "PROPOSE",
+    "ticker": "AAPL",
+    "entry_price": 185.0,
+    "target_price": 199.8,
+    "stop_loss": 183.77,
+    "position_size": 3500,
+    "confidence": "HIGH",
+    "evidence": ["above_vwap", "rs=1.8"],
+    "skip_reason": None,
+}
+
+_SKIP_MSFT = {
+    "action": "SKIP",
+    "ticker": "MSFT",
+    "entry_price": None,
+    "target_price": None,
+    "stop_loss": None,
+    "position_size": None,
+    "confidence": None,
+    "evidence": [],
+    "skip_reason": "atr_pct > 5",
+}
 
 
-def _setup_client():
-    tool_calls = [
-        tool_block("get_candidates",        {"min_score": 5}, "t1"),
-        tool_block("get_news",              {"ticker": "AAPL"}, "t2"),
-        tool_block("get_intraday_signals",  {"ticker": "AAPL"}, "t3"),
-        tool_block("get_live_price",        {"ticker": "AAPL"}, "t4"),
-        tool_block("get_atr",               {"ticker": "AAPL"}, "t5"),
-        tool_block("get_position_history",  {"ticker": "AAPL"}, "t6"),
-    ]
-    from unittest.mock import MagicMock
-    client = MagicMock()
-    client.messages.create.side_effect = [
-        make_api_response("tool_use", tool_calls),
-        make_api_response("end_turn", [text_block(json.dumps(_PROPOSALS))]),
-    ]
-    return client
-
-
-def _run(tracer, mock_client=None, market_report=None, rejected_context=None):
-    client = mock_client or _setup_client()
-    with patch("agents.research_agent.anthropic.Anthropic",      return_value=client), \
-         patch("agents.research_agent.get_candidates",            return_value=_CANDIDATES), \
-         patch("agents.research_agent.get_premarket_snapshot",    return_value=_SNAPSHOT), \
-         patch("agents.research_agent.get_sector_rotation",       return_value=_SECTOR), \
-         patch("agents.research_agent.get_float_short_interest",  return_value=_FLOAT), \
-         patch("agents.research_agent.get_prev_day_levels",       return_value=_PREV_LVLS), \
-         patch("agents.research_agent.get_premarket_volume",      return_value=_PM_VOL), \
-         patch("agents.research_agent.get_news",                  return_value=_NEWS), \
-         patch("agents.research_agent.get_live_price",            return_value=_PRICE), \
-         patch("agents.research_agent.get_intraday_signals",      return_value=_SIGNALS), \
-         patch("agents.research_agent.get_atr",                   return_value=_ATR), \
-         patch("agents.research_agent.get_position_history",      return_value=_HIST):
+def _run(tracer, market_report=None, rejected_context=None,
+         investigate_side_effect=None):
+    investigate_side_effect = investigate_side_effect or (lambda *a, **kw: _PROPOSE_AAPL)
+    with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+         patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+         patch("agents.research_agent.get_sector_rotation",    return_value=_SECTOR), \
+         patch("agents.research_agent._investigate_ticker",    side_effect=investigate_side_effect):
         return run_research_agent(
             tracer, market_report or _MARKET_REPORT,
             StrategyParams(), rejected_context=rejected_context,
@@ -89,28 +76,32 @@ class TestRunResearchAgent:
     def test_returns_proposals_dict(self, tracer):
         result = _run(tracer)
         assert "proposals" in result
-        assert result["proposals"][0]["ticker"] == "AAPL"
+        assert "skipped" in result
+        assert "summary" in result
+
+    def test_propose_result_included(self, tracer):
+        result = _run(tracer)
+        tickers = [p["ticker"] for p in result["proposals"]]
+        assert "AAPL" in tickers
 
     def test_span_started(self, tracer):
         _run(tracer)
         assert tracer.get_agent_span("research") is not None
 
-    def test_tokens_accumulated(self, tracer):
-        _run(tracer)
-        assert tracer._tokens.get("research", {}).get("input", 0) > 0
+    def test_skip_result_recorded(self, tracer):
+        def side_effect(ticker, *args, **kwargs):
+            return _SKIP_MSFT if ticker == "MSFT" else _PROPOSE_AAPL
 
-    def test_parses_json_from_code_block(self, tracer):
-        from unittest.mock import MagicMock
-        client = MagicMock()
-        client.messages.create.side_effect = [
-            make_api_response("tool_use", [tool_block("get_candidates", {}, "t1")]),
-            make_api_response("end_turn", [text_block(f"```json\n{json.dumps(_PROPOSALS)}\n```")]),
-        ]
-        result = _run(tracer, mock_client=client)
-        assert "proposals" in result
+        result = _run(tracer, investigate_side_effect=side_effect)
+        skipped_tickers = [s["ticker"] for s in result["skipped"]]
+        assert "MSFT" in skipped_tickers
+
+    def test_max_positions_respected(self, tracer):
+        report = {**_MARKET_REPORT, "max_positions": 1}
+        result = _run(tracer, market_report=report)
+        assert len(result["proposals"]) <= 1
 
     def test_no_candidates_returns_empty_proposals(self, tracer):
-        from unittest.mock import MagicMock
         with patch("agents.research_agent.get_candidates",      return_value=[]), \
              patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
              patch("agents.research_agent.anthropic.Anthropic"):
@@ -119,7 +110,6 @@ class TestRunResearchAgent:
         assert result["skipped"] == []
 
     def test_no_candidates_does_not_call_claude(self, tracer):
-        from unittest.mock import MagicMock
         mock_anthropic = MagicMock()
         with patch("agents.research_agent.get_candidates",      return_value=[]), \
              patch("agents.research_agent.get_sector_rotation", return_value=_SECTOR), \
@@ -134,41 +124,126 @@ class TestRunResearchAgent:
             result = run_research_agent(tracer, _MARKET_REPORT, StrategyParams())
         assert result["proposals"] == []
 
-
-class TestBuildUserMessage:
-    def test_includes_market_report_json(self):
-        msg = _build_user_message(_MARKET_REPORT)
-        assert "max_positions" in msg
-        assert "market conditions" in msg.lower()
-
-    def test_no_rejected_context_by_default(self):
-        msg = _build_user_message(_MARKET_REPORT)
-        assert "rejected" not in msg.lower()
-
-    def test_rejected_context_included_on_retry(self):
+    def test_rejected_tickers_excluded(self, tracer):
         rejected = [{"ticker": "AAPL", "reason": "sector concentration"}]
-        msg = _build_user_message(_MARKET_REPORT, rejected_context=rejected)
-        assert "AAPL" in msg
-        assert "sector concentration" in msg
-        assert "Avoid" in msg
+        investigate_calls = []
 
-    def test_caution_market_report_passed_through(self):
-        caution_report = {**_MARKET_REPORT, "decision": "CAUTION"}
-        msg = _build_user_message(caution_report)
-        assert "CAUTION" in msg
+        def side_effect(ticker, *args, **kwargs):
+            investigate_calls.append(ticker)
+            return _PROPOSE_AAPL
 
-    def test_sector_rotation_leading_and_lagging_included(self):
-        msg = _build_user_message(_MARKET_REPORT, sector_rotation=_SECTOR)
-        assert "Leading" in msg
-        assert "XLK" in msg
-        assert "Lagging" in msg
-        assert "XLU" in msg
+        _run(tracer, rejected_context=rejected, investigate_side_effect=side_effect)
+        assert "AAPL" not in investigate_calls
 
-    def test_no_sector_block_when_sector_rotation_empty(self):
-        msg = _build_user_message(_MARKET_REPORT, sector_rotation=[])
-        assert "Leading" not in msg
-        assert "Lagging" not in msg
+    def test_investigation_error_recorded_as_skip(self, tracer):
+        def side_effect(ticker, *args, **kwargs):
+            raise RuntimeError("network error")
 
-    def test_sector_error_skipped_gracefully(self):
-        msg = _build_user_message(_MARKET_REPORT, sector_rotation=[{"error": "timeout"}])
-        assert "Leading" not in msg
+        result = _run(tracer, investigate_side_effect=side_effect)
+        assert len(result["skipped"]) > 0
+        assert any("investigation error" in s["reason"] for s in result["skipped"])
+
+    def test_proposals_sorted_by_confidence(self, tracer):
+        candidates = [
+            {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0,
+             "avg_volume": 50_000_000, "sector": "Technology"},
+            {"ticker": "MSFT", "technical_score": 7, "current_price": 420.0,
+             "avg_volume": 30_000_000, "sector": "Technology"},
+        ]
+        snapshot = [
+            {"ticker": "AAPL", "scanner_price": 185.0, "premarket_price": 186.85,
+             "premarket_change_pct": 1.0},
+            {"ticker": "MSFT", "scanner_price": 420.0, "premarket_price": 422.0,
+             "premarket_change_pct": 0.5},
+        ]
+        propose_low  = {**_PROPOSE_AAPL, "ticker": "AAPL", "confidence": "LOW"}
+        propose_high = {**_PROPOSE_AAPL, "ticker": "MSFT", "confidence": "HIGH"}
+
+        def side_effect(ticker, *args, **kwargs):
+            return propose_low if ticker == "AAPL" else propose_high
+
+        report = {**_MARKET_REPORT, "max_positions": 2}
+        with patch("agents.research_agent.get_candidates",         return_value=candidates), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snapshot), \
+             patch("agents.research_agent.get_sector_rotation",    return_value=_SECTOR), \
+             patch("agents.research_agent._investigate_ticker",    side_effect=side_effect):
+            result = run_research_agent(tracer, report, StrategyParams())
+
+        if len(result["proposals"]) >= 2:
+            assert result["proposals"][0]["confidence"] == "HIGH"
+
+
+class TestScreenCandidates:
+    def test_selects_up_to_max_positions(self):
+        report = {**_MARKET_REPORT, "max_positions": 1}
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
+            selected = _screen_candidates(report, _SECTOR, [])
+        assert len(selected) <= 1
+
+    def test_excludes_rejected_tickers(self):
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, ["AAPL"])
+        tickers = [s["ticker"] for s in selected]
+        assert "AAPL" not in tickers
+
+    def test_caution_filters_low_score(self):
+        low_candidates = [
+            {"ticker": "WEAK", "technical_score": 6, "current_price": 50.0,
+             "avg_volume": 1_000_000, "sector": "Utilities"},
+        ]
+        low_snapshot = [
+            {"ticker": "WEAK", "scanner_price": 50.0, "premarket_price": 50.1,
+             "premarket_change_pct": 0.2},
+        ]
+        with patch("agents.research_agent.get_candidates",         return_value=low_candidates), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=low_snapshot):
+            selected = _screen_candidates(_CAUTION_REPORT, _SECTOR, [])
+        assert len(selected) == 0
+
+    def test_caution_passes_high_score(self):
+        strong_candidates = [
+            {"ticker": "STRONG", "technical_score": 9, "current_price": 100.0,
+             "avg_volume": 10_000_000, "sector": "Technology"},
+        ]
+        strong_snapshot = [
+            {"ticker": "STRONG", "scanner_price": 100.0, "premarket_price": 100.5,
+             "premarket_change_pct": 0.5},
+        ]
+        with patch("agents.research_agent.get_candidates",         return_value=strong_candidates), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=strong_snapshot):
+            selected = _screen_candidates(_CAUTION_REPORT, _SECTOR, [])
+        assert len(selected) == 1
+        assert selected[0]["ticker"] == "STRONG"
+
+    def test_sorted_by_score_then_momentum(self):
+        candidates = [
+            {"ticker": "A", "technical_score": 7, "current_price": 100.0,
+             "avg_volume": 5_000_000, "sector": "Technology"},
+            {"ticker": "B", "technical_score": 8, "current_price": 50.0,
+             "avg_volume": 5_000_000, "sector": "Technology"},
+        ]
+        snapshot = [
+            {"ticker": "A", "scanner_price": 100.0, "premarket_price": 101.0,
+             "premarket_change_pct": 1.0},
+            {"ticker": "B", "scanner_price": 50.0, "premarket_price": 50.5,
+             "premarket_change_pct": 1.0},
+        ]
+        with patch("agents.research_agent.get_candidates",         return_value=candidates), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snapshot):
+            selected = _screen_candidates({**_MARKET_REPORT, "max_positions": 2}, _SECTOR, [])
+        assert selected[0]["ticker"] == "B"  # higher score first
+
+    def test_error_candidates_excluded(self):
+        candidates_with_error = [
+            {"error": "timeout"},
+            {"ticker": "AAPL", "technical_score": 8, "current_price": 185.0,
+             "avg_volume": 50_000_000, "sector": "Technology"},
+        ]
+        with patch("agents.research_agent.get_candidates",         return_value=candidates_with_error), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
+        tickers = [s["ticker"] for s in selected]
+        assert "AAPL" in tickers
+        assert len(selected) == 1

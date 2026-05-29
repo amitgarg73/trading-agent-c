@@ -13,6 +13,218 @@ def _is_premarket() -> bool:
     return (now_et.hour, now_et.minute) < (9, 25)
 
 
+# ── Merged tools (used by the parallel per-ticker agents) ─────────────────────
+# Each merged tool replaces 2-4 individual tools, cutting LLM round-trips in half.
+
+
+def get_ticker_fundamentals(ticker: str) -> dict[str, Any]:
+    """
+    Fetch float/short-interest and previous-day levels in one yfinance session.
+    Replaces: get_float_short_interest + get_prev_day_levels (was 2 LLM turns, now 1).
+    """
+    try:
+        import yfinance as yf
+        t = yf.Ticker(ticker)
+
+        result: dict[str, Any] = {}
+
+        # Float + short interest
+        try:
+            info          = t.info
+            float_shares  = info.get("floatShares")
+            short_pct     = info.get("shortPercentOfFloat")
+            short_ratio   = info.get("shortRatio")
+            float_m       = round(float_shares / 1_000_000, 1) if float_shares else None
+            short_pct_disp = round(short_pct * 100, 1) if short_pct is not None else None
+            low_float     = float_m is not None and float_m < 20
+            high_short    = short_pct is not None and short_pct > 0.15
+            result.update({
+                "float_shares_m":   float_m,
+                "short_pct_float":  short_pct_disp,
+                "short_ratio_days": short_ratio,
+                "low_float":        low_float,
+                "squeeze_potential": low_float and high_short,
+            })
+        except Exception as e:
+            result["float_error"] = str(e)
+
+        # Previous-day high / low / close
+        try:
+            hist = t.history(period="5d")
+            if len(hist) >= 2:
+                prev = hist.iloc[-2]   # always yesterday, whether or not today appears
+                pdh  = round(float(prev["High"]),  2)
+                pdl  = round(float(prev["Low"]),   2)
+                pdc  = round(float(prev["Close"]), 2)
+                result.update({
+                    "prev_day_high":      pdh,
+                    "prev_day_low":       pdl,
+                    "prev_day_close":     pdc,
+                    "prev_day_range_pct": round((pdh - pdl) / pdc * 100, 2) if pdc else 0.0,
+                })
+            else:
+                result["prev_day_error"] = "insufficient history"
+        except Exception as e:
+            result["prev_day_error"] = str(e)
+
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def get_ticker_market_data(ticker: str) -> dict[str, Any]:
+    """
+    Batch-fetch all market signal data in 2-3 Alpaca calls.
+    Replaces: get_premarket_volume + get_intraday_signals + get_atr + get_live_price
+    (was 4 LLM turns and 6 Alpaca API calls, now 1 LLM turn and 3 Alpaca calls).
+
+    Returns:
+      atr_pct, avg_daily_volume                           — from daily bars
+      premarket_volume, pct_of_avg_daily, conviction      — from pre-market minute bars
+      above_vwap, vwap, rs_vs_spy, today_pct_change,
+      orb_pct, live_price, available                      — from intraday minute bars
+    """
+    from core.alpaca import _dclient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame
+    from datetime import datetime, timedelta, timezone
+    import pytz
+
+    et       = pytz.timezone("America/New_York")
+    now_et   = datetime.now(et)
+    result: dict[str, Any] = {}
+
+    # ── 1. Daily bars (50 calendar days → ~35 trading days) ──────────────────
+    try:
+        daily_start = (now_et - timedelta(days=50)).date()
+        daily_bars  = _dclient().get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Day,
+            start=daily_start,
+        )).data.get(ticker, [])
+
+        if len(daily_bars) >= 2:
+            tr_values = [
+                max(float(daily_bars[i].high) - float(daily_bars[i].low),
+                    abs(float(daily_bars[i].high)  - float(daily_bars[i - 1].close)),
+                    abs(float(daily_bars[i].low)   - float(daily_bars[i - 1].close)))
+                for i in range(1, len(daily_bars))
+            ]
+            atr   = sum(tr_values[-14:]) / min(14, len(tr_values))
+            price = float(daily_bars[-1].close)
+            result["atr_pct"] = round(atr / price * 100, 2) if price else None
+        else:
+            result["atr_pct"] = None
+
+        # 20-day avg volume: exclude today's partial bar
+        history = daily_bars[-21:-1] if len(daily_bars) >= 21 else daily_bars[:-1]
+        result["avg_daily_volume"] = int(sum(b.volume for b in history) / len(history)) if history else None
+
+    except Exception as e:
+        result["atr_pct"]         = None
+        result["avg_daily_volume"] = None
+        result["daily_bars_error"] = str(e)
+
+    # ── 2. Pre-market minute bars (4 AM – 9:25 AM ET) ────────────────────────
+    try:
+        pm_start     = now_et.replace(hour=4,  minute=0,  second=0, microsecond=0)
+        pm_end       = now_et.replace(hour=9,  minute=25, second=0, microsecond=0)
+        pm_bars      = _dclient().get_stock_bars(StockBarsRequest(
+            symbol_or_symbols=[ticker],
+            timeframe=TimeFrame.Minute,
+            start=pm_start.astimezone(timezone.utc),
+            end=(now_et if now_et < pm_end else pm_end).astimezone(timezone.utc),
+        )).data.get(ticker, [])
+
+        premarket_vol = int(sum(b.volume for b in pm_bars))
+        avg           = result.get("avg_daily_volume")
+        pct_of_daily  = round(premarket_vol / avg * 100, 1) if avg else None
+        conviction    = (
+            "HIGH"     if pct_of_daily is not None and pct_of_daily >= 15 else
+            "MODERATE" if pct_of_daily is not None and pct_of_daily >= 5  else
+            "LOW"      if pct_of_daily is not None else "unknown"
+        )
+        result["premarket_volume"] = premarket_vol
+        result["pct_of_avg_daily"] = pct_of_daily
+        result["conviction"]       = conviction
+
+    except Exception as e:
+        result["premarket_volume"] = None
+        result["conviction"]       = "unknown"
+        result["premarket_error"]  = str(e)
+
+    # ── 3. Intraday minute bars (9:30 AM ET → now) with SPY ──────────────────
+    if _is_premarket():
+        result.update({
+            "available":        False,
+            "reason":           "pre-market",
+            "above_vwap":       None,
+            "vwap":             None,
+            "rs_vs_spy":        None,
+            "today_pct_change": None,
+            "orb_pct":          None,
+            "live_price":       None,
+        })
+    else:
+        try:
+            market_open  = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+            bars_data    = _dclient().get_stock_bars(StockBarsRequest(
+                symbol_or_symbols=[ticker, "SPY"],
+                timeframe=TimeFrame.Minute,
+                start=market_open.astimezone(timezone.utc),
+            )).data
+            stock_bars   = bars_data.get(ticker, [])
+            spy_bars     = bars_data.get("SPY", [])
+
+            if stock_bars:
+                total_pv     = sum((b.high + b.low + b.close) / 3 * b.volume for b in stock_bars)
+                total_vol_s  = sum(b.volume for b in stock_bars)
+                vwap         = round(total_pv / total_vol_s, 2) if total_vol_s > 0 else None
+                curr         = float(stock_bars[-1].close)
+                open_        = float(stock_bars[0].open)
+                today_pct    = round((curr - open_) / open_ * 100, 2) if open_ else 0.0
+
+                rs_vs_spy = None
+                if spy_bars:
+                    spy_o, spy_c = float(spy_bars[0].open), float(spy_bars[-1].close)
+                    if spy_o and spy_c != spy_o:
+                        spy_chg   = (spy_c - spy_o) / spy_o
+                        stock_chg = (curr - open_) / open_ if open_ else 0.0
+                        rs_vs_spy = round(stock_chg / spy_chg, 2) if spy_chg != 0 else None
+
+                orb_pct = None
+                if len(stock_bars) >= 30:
+                    orb_o   = float(stock_bars[0].open)
+                    orb_pct = round(
+                        (max(float(b.high) for b in stock_bars[:30]) -
+                         min(float(b.low)  for b in stock_bars[:30])) / orb_o * 100, 2
+                    ) if orb_o else None
+
+                result.update({
+                    "available":        True,
+                    "above_vwap":       curr > vwap if vwap else None,
+                    "vwap":             vwap,
+                    "rs_vs_spy":        rs_vs_spy,
+                    "today_pct_change": today_pct,
+                    "orb_pct":          orb_pct,
+                    "live_price":       round(curr, 2),
+                })
+            else:
+                result.update({
+                    "available": False,
+                    "reason":    "no intraday bars",
+                    "live_price": None,
+                })
+        except Exception as e:
+            result.update({
+                "available":       False,
+                "intraday_error":  str(e),
+                "live_price":      None,
+            })
+
+    return result
+
+
 def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
     """
     Return tickers from c_scan_results for today with score >= min_score.

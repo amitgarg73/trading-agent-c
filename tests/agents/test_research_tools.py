@@ -17,6 +17,8 @@ from agents.tools.research_tools import (
     get_premarket_snapshot,
     get_premarket_volume,
     get_prev_day_levels,
+    get_ticker_fundamentals,
+    get_ticker_market_data,
 )
 from tests.conftest import make_query
 
@@ -196,7 +198,7 @@ class TestGetLivePrice:
 
 # ── get_intraday_signals ───────────────────────────────────────────────────────
 
-_MARKET_SESSION = patch("agents.tools.research_tools._is_premarket", return_value=False)
+_MARKET_SESSION = patch("agents.tools.research_tools._is_premarket", return_value=False, create=True)
 
 
 class TestGetIntradaySignals:
@@ -207,7 +209,7 @@ class TestGetIntradaySignals:
         return {"AAPL": stock, "SPY": spy}
 
     def test_premarket_returns_unavailable(self):
-        with patch("agents.tools.research_tools._is_premarket", return_value=True):
+        with patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
             result = get_intraday_signals("AAPL")
         assert result["available"] is False
         assert result["reason"] == "pre-market"
@@ -493,3 +495,230 @@ class TestGetPrevDayLevels:
         with patch("yfinance.Ticker", side_effect=Exception("timeout")):
             result = get_prev_day_levels("AAPL")
         assert "error" in result
+
+
+# ── get_ticker_fundamentals tests ─────────────────────────────────────────────
+
+class TestGetTickerFundamentals:
+    def _mock_ticker(self, info: dict, history_rows: list):
+        """Return a context manager that patches yfinance.Ticker."""
+        cols = ["Open", "High", "Low", "Close", "Volume"]
+        df   = pd.DataFrame(history_rows, columns=cols)
+
+        mock_t = MagicMock()
+        mock_t.info    = info
+        mock_t.history = MagicMock(return_value=df)
+
+        return patch("yfinance.Ticker", return_value=mock_t)
+
+    def _info(self, float_shares=15_800_000, short_pct=0.082, short_ratio=2.1):
+        return {
+            "floatShares":         float_shares,
+            "shortPercentOfFloat": short_pct,
+            "shortRatio":          short_ratio,
+        }
+
+    def _rows(self):
+        # 3 rows: [two days ago, yesterday, today]
+        # iloc[-2] = yesterday → High=188, Low=184, Close=187
+        return [
+            [183.0, 186.0, 182.5, 185.0, 1_000_000],
+            [185.0, 188.0, 184.0, 187.0, 1_200_000],
+            [187.0, 190.0, 186.0, 189.0, 1_400_000],
+        ]
+
+    def test_returns_float_data(self):
+        with self._mock_ticker(self._info(), self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["float_shares_m"] == pytest.approx(15.8, abs=0.1)
+        assert result["short_pct_float"] == pytest.approx(8.2, abs=0.1)
+        assert result["short_ratio_days"] == pytest.approx(2.1, abs=0.1)
+
+    def test_low_float_flag(self):
+        with self._mock_ticker(self._info(float_shares=10_000_000), self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["low_float"] is True
+
+    def test_not_low_float_above_20m(self):
+        with self._mock_ticker(self._info(float_shares=50_000_000), self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["low_float"] is False
+
+    def test_squeeze_potential_requires_low_float_and_high_short(self):
+        info = self._info(float_shares=10_000_000, short_pct=0.20)  # >15% short
+        with self._mock_ticker(info, self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["squeeze_potential"] is True
+
+    def test_no_squeeze_when_short_below_threshold(self):
+        info = self._info(float_shares=10_000_000, short_pct=0.05)  # only 5%
+        with self._mock_ticker(info, self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["squeeze_potential"] is False
+
+    def test_prev_day_levels_populated(self):
+        with self._mock_ticker(self._info(), self._rows()):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["prev_day_high"]  == pytest.approx(188.0)
+        assert result["prev_day_low"]   == pytest.approx(184.0)
+        assert result["prev_day_close"] == pytest.approx(187.0)
+
+    def test_prev_day_error_on_insufficient_history(self):
+        one_row = [[185.0, 188.0, 184.0, 187.0, 1_000_000]]
+        with self._mock_ticker(self._info(), one_row):
+            result = get_ticker_fundamentals("AAPL")
+        assert "prev_day_error" in result
+
+    def test_partial_result_on_info_failure(self):
+        mock_t = MagicMock()
+        mock_t.info    = MagicMock(side_effect=Exception("rate limited"))
+        df             = pd.DataFrame(self._rows(), columns=["Open", "High", "Low", "Close", "Volume"])
+        mock_t.history = MagicMock(return_value=df)
+
+        with patch("yfinance.Ticker", return_value=mock_t):
+            result = get_ticker_fundamentals("AAPL")
+
+        assert "float_error" in result
+        assert "prev_day_high" in result  # history still worked
+
+    def test_returns_error_on_complete_failure(self):
+        with patch("yfinance.Ticker", side_effect=Exception("crash")):
+            result = get_ticker_fundamentals("AAPL")
+        assert "error" in result
+
+
+# ── get_ticker_market_data tests ──────────────────────────────────────────────
+
+class TestGetTickerMarketData:
+    def _make_daily_bar(self, close, high=None, low=None, volume=1_000_000):
+        b = MagicMock()
+        b.close  = close
+        b.high   = high  if high  is not None else close * 1.01
+        b.low    = low   if low   is not None else close * 0.99
+        b.volume = volume
+        return b
+
+    def _make_minute_bar(self, close, open_=None, high=None, low=None, volume=50_000):
+        b = MagicMock()
+        b.close  = close
+        b.open   = open_  if open_  is not None else close * 0.999
+        b.high   = high   if high   is not None else close * 1.001
+        b.low    = low    if low    is not None else close * 0.999
+        b.volume = volume
+        return b
+
+    def _mock_client(self, daily_bars, pm_bars, intraday_bars):
+        mock_resp_daily = MagicMock()
+        mock_resp_daily.data = {"AAPL": daily_bars}
+
+        mock_resp_pm = MagicMock()
+        mock_resp_pm.data = {"AAPL": pm_bars}
+
+        mock_resp_intraday = MagicMock()
+        mock_resp_intraday.data = {"AAPL": intraday_bars, "SPY": []}
+
+        mock_dc = MagicMock()
+        mock_dc.get_stock_bars.side_effect = [
+            mock_resp_daily, mock_resp_pm, mock_resp_intraday,
+        ]
+        return mock_dc
+
+    def test_atr_pct_computed_from_daily_bars(self):
+        bars = [self._make_daily_bar(100.0 + i, high=101.0 + i, low=99.0 + i)
+                for i in range(20)]
+        mock_dc = self._mock_client(bars, [], [])
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["atr_pct"] is not None
+        assert result["atr_pct"] > 0
+
+    def test_avg_daily_volume_computed(self):
+        bars = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        mock_dc = self._mock_client(bars, [], [])
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["avg_daily_volume"] is not None
+        assert result["avg_daily_volume"] == 1_000_000
+
+    def test_conviction_high_when_premarket_volume_large(self):
+        bars  = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        pm    = [self._make_minute_bar(100.5, volume=200_000) for _ in range(5)]
+        mock_dc = self._mock_client(bars, pm, [])
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "HIGH"
+
+    def test_conviction_low_when_premarket_volume_small(self):
+        bars  = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        pm    = [self._make_minute_bar(100.5, volume=1_000) for _ in range(3)]  # 3k total = 0.3%
+        mock_dc = self._mock_client(bars, pm, [])
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "LOW"
+
+    def test_premarket_returns_no_intraday_fields(self):
+        mock_dc = self._mock_client([], [], [])
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["available"] is False
+        assert result["reason"] == "pre-market"
+        assert result["live_price"] is None
+
+    def test_intraday_live_price_returned(self):
+        bars  = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        pm    = []
+        intra = [
+            self._make_minute_bar(185.0 + i * 0.1, open_=185.0, volume=100_000)
+            for i in range(5)
+        ]
+        intra[0].open = 185.0
+        mock_resp_daily = MagicMock()
+        mock_resp_daily.data = {"AAPL": bars}
+        mock_resp_pm = MagicMock()
+        mock_resp_pm.data = {"AAPL": pm}
+        mock_resp_intraday = MagicMock()
+        mock_resp_intraday.data = {"AAPL": intra, "SPY": []}
+        mock_dc = MagicMock()
+        mock_dc.get_stock_bars.side_effect = [
+            mock_resp_daily, mock_resp_pm, mock_resp_intraday,
+        ]
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=False, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["live_price"] is not None
+        assert result["available"] is True
+
+    def test_above_vwap_correct(self):
+        bars  = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        intra = [
+            self._make_minute_bar(200.0, open_=100.0, high=201.0, low=99.0, volume=100_000)
+            for _ in range(5)
+        ]
+        mock_resp_daily = MagicMock()
+        mock_resp_daily.data = {"AAPL": bars}
+        mock_resp_pm = MagicMock()
+        mock_resp_pm.data = {"AAPL": []}
+        mock_resp_intraday = MagicMock()
+        mock_resp_intraday.data = {"AAPL": intra, "SPY": []}
+        mock_dc = MagicMock()
+        mock_dc.get_stock_bars.side_effect = [
+            mock_resp_daily, mock_resp_pm, mock_resp_intraday,
+        ]
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=False, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["above_vwap"] is True
+
+    def test_daily_bars_error_degrades_gracefully(self):
+        mock_dc = MagicMock()
+        mock_dc.get_stock_bars.side_effect = Exception("alpaca timeout")
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["atr_pct"] is None
+        assert "daily_bars_error" in result
