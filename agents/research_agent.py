@@ -23,7 +23,7 @@ from core.params import StrategyParams
 from trace.logger import TraceLogger
 
 _MODEL = "claude-sonnet-4-6"
-_WALL_CLOCK_TIMEOUT_S = 300  # 5-minute hard cap on the full tool loop
+_WALL_CLOCK_TIMEOUT_S = 420  # 7-minute hard cap on the full tool loop
 
 _SYSTEM = """
 You are a quantitative stock analyst. Your job is to identify the best intraday
@@ -37,7 +37,7 @@ PHASE 1 — SCREEN AND SNAPSHOT
 1. Call get_candidates() once. You receive ticker, score, and price.
 2. Call get_premarket_snapshot() with ALL tickers returned. This shows
    overnight price moves vs yesterday's close in one call.
-3. Using score AND premarket_change_pct together, select at most 6 tickers
+3. Using score AND premarket_change_pct together, select at most 4 tickers
    to investigate. Prefer score >= 7 with positive pre-market movement.
    On CAUTION days: score >= 8 AND premarket_change_pct > 0.3% only.
 
