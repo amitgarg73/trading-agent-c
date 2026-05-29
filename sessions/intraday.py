@@ -255,7 +255,7 @@ def main() -> None:
     if not session_id:
         # In the premarket window (before 9:45 AM) — run the premarket pipeline now.
         # After premarket creates a c_sessions row, subsequent intraday polls will find it.
-        _PREMARKET_DISPATCH_END = time(9, 45)
+        _PREMARKET_DISPATCH_END = time(10, 30)
         if now_t <= _PREMARKET_DISPATCH_END:
             print(f"[intraday] No session yet at {now_et.strftime('%H:%M ET')} — running premarket pipeline")
             from sessions.premarket import main as _premarket_main

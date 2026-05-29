@@ -15,7 +15,7 @@ from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
 _PREMARKET_START = time(6, 0)   # 6:00 AM ET — earliest reasonable premarket
-_PREMARKET_END   = time(9, 45)  # 9:45 AM ET — covers 9:30 and 9:45 cron fires
+_PREMARKET_END   = time(10, 30) # 10:30 AM ET — recovery window if 9:15/9:30 crons missed
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
