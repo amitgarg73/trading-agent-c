@@ -108,6 +108,84 @@ class TestForceClosePositions:
         assert result == 0
         mock_supabase.table.assert_not_called()
 
+    def test_writes_realized_pnl_from_fill_price(self, mock_supabase):
+        positions = [{"id": "p1", "ticker": "AAPL", "shares": 10, "entry_price": 180.0,
+                      "entry_time": "2026-05-27T09:30:00Z", "alpaca_order_id": None}]
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq.return_value = q
+            q.execute.return_value = MagicMock(data=[])
+            return q
+
+        q = make_query([])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=positions), \
+             patch("core.alpaca.cancel_all_orders"), \
+             patch("core.alpaca.close_all_strategy_positions",
+                   return_value=[{"ticker": "AAPL", "success": True, "fill_price": 185.0}]), \
+             patch("core.alpaca.get_position_data", return_value=None):
+            force_close_positions(_SESSION_ID)
+
+        assert updated["realized_pnl"] == pytest.approx(50.0)  # (185 - 180) * 10
+        assert updated["status"] == "closed"
+
+    def test_falls_back_to_alpaca_snapshot_when_fill_unavailable(self, mock_supabase):
+        positions = [{"id": "p1", "ticker": "TSLA", "shares": 5, "entry_price": 200.0,
+                      "entry_time": "2026-05-27T09:30:00Z", "alpaca_order_id": None}]
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq.return_value = q
+            q.execute.return_value = MagicMock(data=[])
+            return q
+
+        q = make_query([])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=positions), \
+             patch("core.alpaca.cancel_all_orders"), \
+             patch("core.alpaca.close_all_strategy_positions",
+                   return_value=[{"ticker": "TSLA", "success": True, "fill_price": None}]), \
+             patch("core.alpaca.get_position_data",
+                   return_value={"current_price": 210.0, "unrealized_pnl": 75.0}):
+            force_close_positions(_SESSION_ID)
+
+        assert updated["realized_pnl"] == pytest.approx(75.0)
+        assert updated["status"] == "closed"
+
+    def test_writes_zero_when_no_fill_and_no_snapshot(self, mock_supabase):
+        positions = [{"id": "p1", "ticker": "GM", "shares": 20, "entry_price": 50.0,
+                      "entry_time": "2026-05-27T09:30:00Z", "alpaca_order_id": None}]
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq.return_value = q
+            q.execute.return_value = MagicMock(data=[])
+            return q
+
+        q = make_query([])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=positions), \
+             patch("core.alpaca.cancel_all_orders"), \
+             patch("core.alpaca.close_all_strategy_positions",
+                   return_value=[{"ticker": "GM", "success": True, "fill_price": None}]), \
+             patch("core.alpaca.get_position_data", return_value=None):
+            force_close_positions(_SESSION_ID)
+
+        assert updated["realized_pnl"] == pytest.approx(0.0)
+
 
 class TestComputePerformance:
     def test_realized_pnl_sum(self):

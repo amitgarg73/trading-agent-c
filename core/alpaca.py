@@ -284,11 +284,34 @@ def get_open_alpaca_tickers() -> set[str]:
 
 
 def close_position(ticker: str) -> tuple[bool, Optional[float]]:
-    """Market-close a single position. Returns (success, fill_price)."""
+    """Market-close a single position. Returns (success, fill_price).
+
+    Polls up to 30s for a fill when market is open, matching the entry-order
+    pattern. Returns (True, None) when fill is still pending after the poll.
+    """
     try:
         order = _client().close_position(ticker)
-        fill  = float(order.filled_avg_price) if order.filled_avg_price else None
-        return True, fill
+        if order.filled_avg_price:
+            return True, float(order.filled_avg_price)
+
+        if not _is_market_open():
+            print(f"  [alpaca] {ticker} close queued — market closed, fill pending")
+            return True, None
+
+        for _ in range(15):
+            time.sleep(2)
+            try:
+                o      = _client().get_order_by_id(str(order.id))
+                status = str(o.status).lower()
+                if status in ("filled", "partially_filled") and o.filled_avg_price:
+                    return True, float(o.filled_avg_price)
+                if status in ("cancelled", "rejected", "expired"):
+                    return True, None
+            except Exception:
+                pass
+
+        print(f"  [alpaca] {ticker} close fill pending after 30s")
+        return True, None
     except Exception as e:
         print(f"  [alpaca] close_position({ticker}): {e}")
         return False, None

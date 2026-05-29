@@ -424,6 +424,42 @@ class TestClosePosition:
         assert ok   is True
         assert fill == pytest.approx(186.0)
 
+    def test_polls_for_fill_when_not_immediately_filled(self):
+        submitted = _mock_order(status="pending_new", filled_avg_price=None)
+        filled    = _mock_order(status="filled",      filled_avg_price=187.5)
+        with patch("core.alpaca._client") as mc, \
+             patch("core.alpaca._is_market_open", return_value=True), \
+             patch("core.alpaca.time.sleep"):
+            mc.return_value.close_position.return_value      = submitted
+            mc.return_value.get_order_by_id.return_value     = filled
+            from core.alpaca import close_position
+            ok, fill = close_position("AAPL")
+        assert ok   is True
+        assert fill == pytest.approx(187.5)
+
+    def test_returns_none_fill_when_market_closed(self):
+        submitted = _mock_order(status="pending_new", filled_avg_price=None)
+        with patch("core.alpaca._client") as mc, \
+             patch("core.alpaca._is_market_open", return_value=False):
+            mc.return_value.close_position.return_value = submitted
+            from core.alpaca import close_position
+            ok, fill = close_position("AAPL")
+        assert ok   is True
+        assert fill is None
+
+    def test_returns_none_fill_after_poll_timeout(self):
+        submitted = _mock_order(status="pending_new", filled_avg_price=None)
+        polled    = _mock_order(status="pending_new", filled_avg_price=None)
+        with patch("core.alpaca._client") as mc, \
+             patch("core.alpaca._is_market_open", return_value=True), \
+             patch("core.alpaca.time.sleep"):
+            mc.return_value.close_position.return_value  = submitted
+            mc.return_value.get_order_by_id.return_value = polled
+            from core.alpaca import close_position
+            ok, fill = close_position("AAPL")
+        assert ok   is True
+        assert fill is None
+
     def test_returns_false_on_exception(self):
         with patch("core.alpaca._client") as mc:
             mc.return_value.close_position.side_effect = Exception("no position")

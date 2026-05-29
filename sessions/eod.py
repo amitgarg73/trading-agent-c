@@ -85,13 +85,28 @@ def force_close_positions(session_id: str) -> int:
     """
     Cancel open bracket orders, then market-close any remaining positions via Alpaca.
     Updates c_positions with actual fill prices and realized P&L.
+
+    P&L source priority:
+      1. fill_price returned by close_position() poll (most accurate)
+      2. unrealized_pnl snapshot from Alpaca taken before cancellation (fallback
+         when close order hasn't filled yet — common when EOD runs at 3:55 PM)
+      3. 0.0 (last resort — signals the position needs manual reconciliation)
+
     Returns count of positions force-closed.
     """
-    from core.alpaca import cancel_all_orders, close_all_strategy_positions
+    from core.alpaca import cancel_all_orders, close_all_strategy_positions, get_position_data
     from core.db import get_client
+
     positions = get_open_positions(session_id)
     if not positions:
         return 0
+
+    # Snapshot unrealized P&L before cancelling orders (prices still valid)
+    alpaca_pnl: dict[str, float] = {}
+    for pos in positions:
+        data = get_position_data(pos["ticker"])
+        if data and data.get("unrealized_pnl") is not None:
+            alpaca_pnl[pos["ticker"]] = data["unrealized_pnl"]
 
     cancel_all_orders()
     closed = close_all_strategy_positions()
@@ -101,18 +116,27 @@ def force_close_positions(session_id: str) -> int:
     now_   = datetime.utcnow().isoformat()
     client = get_client()
     for pos in positions:
-        fill_price  = fills.get(pos["ticker"])
-        realized    = None
+        fill_price = fills.get(pos["ticker"])
         if fill_price:
-            entry = pos.get("entry_price") or 0.0
+            entry    = pos.get("entry_price") or 0.0
             realized = round((fill_price - float(entry)) * int(pos["shares"]), 2)
+            src      = "fill"
+        elif pos["ticker"] in alpaca_pnl:
+            realized = alpaca_pnl[pos["ticker"]]
+            src      = "alpaca_snapshot"
+        else:
+            realized = 0.0
+            src      = "unavailable"
+
         client.table("c_positions").update({
             "status":       "closed",
             "exit_reason":  "eod_forced",
             "close_date":   today,
             "close_time":   now_,
-            "realized_pnl": realized or 0.0,
+            "realized_pnl": realized,
         }).eq("id", pos["id"]).execute()
+        print(f"  [eod] {pos['ticker']} realized P&L: ${realized:+.2f} (source: {src})")
+
     return len(positions)
 
 
