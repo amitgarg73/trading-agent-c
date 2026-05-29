@@ -201,6 +201,37 @@ class TestSubmitBracketOrder:
             submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
         mc.return_value.get_order_by_id.assert_not_called()
 
+    def test_stale_bid_falls_back_to_proposal_price(self):
+        """If bid is >5% below entry_price (IEX stale premarket quote), use proposal price."""
+        order = _mock_order(status="filled", filled_avg_price=514.50)
+        # entry=514.50, bid=457.90 → 11% gap → stale, use proposal
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("TMO", 457.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("TMO", 5, 514.50, 555.66, 511.05)
+        req = mc.return_value.submit_order.call_args[0][0]
+        assert req.limit_price == pytest.approx(514.50, rel=1e-3)
+        # stop/target at original proposal percentages, not bid-reprojected
+        assert req.stop_loss.stop_price    == pytest.approx(511.05, rel=1e-3)
+        assert req.take_profit.limit_price == pytest.approx(555.66, rel=1e-3)
+
+    def test_tight_bid_uses_bid_not_proposal(self):
+        """If bid is within 5% of entry_price, use bid as limit (normal passive entry)."""
+        order = _mock_order(status="filled", filled_avg_price=184.90)
+        # entry=185.0, bid=184.90 → 0.05% gap → use bid
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        req = mc.return_value.submit_order.call_args[0][0]
+        assert req.limit_price == pytest.approx(184.90, rel=1e-3)
+
 
 # ── get_bracket_status ────────────────────────────────────────────────────────
 

@@ -107,6 +107,8 @@ def submit_bracket_order(
     # The Research Agent's entry_price is the ask captured minutes earlier — using
     # bid lets the stock come to us instead of chasing a stale price upward.
     # Stop/target are reprojected at the same % distances from bid.
+    # Guard: if bid is >5% below entry_price the IEX feed is stale (premarket bid
+    # not yet updated). Fall back to entry_price so the order is placeable.
     limit_px   = round(entry_price, 2)   # fallback: proposal price, no buffer
     eff_stop   = round(stop_price, 2)
     eff_target = round(target_price, 2)
@@ -120,9 +122,16 @@ def submit_bracket_order(
                 bid        = round(float(raw_bid), 4)
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
-                limit_px   = round(bid, 2)
-                eff_stop   = round(bid * (1 - stop_pct),   2)
-                eff_target = round(bid * (1 + target_pct), 2)
+                stale_pct  = (entry_price - bid) / entry_price
+                if stale_pct > 0.05:
+                    # Bid is >5% below research price — IEX stale premarket quote.
+                    # Keep entry_price as limit; reprojecton stays at proposal stops.
+                    print(f"  [alpaca] {ticker} stale bid ${bid:.2f} vs proposal ${entry_price:.2f} "
+                          f"({stale_pct:.1%} gap) — using proposal price")
+                else:
+                    limit_px   = round(bid, 2)
+                    eff_stop   = round(bid * (1 - stop_pct),   2)
+                    eff_target = round(bid * (1 + target_pct), 2)
     except Exception:
         pass  # keep fallback prices
 
@@ -138,7 +147,7 @@ def submit_bracket_order(
         client_order_id=_order_id(ticker),
     )
     order = _client().submit_order(req)
-    print(f"  [alpaca] Bracket order: {ticker} {shares}sh @ ${limit_px} (bid) → {order.id}")
+    print(f"  [alpaca] Bracket order: {ticker} {shares}sh @ ${limit_px} → {order.id}")
 
     if not _is_market_open():
         print(f"  [alpaca] {ticker} queued for market open — skipping fill poll")
