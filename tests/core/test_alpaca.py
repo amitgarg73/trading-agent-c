@@ -84,14 +84,24 @@ class TestGetLivePrice:
 
 # ── submit_bracket_order ───────────────────────────────────────────────────────
 
-_MARKET_OPEN  = patch("core.alpaca._is_market_open", return_value=True)
+_MARKET_OPEN   = patch("core.alpaca._is_market_open", return_value=True)
 _MARKET_CLOSED = patch("core.alpaca._is_market_open", return_value=False)
+
+
+def _mock_dclient(ticker: str, bid: float):
+    """Return a patched _dclient that reports the given bid price."""
+    quote = MagicMock()
+    quote.bid_price = str(bid)
+    mc = MagicMock()
+    mc.return_value.get_stock_latest_quote.return_value = {ticker: quote}
+    return patch("core.alpaca._dclient", mc)
 
 
 class TestSubmitBracketOrder:
     def test_returns_order_id_and_fill_price_on_fill(self):
         order = _mock_order(status="filled", filled_avg_price=185.20)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             mc.return_value.get_order_by_id.return_value = order
@@ -103,7 +113,8 @@ class TestSubmitBracketOrder:
     def test_returns_none_none_on_rejection(self):
         submitted = _mock_order(status="new")
         rejected  = _mock_order(status="rejected", filled_avg_price=None)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = submitted
             mc.return_value.get_order_by_id.return_value = rejected
@@ -114,7 +125,8 @@ class TestSubmitBracketOrder:
 
     def test_returns_order_id_with_none_fill_when_pending(self):
         pending = _mock_order(status="new", filled_avg_price=None)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = pending
             mc.return_value.get_order_by_id.return_value = pending
@@ -123,20 +135,54 @@ class TestSubmitBracketOrder:
         assert oid == "ord-001"
         assert fill is None
 
-    def test_limit_price_has_buffer(self):
-        order = _mock_order(status="filled", filled_avg_price=185.20)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_OPEN:
+    def test_uses_bid_as_limit_price(self):
+        """Limit price must be current bid, not the stale proposal price."""
+        order = _mock_order(status="filled", filled_avg_price=184.90)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             mc.return_value.get_order_by_id.return_value = order
             from core.alpaca import submit_bracket_order
             submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
         call_args = mc.return_value.submit_order.call_args[0][0]
-        assert call_args.limit_price == pytest.approx(185.0 * 1.001, rel=1e-3)
+        assert call_args.limit_price == pytest.approx(184.90, rel=1e-3)
+
+    def test_stop_and_target_reprojected_to_bid(self):
+        """Stop/target must maintain the same % distance from bid, not from proposal price."""
+        # proposal: entry=185, target=192 (+3.78%), stop=183 (-1.08%)
+        # bid=184.90 → target should be 184.90*1.0378, stop=184.90*0.9892
+        order = _mock_order(status="filled", filled_avg_price=184.90)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        req = mc.return_value.submit_order.call_args[0][0]
+        expected_target = round(184.90 * (192.0 / 185.0), 2)
+        expected_stop   = round(184.90 * (183.0 / 185.0), 2)
+        assert req.take_profit.limit_price == pytest.approx(expected_target, rel=1e-3)
+        assert req.stop_loss.stop_price    == pytest.approx(expected_stop,   rel=1e-3)
+
+    def test_falls_back_to_proposal_price_when_bid_unavailable(self):
+        """If bid fetch fails, use proposal price as-is (no buffer)."""
+        order = _mock_order(status="filled", filled_avg_price=185.0)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, patch("core.alpaca._dclient", side_effect=Exception("no creds")):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        call_args = mc.return_value.submit_order.call_args[0][0]
+        assert call_args.limit_price == pytest.approx(185.0, rel=1e-3)
 
     def test_premarket_skips_poll_and_returns_order_id(self):
         order = _mock_order(status="new", filled_avg_price=None)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_CLOSED:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_CLOSED, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             from core.alpaca import submit_bracket_order
@@ -147,7 +193,8 @@ class TestSubmitBracketOrder:
 
     def test_premarket_does_not_call_get_order_by_id(self):
         order = _mock_order(status="new")
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, _MARKET_CLOSED:
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_CLOSED, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             from core.alpaca import submit_bracket_order

@@ -103,8 +103,28 @@ def submit_bracket_order(
     from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
     from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 
-    # 0.1% buffer above plan price — widens fill window on fast-moving stocks
-    limit_px = round(entry_price * 1.001, 2)
+    # Fetch current bid at submission time for passive limit entry.
+    # The Research Agent's entry_price is the ask captured minutes earlier — using
+    # bid lets the stock come to us instead of chasing a stale price upward.
+    # Stop/target are reprojected at the same % distances from bid.
+    limit_px   = round(entry_price, 2)   # fallback: proposal price, no buffer
+    eff_stop   = round(stop_price, 2)
+    eff_target = round(target_price, 2)
+    try:
+        from alpaca.data.requests import StockLatestQuoteRequest
+        req_q = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
+        q = _dclient().get_stock_latest_quote(req_q).get(ticker)
+        if q:
+            raw_bid = getattr(q, "bid_price", None)
+            if raw_bid and float(raw_bid) > 0:
+                bid        = round(float(raw_bid), 4)
+                stop_pct   = (entry_price - stop_price)  / entry_price
+                target_pct = (target_price - entry_price) / entry_price
+                limit_px   = round(bid, 2)
+                eff_stop   = round(bid * (1 - stop_pct),   2)
+                eff_target = round(bid * (1 + target_pct), 2)
+    except Exception:
+        pass  # keep fallback prices
 
     req = LimitOrderRequest(
         symbol=ticker,
@@ -113,12 +133,12 @@ def submit_bracket_order(
         limit_price=limit_px,
         time_in_force=TimeInForce.DAY,
         order_class=OrderClass.BRACKET,
-        take_profit=TakeProfitRequest(limit_price=round(target_price, 2)),
-        stop_loss=StopLossRequest(stop_price=round(stop_price, 2)),
+        take_profit=TakeProfitRequest(limit_price=eff_target),
+        stop_loss=StopLossRequest(stop_price=eff_stop),
         client_order_id=_order_id(ticker),
     )
     order = _client().submit_order(req)
-    print(f"  [alpaca] Bracket order: {ticker} {shares}sh @ ${limit_px} → {order.id}")
+    print(f"  [alpaca] Bracket order: {ticker} {shares}sh @ ${limit_px} (bid) → {order.id}")
 
     if not _is_market_open():
         print(f"  [alpaca] {ticker} queued for market open — skipping fill poll")
