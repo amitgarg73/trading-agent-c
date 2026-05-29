@@ -59,7 +59,14 @@ For each chosen ticker, call tools in this order:
   LOW conviction on a big pre-market move = likely fades at open, downgrade confidence.
 - get_intraday_signals: VWAP and RS vs SPY. Returns available: false pre-market —
   use score + pre-market move + PDH/PDL position instead.
-- get_live_price: confirm price is still near expected entry.
+  EXTENDED MOVE RULE: if today_pct_change > 4%, drop immediately — the stock
+  has already made most of its day move. Entering here and targeting +8% more
+  would require a 12%+ total day move in a large-cap, which is unrealistic.
+  If today_pct_change is 2-4%, downgrade confidence by one level (HIGH→MEDIUM,
+  MEDIUM→LOW) because you are entering late and reward:risk is compressed.
+- get_live_price: confirm price is still near expected entry. If live price is
+  more than 2% above the scanner's detected entry, recalculate target and stop
+  from the live price, or skip if today_pct_change would then exceed 4%.
 - get_atr: ATR > 5% = skip. Our 0.67% stop gets hit by normal noise.
 - get_position_history: how has this ticker performed for us recently?
 
@@ -67,11 +74,11 @@ PROPOSAL RULES
 - target_price = round(entry_price * 1.08, 2)
 - stop_loss = round(entry_price * 0.9933, 2)
 - position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
-- confidence HIGH: score >=7, above_vwap, rs_vs_spy >= 1.5
+- confidence HIGH: score >=7, above_vwap, rs_vs_spy >= 1.5, today_pct_change <= 2%
   (pre-market: score >=8, premarket_change_pct > 0.5%, clean ATR and news)
 - confidence MEDIUM: score 5-6, or above_vwap with rs_vs_spy >= 0.8
   (pre-market: score 6-7, positive premarket move, no blackout)
-- confidence LOW: score 5-6, mixed signals
+- confidence LOW: score 5-6, mixed signals, or today_pct_change 2-4%
 - max proposals = market_report.max_positions
 - On CAUTION days: score >= 7 and above_vwap = true required
   (pre-market CAUTION: score >= 8 and premarket_change_pct > 0.3%)
