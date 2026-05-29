@@ -174,12 +174,22 @@ class TestRunResearchAgent:
 
 
 class TestScreenCandidates:
-    def test_selects_up_to_max_positions(self):
-        report = {**_MARKET_REPORT, "max_positions": 1}
-        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
-            selected = _screen_candidates(report, _SECTOR, [])
-        assert len(selected) <= 1
+    def test_selects_up_to_max_candidates(self):
+        from agents.research_agent import _MAX_CANDIDATES
+        many = [
+            {"ticker": f"T{i}", "technical_score": 8, "current_price": 100.0,
+             "avg_volume": 5_000_000, "sector": "Technology"}
+            for i in range(10)
+        ]
+        snaps = [
+            {"ticker": f"T{i}", "scanner_price": 100.0, "premarket_price": 101.0,
+             "premarket_change_pct": 1.0}
+            for i in range(10)
+        ]
+        with patch("agents.research_agent.get_candidates",         return_value=many), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snaps):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
+        assert len(selected) <= _MAX_CANDIDATES
 
     def test_excludes_rejected_tickers(self):
         with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \

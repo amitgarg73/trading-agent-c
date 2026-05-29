@@ -25,6 +25,8 @@ _MODEL = "claude-sonnet-4-6"
 _TICKER_TIMEOUT_S  = 120
 # Outer cap covers screening + parallel investigation + some buffer
 _TOTAL_TIMEOUT_S   = 360
+# Investigate more candidates than max_positions so we can select the best
+_MAX_CANDIDATES    = 6
 
 
 # ── Per-ticker investigation ──────────────────────────────────────────────────
@@ -214,10 +216,7 @@ def _screen_candidates(
 
     # Sort: score first, premarket momentum second
     scored.sort(key=lambda x: (x["score"], x["premarket_change_pct"]), reverse=True)
-    selected = scored[:4]
-
-    max_pos = market_report.get("max_positions") or 2
-    return selected[:max_pos]
+    return scored[:_MAX_CANDIDATES]
 
 
 # ── Public entry point ────────────────────────────────────────────────────────
@@ -235,13 +234,12 @@ def run_research_agent(
       Screen candidates via get_candidates + get_premarket_snapshot.
       Select up to max_positions tickers — no LLM call needed.
 
-    Phase 2 (parallel, ~40-80s wall clock):
-      Spawn one mini-agent per ticker in a thread pool.
+    Phase 2 (parallel, ~40-90s wall clock):
+      Spawn one mini-agent per ticker in a thread pool (up to _MAX_CANDIDATES).
       Each mini-agent: 4 tools, 12 turn cap, 120s timeout.
-      Parallel execution means 4 tickers take as long as 1.
-
-    Previous architecture: 8 tools/ticker × 4 tickers = 32 LLM turns (~420s → timeout).
-    New architecture: 4 tools/ticker × 4 parallel = 4 LLM turns wall-clock (~80s).
+      Parallel execution means 6 tickers take as long as 1.
+      Post-investigation cap trims proposals to max_positions — more candidates
+      means better selection, not more trades.
     """
     # Guard: no candidates
     candidates = get_candidates(min_score=5)
