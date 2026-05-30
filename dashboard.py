@@ -57,12 +57,17 @@ def get_client_ab() -> Client | None:
 
 
 def q(table: str, cols: str = "*", filters: dict | None = None,
+      neq: dict | None = None,
       order: str | None = None, limit: int | None = None) -> list[dict]:
     try:
         db = get_client()
         req = db.table(table).select(cols)
         for k, v in (filters or {}).items():
             req = req.eq(k, v)
+        for k, v in (neq or {}).items():
+            req = req.neq(k, v)
+        if table == "c_sessions":
+            req = req.eq("is_simulated", False)
         if order:
             desc = order.startswith("-")
             req = req.order(order.lstrip("-"), desc=desc)
@@ -1010,7 +1015,7 @@ elif page == "Sessions":
     since = (date.today() - timedelta(days=days)).isoformat()
 
     db = get_client()
-    sessions = db.table("c_sessions").select("*").gte("date", since).order("date", desc=True).execute().data or []
+    sessions = db.table("c_sessions").select("*").gte("date", since).eq("is_simulated", False).order("date", desc=True).execute().data or []
 
     if not sessions:
         st.info("No sessions in range")

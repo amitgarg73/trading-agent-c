@@ -24,7 +24,8 @@ CREATE TABLE c_sessions (
   retry_triggered      BOOL NOT NULL DEFAULT false,
   terminal_reason      TEXT NOT NULL,
   started_at           TIMESTAMPTZ NOT NULL,
-  completed_at         TIMESTAMPTZ
+  completed_at         TIMESTAMPTZ,
+  is_simulated         BOOL NOT NULL DEFAULT false
 );
 
 CREATE INDEX idx_c_sessions_date ON c_sessions(date DESC);
