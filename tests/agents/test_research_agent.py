@@ -4,7 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.research_agent import run_research_agent, _screen_candidates
+from agents.research_agent import run_research_agent, _screen_candidates, _investigate_ticker
+from tests.conftest import make_api_response, tool_block
 from core.params import StrategyParams
 
 _MARKET_REPORT = {
@@ -257,3 +258,45 @@ class TestScreenCandidates:
         tickers = [s["ticker"] for s in selected]
         assert "AAPL" in tickers
         assert len(selected) == 1
+
+
+_CONTEXT = {"score": 8, "premarket_change_pct": 1.0, "scanner_price": 185.0}
+_GO_REPORT = {"decision": "GO", "max_positions": 2, "bias": "BULLISH"}
+
+
+class TestCircuitBreaker:
+    def test_raises_on_tool_error(self, tracer):
+        # First API call triggers tool_use; dispatch returns error → circuit breaker fires
+        client = MagicMock()
+        client.messages.create.return_value = make_api_response(
+            "tool_use", [tool_block("get_news", {"ticker": "AAPL"})],
+        )
+        with patch("agents.research_agent.anthropic.Anthropic", return_value=client), \
+             patch("agents.research_agent._investigate_dispatch", return_value={"error": "timeout"}):
+            with pytest.raises(RuntimeError, match="circuit breaker"):
+                _investigate_ticker("AAPL", _CONTEXT, _GO_REPORT, tracer)
+
+    def test_skips_ticker_when_circuit_breaker_fires(self, tracer):
+        # run_research_agent catches RuntimeError from thread → ticker goes to skipped
+        def side_effect(ticker, *args, **kwargs):
+            raise RuntimeError(f"circuit breaker: get_ticker_market_data error for {ticker}")
+
+        result = _run(tracer, investigate_side_effect=side_effect)
+        assert result["proposals"] == []
+        reasons = [s["reason"] for s in result["skipped"]]
+        assert any("circuit breaker" in r for r in reasons)
+
+    def test_clean_dispatch_does_not_raise(self, tracer):
+        # A successful dispatch returns normally without raising
+        client = MagicMock()
+        client.messages.create.return_value = make_api_response(
+            "end_turn", [__import__("tests.conftest", fromlist=["text_block"]).text_block(
+                '{"action":"SKIP","ticker":"AAPL","skip_reason":"low score",'
+                '"entry_price":null,"target_price":null,"stop_loss":null,'
+                '"position_size":null,"confidence":null,"evidence":[]}'
+            )],
+        )
+        with patch("agents.research_agent.anthropic.Anthropic", return_value=client), \
+             patch("agents.research_agent._investigate_dispatch", return_value={"headlines": []}):
+            result = _investigate_ticker("AAPL", _CONTEXT, _GO_REPORT, tracer)
+        assert result.get("action") == "SKIP"

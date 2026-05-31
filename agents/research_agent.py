@@ -145,6 +145,14 @@ def _investigate_ticker(
     client = anthropic.Anthropic()
     is_caution = market_report.get("decision") == "CAUTION"
 
+    def _dispatch_with_breaker(name: str, inp: dict) -> dict | list:
+        result = _investigate_dispatch(name, inp)
+        if isinstance(result, dict) and "error" in result:
+            raise RuntimeError(
+                f"circuit breaker: {name} error for {ticker} — {result['error']}"
+            )
+        return result
+
     msg = (
         f"Investigate {ticker} for an intraday setup.\n"
         f"Scanner: score={context['score']}, "
@@ -162,7 +170,7 @@ def _investigate_ticker(
         system=_INVESTIGATE_SYSTEM,
         tools=INVESTIGATE_TOOL_SCHEMAS,
         initial_message=msg,
-        dispatch=_investigate_dispatch,
+        dispatch=_dispatch_with_breaker,
         tracer=tracer,
         agent_name=f"research_{ticker}",
         max_turns=12,
