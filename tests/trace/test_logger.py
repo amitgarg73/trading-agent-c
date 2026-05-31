@@ -295,6 +295,68 @@ class TestCloseSession:
         assert row["total_steps"] == 3
 
 
+# ── flush_cost_breakdown ──────────────────────────────────────────────────────
+
+class TestFlushCostBreakdown:
+    def test_writes_cost_breakdown_mid_session(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.log_tokens("market_shadow", _usage(3000, 900))
+
+        tracer.flush_cost_breakdown()
+
+        assert query.update.called
+        payload = query.update.call_args[0][0]
+        assert "market_shadow" in payload["cost_breakdown"]
+        assert payload["cost_breakdown"]["market_shadow"]["cost_usd"] > 0
+        assert payload["total_cost_usd"] > 0
+
+    def test_flush_is_cumulative_across_agents(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.log_tokens("market_shadow", _usage(3000, 900))
+        tracer.log_tokens("research_NVDA", _usage(10000, 2000))
+
+        tracer.flush_cost_breakdown()
+
+        payload = query.update.call_args[0][0]
+        assert "market_shadow" in payload["cost_breakdown"]
+        assert "research_NVDA" in payload["cost_breakdown"]
+
+    def test_flush_does_nothing_when_no_tokens(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.flush_cost_breakdown()
+
+        query.update.assert_not_called()
+
+    def test_flush_uses_correct_model_rates(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.log_tokens("research_NVDA", _usage(1_000_000, 0))
+
+        tracer.flush_cost_breakdown()
+
+        payload = query.update.call_args[0][0]
+        # research uses Haiku at $0.80/M input tokens
+        assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
+
+    def test_close_session_overwrites_flush(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.log_tokens("market_shadow", _usage(3000, 900))
+        tracer.flush_cost_breakdown()
+
+        tracer.log_tokens("research_NVDA", _usage(10000, 2000))
+        tracer.close_session("converged")
+
+        # upsert (close_session) should include both agents
+        upsert_payload = query.upsert.call_args[0][0]
+        assert "market_shadow"  in upsert_payload["cost_breakdown"]
+        assert "research_NVDA"  in upsert_payload["cost_breakdown"]
+
+
 # ── ingest_otel_span ──────────────────────────────────────────────────────────
 
 class TestIngestOtelSpan:

@@ -147,6 +147,7 @@ def run_premarket_pipeline(
 
     # Step 1: Market Agent
     market_report = run_market_agent_shadow(tracer, params)
+    tracer.flush_cost_breakdown()
     if market_report.get("decision") == "SKIP":
         tracer.log_decision(
             "orchestrator", "skip_propagated",
@@ -158,14 +159,17 @@ def run_premarket_pipeline(
 
     # Step 2: Research Agent
     trade_proposals = run_research_agent(tracer, market_report, params)
+    tracer.flush_cost_breakdown()
 
     # Step 3: Risk Agent
     risk_verdicts = run_risk_agent(tracer, trade_proposals, params)
+    tracer.flush_cost_breakdown()
 
     # Step 4: Orchestrator synthesis
     result = _run_synthesis_call(
         client, market_report, trade_proposals, risk_verdicts, tracer, loop_iteration=1
     )
+    tracer.flush_cost_breakdown()
 
     if not result.get("retry_needed"):
         result.pop("retry_needed", None)
@@ -207,12 +211,15 @@ def run_premarket_pipeline(
         trade_proposals_retry = run_research_agent(
             tracer, market_report, params, rejected_context=rejected
         )
+        tracer.flush_cost_breakdown()
 
     risk_verdicts_retry = run_risk_agent(tracer, trade_proposals_retry, params)
+    tracer.flush_cost_breakdown()
     result = _run_synthesis_call(
         client, market_report, trade_proposals_retry, risk_verdicts_retry,
         tracer, loop_iteration=2
     )
+    tracer.flush_cost_breakdown()
     result.pop("retry_needed", None)
     result["_v2_market_report"] = market_report
     result["session_meta"]["retry_triggered"] = True

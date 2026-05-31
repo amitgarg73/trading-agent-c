@@ -178,6 +178,39 @@ class TraceLogger:
             from core.db import get_client
             get_client().table("c_traces").insert(row).execute()
 
+    def flush_cost_breakdown(self) -> None:
+        """
+        Upsert the current accumulated cost_breakdown and total_cost_usd to c_sessions
+        without closing the session. Call after each major agent completes so partial
+        cost is captured even if the process is killed before close_session().
+        """
+        if not self._tokens:
+            return
+        from core.db import get_client
+        agent_costs = {}
+        for agent, v in self._tokens.items():
+            model = _agent_model(agent)
+            cost  = _estimate_cost(
+                model,
+                v["input"],
+                v["output"],
+                v.get("cache_read",  0),
+                v.get("cache_write", 0),
+            )
+            agent_costs[agent] = {
+                "model":       model,
+                "input":       v["input"],
+                "output":      v["output"],
+                "cache_read":  v.get("cache_read",  0),
+                "cache_write": v.get("cache_write", 0),
+                "cost_usd":    round(cost, 6),
+            }
+        total_cost = sum(a["cost_usd"] for a in agent_costs.values())
+        get_client().table("c_sessions").update({
+            "cost_breakdown":  agent_costs,
+            "total_cost_usd":  round(total_cost, 6),
+        }).eq("id", self.session_id).execute()
+
     def close_session(
         self,
         terminal_reason: str,

@@ -369,6 +369,7 @@ def main() -> None:
         except Exception as e:
             tracer.log_error("learning", f"Learning Agent failed: {e}")
             print(f"[eod] Learning Agent error (continuing): {e}")
+        tracer.flush_cost_breakdown()
     else:
         reason = "no_trades" if perf.trades_total == 0 else "disabled"
         tracer.log_decision("orchestrator", "learning_skipped", detail={"reason": reason})
