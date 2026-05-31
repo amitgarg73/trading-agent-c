@@ -323,11 +323,14 @@ class TestCostHelpers:
         assert cost == pytest.approx(3.00, rel=1e-3)
 
     def test_agent_model_haiku_agents(self):
-        assert _agent_model("market") == "claude-haiku-4-5-20251001"
-        assert _agent_model("risk")   == "claude-haiku-4-5-20251001"
+        assert _agent_model("market")       == "claude-haiku-4-5-20251001"
+        assert _agent_model("risk")         == "claude-haiku-4-5-20251001"
         assert _agent_model("news_analyst") == "claude-haiku-4-5-20251001"
+        assert _agent_model("research")     == "claude-haiku-4-5-20251001"
+        # mini-agents log as "research_TICKER" — must also resolve to Haiku
+        assert _agent_model("research_NVDA") == "claude-haiku-4-5-20251001"
+        assert _agent_model("research_AAPL") == "claude-haiku-4-5-20251001"
 
     def test_agent_model_sonnet_agents(self):
-        assert _agent_model("research")     == "claude-sonnet-4-6"
         assert _agent_model("orchestrator") == "claude-sonnet-4-6"
         assert _agent_model("learning")     == "claude-sonnet-4-6"

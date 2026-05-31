@@ -17,14 +17,21 @@ def _dispatch_with_timeout(
     """
     Run a tool dispatch in a thread with a hard timeout.
     Returns {"error": "timeout"} if the call does not finish in _TOOL_TIMEOUT_S seconds.
-    Prevents yfinance or slow Alpaca calls from stalling the whole pipeline.
+
+    Uses a module-level executor (not a context manager) so shutdown(wait=True) is
+    never called inline — the yfinance/Alpaca thread is left as a daemon and the
+    caller gets the timeout result immediately without blocking.
     """
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-        future = ex.submit(dispatch, name, inp)
-        try:
-            return future.result(timeout=_TOOL_TIMEOUT_S)
-        except concurrent.futures.TimeoutError:
-            return {"error": f"tool timeout after {_TOOL_TIMEOUT_S}s"}
+    future = _TOOL_EXECUTOR.submit(dispatch, name, inp)
+    try:
+        return future.result(timeout=_TOOL_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        return {"error": f"tool timeout after {_TOOL_TIMEOUT_S}s"}
+
+
+# Module-level executor — threads are daemon threads so they don't block process exit.
+# Never shut it down inline; let the OS clean up on process termination.
+_TOOL_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="tool")
 
 import anthropic
 

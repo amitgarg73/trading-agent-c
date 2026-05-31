@@ -296,5 +296,7 @@ class TraceLogger:
 
 def _agent_model(agent: str) -> str:
     """Map agent name to its Claude model for cost estimation."""
-    haiku_agents = {"market", "risk", "news_analyst"}
-    return "claude-haiku-4-5-20251001" if agent in haiku_agents else "claude-sonnet-4-6"
+    # research mini-agents log as "research_TICKER" — strip suffix before matching
+    base = agent.split("_")[0] if "_" in agent else agent
+    sonnet_agents = {"orchestrator", "learning"}
+    return "claude-sonnet-4-6" if base in sonnet_agents else "claude-haiku-4-5-20251001"
