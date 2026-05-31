@@ -6,10 +6,18 @@ than STALE_HOURS ago as 'watchdog_timeout'. Safe to run repeatedly (idempotent).
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone, timedelta
 
 
 STALE_HOURS = 3
+
+
+def _parse_ts(ts: str) -> datetime:
+    """Parse Supabase timestamps, normalising fractional seconds to 6 digits."""
+    ts = ts.replace("Z", "+00:00")
+    ts = re.sub(r"\.(\d+)([+-])", lambda m: f".{m.group(1)[:6].ljust(6, '0')}{m.group(2)}", ts)
+    return datetime.fromisoformat(ts)
 
 
 def find_orphaned_sessions(client, stale_before: datetime) -> list[dict]:
@@ -52,7 +60,7 @@ def run_watchdog(dry_run: bool = False) -> list[str]:
         cost = s.get("total_cost_usd") or 0.0
         age_h = (
             datetime.now(timezone.utc)
-            - datetime.fromisoformat(s["started_at"].replace("Z", "+00:00"))
+            - _parse_ts(s["started_at"])
         ).total_seconds() / 3600
         print(
             f"[watchdog] {'(dry-run) ' if dry_run else ''}orphan {s['id'][:8]} "

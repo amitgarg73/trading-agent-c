@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from sessions.watchdog import find_orphaned_sessions, run_watchdog, STALE_HOURS
+from sessions.watchdog import find_orphaned_sessions, run_watchdog, STALE_HOURS, _parse_ts
 
 
 def _make_client(rows: list[dict]) -> MagicMock:
@@ -23,6 +23,24 @@ def _make_client(rows: list[dict]) -> MagicMock:
 
 _OLD = (datetime.now(timezone.utc) - timedelta(hours=STALE_HOURS + 1)).isoformat()
 _NEW = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+
+class TestParseTs:
+    def test_standard_iso(self):
+        dt = _parse_ts("2026-05-28T06:56:38.123456+00:00")
+        assert dt.year == 2026 and dt.second == 38
+
+    def test_five_digit_fractional(self):
+        dt = _parse_ts("2026-05-28T06:56:38.00743+00:00")
+        assert dt.year == 2026 and dt.second == 38
+
+    def test_z_suffix(self):
+        dt = _parse_ts("2026-05-28T06:56:38.123456Z")
+        assert dt.tzinfo is not None
+
+    def test_no_fractional(self):
+        dt = _parse_ts("2026-05-28T06:56:38+00:00")
+        assert dt.second == 38
 
 
 class TestFindOrphanedSessions:
