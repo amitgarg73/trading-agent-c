@@ -165,6 +165,19 @@ def run_premarket_pipeline(
     risk_verdicts = run_risk_agent(tracer, trade_proposals, params)
     tracer.flush_cost_breakdown()
 
+    # CAUTION + all rejected: outcome is deterministic — skip synthesis LLM call
+    if market_report.get("decision") == "CAUTION":
+        verdicts = risk_verdicts.get("verdicts", [])
+        if verdicts and all(v.get("verdict") == "REJECTED" for v in verdicts):
+            tracer.log_decision(
+                "orchestrator", "structural_block",
+                detail={"trades": 0, "caution_shortcircuit": True},
+            )
+            tracer.flush_cost_breakdown()
+            out = _empty_session_output(market_report, "structural_block")
+            out["_v2_market_report"] = market_report
+            return out
+
     # Step 4: Orchestrator synthesis
     result = _run_synthesis_call(
         client, market_report, trade_proposals, risk_verdicts, tracer, loop_iteration=1
@@ -179,6 +192,14 @@ def run_premarket_pipeline(
             result["session_meta"]["terminal_reason"],
             detail={"trades": len(result["trades"])},
         )
+        return result
+
+    # CAUTION days: suppress retry — market already signaled reduced risk appetite
+    if market_report.get("decision") == "CAUTION":
+        result.pop("retry_needed", None)
+        result["session_meta"]["terminal_reason"] = "structural_block"
+        result["_v2_market_report"] = market_report
+        tracer.log_decision("orchestrator", "caution_no_retry", detail={"trades": 0})
         return result
 
     # Step 5: One retry on fixable rejections.
