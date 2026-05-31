@@ -80,6 +80,33 @@ class TestLogToolCall:
         row = query.insert.call_args[0][0]
         assert row["entity_id"] == "AAPL"
 
+    def test_entity_id_auto_derived_for_research_ticker_agent(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_tool_call("research_NVDA", "get_news", {"ticker": "NVDA"}, {})
+
+        row = query.insert.call_args[0][0]
+        assert row["entity_id"] == "NVDA"
+
+    def test_entity_id_explicit_overrides_auto_derive(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_tool_call("research_NVDA", "get_news", {}, {}, entity_id="OVERRIDE")
+
+        row = query.insert.call_args[0][0]
+        assert row["entity_id"] == "OVERRIDE"
+
+    def test_non_research_agent_no_auto_derive(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_tool_call("market_shadow", "get_spy_price", {}, {})
+
+        row = query.insert.call_args[0][0]
+        assert row["entity_id"] is None
+
     def test_sequence_increments_per_call(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         assert tracer.get_sequence() == 0

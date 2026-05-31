@@ -259,11 +259,16 @@ class TraceLogger:
         self._sequence += 1
         agent = fields.get("agent", "orchestrator")
 
+        # Auto-derive entity_id for research sub-agents (pattern: research_TICKER)
+        entity_id = fields.get("entity_id")
+        if entity_id is None and "_" in agent and agent.split("_", 1)[0] == "research":
+            entity_id = agent.split("_", 1)[1].upper()
+
         row: dict[str, Any] = {
             "session_id":      self.session_id,
             "span_id":         span_id,
             "parent_span_id":  self._agent_spans.get(agent),
-            "entity_id":       fields.get("entity_id"),
+            "entity_id":       entity_id,
             "date":            date.today().isoformat(),
             "sequence":        self._sequence,
             "agent":           agent,
