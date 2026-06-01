@@ -210,7 +210,7 @@ def _screen_candidates(
         score  = c["technical_score"]
         pct    = snap.get("premarket_change_pct") or 0
 
-        if is_caution and (score < 8 or pct <= 0.3):
+        if is_caution and (score < 7 or pct <= 0.3):
             continue
 
         scored.append({
