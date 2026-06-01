@@ -114,6 +114,26 @@ def fmt_pnl(val: float | None) -> str:
     return f"{sign}${val:,.2f}"
 
 
+def fmt_pnl_html(val: float | None) -> str:
+    """Like fmt_pnl but uses &#36; so Streamlit's Markdown parser doesn't treat $ as LaTeX."""
+    if val is None:
+        return "—"
+    sign = "+" if val >= 0 else ""
+    return f"{sign}&#36;{val:,.2f}"
+
+
+def _hold_time(start: str | None, end: str | None) -> str:
+    if not start or not end:
+        return ""
+    try:
+        t1 = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        t2 = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        mins = max(0, int((t2 - t1).total_seconds() / 60))
+        return f"{mins}m" if mins < 60 else f"{mins // 60}h {mins % 60}m"
+    except Exception:
+        return ""
+
+
 def fmt_ts(ts: str | None) -> str:
     if not ts:
         return "—"
@@ -192,14 +212,14 @@ if page == "Today":
     # ── Fetch data ──────────────────────────────────────────────────────────
     a_open   = q_ab("positions",   "ticker,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
                     filters={"status": "OPEN"})
-    a_closed = q_ab("positions",   "ticker,entry_price,close_price,shares,realized_pnl,opened_at,closed_at,close_reason",
+    a_closed = q_ab("positions",   "ticker,entry_price,close_price,fill_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
     b_open   = q_ab("b_positions", "ticker,pool,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
                     filters={"status": "OPEN"})
-    b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,shares,realized_pnl,opened_at,closed_at,close_reason",
+    b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,fill_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
     c_open   = [p for p in open_pos if p.get("open_date") == today]
-    c_closed = q("c_positions", "ticker,entry_price,shares,realized_pnl,entry_time,close_time,exit_reason",
+    c_closed = q("c_positions", "ticker,entry_price,exit_price,shares,realized_pnl,entry_time,close_time,exit_reason",
                  filters={"status": "closed", "close_date": today})
 
     # ── Summary bar ─────────────────────────────────────────────────────────
@@ -265,13 +285,13 @@ if page == "Today":
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry ${p.get('entry_price', 0):.2f} · "
-                    f"Now ${p.get('current_price') or 0:.2f} · "
+                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
+                    f"Now &#36;{p.get('current_price') or 0:.2f} · "
                     f"{p.get('shares', 0)} sh<br>"
-                    f"Stop ${p.get('stop_loss', 0):.2f} · "
-                    f"Target ${p.get('target_price', 0):.2f} "
+                    f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
+                    f"Target &#36;{p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl_html(unreal)}</span> unrealized"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -282,14 +302,24 @@ if page == "Today":
         if a_closed:
             st.markdown("**Closed today**")
             for p in a_closed:
-                real = p.get("realized_pnl") or 0
-                rc   = "#3fb950" if real >= 0 else "#f85149"
+                real    = p.get("realized_pnl") or 0
+                rc      = "#3fb950" if real >= 0 else "#f85149"
+                entry   = p.get("entry_price") or 0
+                fill    = p.get("fill_price") or entry
+                exit_px = p.get("close_price") or 0
+                shares  = p.get("shares") or 0
+                hold    = _hold_time(p.get("opened_at"), p.get("closed_at"))
+                hold_str = f" · {hold}" if hold else ""
+                fill_str = (f" · filled &#36;{fill:.2f}" if fill and abs(fill - entry) > 0.005 else "")
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span> "
-                    f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
+                    f"<span style='color:{rc};font-weight:600'>{fmt_pnl_html(real)}</span><br>"
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"Entry &#36;{entry:.2f}{fill_str} · Exit &#36;{exit_px:.2f} · {shares} sh{hold_str}"
+                    f"</span>",
                     unsafe_allow_html=True,
                 )
+                st.markdown("")
         elif ab_ok and not a_open:
             st.caption("No trades today")
 
@@ -315,13 +345,13 @@ if page == "Today":
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {pb} &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry ${p.get('entry_price', 0):.2f} · "
-                    f"Now ${p.get('current_price') or 0:.2f} · "
+                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
+                    f"Now &#36;{p.get('current_price') or 0:.2f} · "
                     f"{p.get('shares', 0)} sh<br>"
-                    f"Stop ${p.get('stop_loss', 0):.2f} · "
-                    f"Target ${p.get('target_price', 0):.2f} "
+                    f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
+                    f"Target &#36;{p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl_html(unreal)}</span> unrealized"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -332,15 +362,25 @@ if page == "Today":
         if b_closed:
             st.markdown("**Closed today**")
             for p in b_closed:
-                real = p.get("realized_pnl") or 0
-                rc   = "#3fb950" if real >= 0 else "#f85149"
-                pb   = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                real    = p.get("realized_pnl") or 0
+                rc      = "#3fb950" if real >= 0 else "#f85149"
+                pb      = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                entry   = p.get("entry_price") or 0
+                fill    = p.get("fill_price") or entry
+                exit_px = p.get("close_price") or 0
+                shares  = p.get("shares") or 0
+                hold    = _hold_time(p.get("opened_at"), p.get("closed_at"))
+                hold_str = f" · {hold}" if hold else ""
+                fill_str = (f" · filled &#36;{fill:.2f}" if fill and abs(fill - entry) > 0.005 else "")
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {pb} &nbsp; {_exit_badge(p.get('close_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span> "
-                    f"<span style='font-size:0.8rem;color:#888'>@ ${p.get('close_price') or 0:.2f}</span>",
+                    f"<span style='color:{rc};font-weight:600'>{fmt_pnl_html(real)}</span><br>"
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"Entry &#36;{entry:.2f}{fill_str} · Exit &#36;{exit_px:.2f} · {shares} sh{hold_str}"
+                    f"</span>",
                     unsafe_allow_html=True,
                 )
+                st.markdown("")
         elif ab_ok and not b_open:
             st.caption("No trades today")
 
@@ -358,20 +398,20 @@ if page == "Today":
         st.subheader("Strategy C")
         if c_open:
             for p in c_open:
-                unreal = p.get("unrealized_pnl") or 0
-                uc     = "#3fb950" if unreal >= 0 else "#f85149"
-                conf   = p.get("confidence", "")
-                cc     = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
+                conf = p.get("confidence", "")
+                cc   = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
+                ctx  = p.get("entry_context", "")
+                ctx_str = f" &nbsp; <span style='color:#888;font-size:0.7rem'>{ctx}</span>" if ctx else ""
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; "
-                    f"<span style='color:{cc};font-size:0.75rem'>{conf}</span><br>"
+                    f"<span style='background:{cc};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7rem'>{conf}</span>"
+                    f"{ctx_str}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry ${p.get('entry_price', 0):.2f} · "
+                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
                     f"{p.get('shares', 0)} sh<br>"
-                    f"Stop ${p.get('stop_loss', 0):.2f} · "
-                    f"Target ${p.get('target_price', 0):.2f} "
-                    f"({_pct_to_target(p.get('entry_price'), p.get('target_price'))})<br>"
-                    f"<span style='color:{uc};font-weight:600'>{fmt_pnl(unreal)}</span> unrealized"
+                    f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
+                    f"Target &#36;{p.get('target_price', 0):.2f} "
+                    f"({_pct_to_target(p.get('entry_price'), p.get('target_price'))})"
                     f"</span>",
                     unsafe_allow_html=True,
                 )
@@ -382,13 +422,23 @@ if page == "Today":
         if c_closed:
             st.markdown("**Closed today**")
             for p in c_closed:
-                real = p.get("realized_pnl") or 0
-                rc   = "#3fb950" if real >= 0 else "#f85149"
+                real    = p.get("realized_pnl") or 0
+                rc      = "#3fb950" if real >= 0 else "#f85149"
+                entry   = p.get("entry_price") or 0
+                exit_px = p.get("exit_price") or 0
+                shares  = p.get("shares") or 0
+                hold    = _hold_time(p.get("entry_time"), p.get("close_time"))
+                hold_str = f" · {hold}" if hold else ""
+                exit_str = f" · Exit &#36;{exit_px:.2f}" if exit_px else ""
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {_exit_badge(p.get('exit_reason'))} &nbsp;"
-                    f"<span style='color:{rc}'><b>{fmt_pnl(real)}</b></span>",
+                    f"<span style='color:{rc};font-weight:600'>{fmt_pnl_html(real)}</span><br>"
+                    f"<span style='font-size:0.8rem;color:#888'>"
+                    f"Entry &#36;{entry:.2f}{exit_str} · {shares} sh{hold_str}"
+                    f"</span>",
                     unsafe_allow_html=True,
                 )
+                st.markdown("")
         elif not c_open:
             st.caption("No trades today")
 
