@@ -125,6 +125,7 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
     """
     from core.alpaca import (
         get_open_alpaca_tickers, get_position_data, get_order_fill, submit_trailing_stop,
+        _cancel_bracket_stop_leg, _dclient,
     )
     from core.db import get_client
     db = get_client()
@@ -154,8 +155,11 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
             data = get_position_data(ticker)
             if data:
                 update: dict = {"entry_price": data["current_price"]}
-                # Entry just filled and no trailing stop yet — submit one now
+                # Entry just filled and no trailing stop yet — submit one now.
+                # Cancel bracket stop-loss leg first to avoid over-sell rejection.
                 if not trail_order_id:
+                    if order_id:
+                        _cancel_bracket_stop_leg(order_id)
                     new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
                     if new_trail_id:
                         update["trail_order_id"] = new_trail_id
@@ -169,19 +173,30 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
             if fill_price is None and order_id:
                 fill_price, exit_reason = get_order_fill(order_id)
 
-            if fill_price:
-                entry    = float(pos.get("entry_price") or 0)
-                realized = round((fill_price - entry) * shares, 2)
-                now_     = datetime.utcnow().isoformat()
-                db.table("c_positions").update({
-                    "status":       "closed",
-                    "exit_reason":  exit_reason or "unknown",
-                    "exit_price":   fill_price,
-                    "close_date":   date.today().isoformat(),
-                    "close_time":   now_,
-                    "realized_pnl": realized,
-                }).eq("id", pos["id"]).execute()
-                print(f"  [intraday] {ticker} closed via {exit_reason} @ ${fill_price} P&L ${realized:+.2f}")
+            if fill_price is None:
+                # Position gone from Alpaca with no fill record — use last trade price
+                exit_reason = "external_close"
+                try:
+                    from alpaca.data.requests import StockLatestTradeRequest
+                    trade = _dclient().get_stock_latest_trade(
+                        StockLatestTradeRequest(symbol_or_symbols=[ticker])
+                    )
+                    fill_price = float(trade[ticker].price)
+                except Exception:
+                    fill_price = float(pos.get("entry_price") or 0)
+
+            entry    = float(pos.get("entry_price") or 0)
+            realized = round((fill_price - entry) * shares, 2)
+            now_     = datetime.utcnow().isoformat()
+            db.table("c_positions").update({
+                "status":       "closed",
+                "exit_reason":  exit_reason or "unknown",
+                "exit_price":   fill_price,
+                "close_date":   date.today().isoformat(),
+                "close_time":   now_,
+                "realized_pnl": realized,
+            }).eq("id", pos["id"]).execute()
+            print(f"  [intraday] {ticker} closed via {exit_reason} @ ${fill_price:.4f} P&L ${realized:+.2f}")
 
 
 def _place_intraday_trades(

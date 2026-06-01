@@ -257,6 +257,70 @@ class TestSyncPositions:
         assert updated.get("status") == "closed"
         assert updated.get("exit_reason") == "NATIVE_TRAIL"
 
+    def test_cancels_stop_leg_before_trail_retry(self, mock_supabase):
+        """_cancel_bracket_stop_leg is called before submitting the trailing stop."""
+        mock_supabase.table.return_value = make_query([self._OPEN_POS])
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca._cancel_bracket_stop_leg") as mock_cancel, \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-001"):
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_cancel.assert_called_once_with("ord-001")
+
+    def test_external_close_uses_last_trade_price(self, mock_supabase):
+        """When position gone with no fill, close at last trade price with external_close reason."""
+        pos = {**self._OPEN_POS, "trail_order_id": None}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        trade_mock = MagicMock()
+        trade_mock.price = 188.0
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca._dclient") as mock_dc:
+            mock_dc.return_value.get_stock_latest_trade.return_value = {"AAPL": trade_mock}
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("status") == "closed"
+        assert updated.get("exit_reason") == "external_close"
+        assert updated.get("exit_price") == pytest.approx(188.0)
+        assert updated.get("realized_pnl") == pytest.approx((188.0 - 185.0) * 10)
+
+    def test_external_close_falls_back_to_entry_price_on_data_failure(self, mock_supabase):
+        """When last trade fetch fails, falls back to entry_price so the row is still closed."""
+        pos = {**self._OPEN_POS, "trail_order_id": None}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca._dclient", side_effect=Exception("rate limit")):
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("status") == "closed"
+        assert updated.get("exit_reason") == "external_close"
+        assert updated.get("realized_pnl") == pytest.approx(0.0)  # entry_price == exit_price
+
     def test_no_rows_returns_early(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         with patch("core.alpaca.get_open_alpaca_tickers") as mock_tickers:

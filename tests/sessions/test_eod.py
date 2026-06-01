@@ -186,6 +186,42 @@ class TestForceClosePositions:
 
         assert updated["realized_pnl"] == pytest.approx(0.0)
 
+    def test_continues_on_db_error_for_one_position(self, mock_supabase):
+        """A DB failure on one position must not prevent others from being closed."""
+        positions = [
+            {"id": "p1", "ticker": "AAPL", "shares": 10, "entry_price": 180.0,
+             "entry_time": "2026-05-27T09:30:00Z", "alpaca_order_id": None},
+            {"id": "p2", "ticker": "TSLA", "shares": 5,  "entry_price": 200.0,
+             "entry_time": "2026-05-27T09:30:00Z", "alpaca_order_id": None},
+        ]
+        call_count = [0]
+
+        def capture_update(data):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                raise Exception("Supabase timeout")
+            q = make_query([])
+            q.eq.return_value = q
+            q.execute.return_value = MagicMock(data=[])
+            return q
+
+        q = make_query([])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("sessions.eod.get_open_positions", return_value=positions), \
+             patch("core.alpaca.cancel_all_orders"), \
+             patch("core.alpaca.close_all_strategy_positions",
+                   return_value=[
+                       {"ticker": "AAPL", "success": True, "fill_price": 185.0},
+                       {"ticker": "TSLA", "success": True, "fill_price": 205.0},
+                   ]), \
+             patch("core.alpaca.get_position_data", return_value=None):
+            result = force_close_positions(_SESSION_ID)
+
+        assert result == 2          # still returns count of positions processed
+        assert call_count[0] == 2   # both positions attempted
+
 
 class TestComputePerformance:
     def test_realized_pnl_sum(self):

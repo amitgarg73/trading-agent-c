@@ -485,6 +485,122 @@ class TestCancelAllOrders:
             cancel_all_orders()  # must not raise
 
 
+# ── _cancel_bracket_stop_leg ──────────────────────────────────────────────────
+
+class TestCancelBracketStopLeg:
+    def _leg(self, order_type, status, leg_id="leg-stop-001"):
+        leg = MagicMock()
+        leg.order_type = order_type
+        leg.status     = status
+        leg.id         = leg_id
+        return leg
+
+    def test_cancels_open_stop_leg(self):
+        stop_leg = self._leg("stop", "new")
+        order    = _mock_order(legs=[stop_leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import _cancel_bracket_stop_leg
+            _cancel_bracket_stop_leg("ord-001")
+        mc.return_value.cancel_order_by_id.assert_called_once_with("leg-stop-001")
+
+    def test_skips_already_cancelled_leg(self):
+        stop_leg = self._leg("stop", "canceled")
+        order    = _mock_order(legs=[stop_leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import _cancel_bracket_stop_leg
+            _cancel_bracket_stop_leg("ord-001")
+        mc.return_value.cancel_order_by_id.assert_not_called()
+
+    def test_skips_filled_stop_leg(self):
+        stop_leg = self._leg("stop", "filled")
+        order    = _mock_order(legs=[stop_leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import _cancel_bracket_stop_leg
+            _cancel_bracket_stop_leg("ord-001")
+        mc.return_value.cancel_order_by_id.assert_not_called()
+
+    def test_does_not_cancel_trailing_stop_leg(self):
+        trail_leg = self._leg("trailing_stop", "new")
+        order     = _mock_order(legs=[trail_leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import _cancel_bracket_stop_leg
+            _cancel_bracket_stop_leg("ord-001")
+        mc.return_value.cancel_order_by_id.assert_not_called()
+
+    def test_swallows_exception(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.side_effect = Exception("not found")
+            from core.alpaca import _cancel_bracket_stop_leg
+            _cancel_bracket_stop_leg("ord-001")  # must not raise
+
+
+class TestSubmitBracketOrderCancelsStopLeg:
+    def _stop_leg(self, status="new"):
+        leg = MagicMock()
+        leg.order_type = "stop"
+        leg.status     = status
+        leg.id         = "leg-stop-001"
+        return leg
+
+    def test_cancels_stop_leg_after_fill(self):
+        """After bracket fills, the open stop leg must be cancelled so trail can be submitted."""
+        stop_leg = self._stop_leg("new")
+        order    = _mock_order(status="filled", filled_avg_price=185.0, legs=[stop_leg])
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        mc.return_value.cancel_order_by_id.assert_called_once_with("leg-stop-001")
+
+    def test_skips_stop_leg_cancel_when_already_filled(self):
+        """If stop leg already filled (stop-loss triggered before trail), don't cancel."""
+        stop_leg = self._stop_leg("filled")
+        order    = _mock_order(status="filled", filled_avg_price=185.0, legs=[stop_leg])
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        mc.return_value.cancel_order_by_id.assert_not_called()
+
+
+class TestGetBracketStatusNativeTrail:
+    def _leg(self, order_type, status, filled_avg_price):
+        leg = MagicMock()
+        leg.order_type       = order_type
+        leg.status           = status
+        leg.filled_avg_price = filled_avg_price
+        return leg
+
+    def test_trailing_stop_leg_classified_as_native_trail(self):
+        leg   = self._leg("trailing_stop", "filled", 186.50)
+        order = _mock_order(status="filled", filled_avg_price=185.10, legs=[leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["exit_reason"] == "NATIVE_TRAIL"
+        assert result["exit_price"]  == pytest.approx(186.50)
+
+    def test_stop_leg_still_classified_as_stop(self):
+        leg   = self._leg("stop", "filled", 183.00)
+        order = _mock_order(status="filled", filled_avg_price=185.10, legs=[leg])
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import get_bracket_status
+            result = get_bracket_status("ord-001")
+        assert result["exit_reason"] == "STOP"
+
+
 # ── order prefix ──────────────────────────────────────────────────────────────
 
 class TestOrderPrefix:

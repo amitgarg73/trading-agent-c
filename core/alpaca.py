@@ -160,6 +160,17 @@ def submit_bracket_order(
             status = str(o.status).lower()
             if status in ("filled", "partially_filled"):
                 fill_price = float(o.filled_avg_price) if o.filled_avg_price else None
+                # Cancel fixed stop-loss leg so trailing stop can be submitted without conflict
+                for leg in (o.legs or []):
+                    lt = str(leg.order_type).lower()
+                    ls = str(leg.status).lower()
+                    if "stop" in lt and "trailing" not in lt and "cancel" not in ls and "fill" not in ls:
+                        try:
+                            _client().cancel_order_by_id(str(leg.id))
+                            print(f"  [alpaca] {ticker} stop leg cancelled — trail will be submitted")
+                        except Exception:
+                            pass
+                        break
                 return str(order.id), fill_price
             if status in ("cancelled", "rejected", "expired"):
                 print(f"  [alpaca] {ticker} order {status} — skipping DB write")
@@ -189,7 +200,12 @@ def get_bracket_status(order_id: str) -> dict:
         for leg in (order.legs or []):
             if "filled" in str(leg.status).lower() and leg.filled_avg_price:
                 type_str    = str(leg.order_type).lower()
-                exit_reason = "STOP" if "stop" in type_str else "TARGET"
+                if "trailing" in type_str:
+                    exit_reason = "NATIVE_TRAIL"
+                elif "stop" in type_str:
+                    exit_reason = "STOP"
+                else:
+                    exit_reason = "TARGET"
                 exit_price  = round(float(leg.filled_avg_price), 4)
                 exit_filled = True
                 break
@@ -371,6 +387,22 @@ def cancel_order(order_id: str) -> bool:
         return False
 
 
+def _cancel_bracket_stop_leg(order_id: str) -> None:
+    """Cancel the bracket stop-loss leg (if still open) so a trailing stop can replace it."""
+    try:
+        o = _client().get_order_by_id(order_id)
+        for leg in (o.legs or []):
+            leg_type   = str(leg.order_type).lower()
+            leg_status = str(leg.status).lower()
+            if "stop" in leg_type and "trailing" not in leg_type:
+                if "cancel" not in leg_status and "fill" not in leg_status:
+                    _client().cancel_order_by_id(str(leg.id))
+                    print(f"  [alpaca] bracket stop leg cancelled — trailing stop will replace it")
+                break
+    except Exception as e:
+        print(f"  [alpaca] _cancel_bracket_stop_leg: {e}")
+
+
 def get_gap_up_tickers(min_gap_pct: float = 2.0, top_n: int = 20) -> list[dict]:
     """
     Return today's top gainers with percent_change >= min_gap_pct.
@@ -381,14 +413,14 @@ def get_gap_up_tickers(min_gap_pct: float = 2.0, top_n: int = 20) -> list[dict]:
         from alpaca.data.historical.screener import ScreenerClient
         from alpaca.data.requests import MarketMoversRequest
         from alpaca.data.enums import MarketType
-        api_key    = os.environ.get("ALPACA_API_KEY", "")
-        secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+        api_key    = os.environ.get("ALPACA_API_KEY_ID_C", "")
+        secret_key = os.environ.get("ALPACA_API_SECRET_KEY_C", "")
         client     = ScreenerClient(api_key, secret_key)
-        req        = MarketMoversRequest(market_type=MarketType.Stocks, top=top_n)
+        req        = MarketMoversRequest(market_type=MarketType.STOCKS, top=top_n)
         movers     = client.get_market_movers(req)
         return [
             {"ticker": m.symbol, "gap_pct": m.percent_change, "price": m.price}
-            for m in movers.gainers
+            for m in (movers.gainers or [])
             if m.percent_change >= min_gap_pct
         ]
     except Exception as e:

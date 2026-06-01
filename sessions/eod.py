@@ -116,27 +116,30 @@ def force_close_positions(session_id: str) -> int:
     now_   = datetime.utcnow().isoformat()
     client = get_client()
     for pos in positions:
-        fill_price = fills.get(pos["ticker"])
-        if fill_price:
-            entry    = pos.get("entry_price") or 0.0
-            realized = round((fill_price - float(entry)) * int(pos["shares"]), 2)
-            src      = "fill"
-        elif pos["ticker"] in alpaca_pnl:
-            realized = alpaca_pnl[pos["ticker"]]
-            src      = "alpaca_snapshot"
-        else:
-            realized = 0.0
-            src      = "unavailable"
+        try:
+            fill_price = fills.get(pos["ticker"])
+            if fill_price:
+                entry    = pos.get("entry_price") or 0.0
+                realized = round((fill_price - float(entry)) * int(pos["shares"]), 2)
+                src      = "fill"
+            elif pos["ticker"] in alpaca_pnl:
+                realized = alpaca_pnl[pos["ticker"]]
+                src      = "alpaca_snapshot"
+            else:
+                realized = 0.0
+                src      = "unavailable"
 
-        client.table("c_positions").update({
-            "status":       "closed",
-            "exit_reason":  "eod_forced",
-            "exit_price":   fill_price if fill_price else None,
-            "close_date":   today,
-            "close_time":   now_,
-            "realized_pnl": realized,
-        }).eq("id", pos["id"]).execute()
-        print(f"  [eod] {pos['ticker']} realized P&L: ${realized:+.2f} (source: {src})")
+            client.table("c_positions").update({
+                "status":       "closed",
+                "exit_reason":  "eod_forced",
+                "exit_price":   fill_price if fill_price else None,
+                "close_date":   today,
+                "close_time":   now_,
+                "realized_pnl": realized,
+            }).eq("id", pos["id"]).execute()
+            print(f"  [eod] {pos['ticker']} realized P&L: ${realized:+.2f} (source: {src})")
+        except Exception as e:
+            print(f"  [eod] {pos['ticker']} DB update failed: {e}")
 
     return len(positions)
 
