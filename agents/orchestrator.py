@@ -161,6 +161,15 @@ def run_premarket_pipeline(
     trade_proposals = run_research_agent(tracer, market_report, params)
     tracer.flush_cost_breakdown()
 
+    if not trade_proposals.get("proposals"):
+        tracer.log_decision(
+            "orchestrator", "no_viable_proposals",
+            detail={"summary": trade_proposals.get("summary", "")},
+        )
+        out = _empty_session_output(market_report, "no_viable_proposals")
+        out["_v2_market_report"] = market_report
+        return out
+
     # Step 3: Risk Agent
     risk_verdicts = run_risk_agent(tracer, trade_proposals, params)
     tracer.flush_cost_breakdown()

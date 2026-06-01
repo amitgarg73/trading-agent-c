@@ -302,3 +302,16 @@ class TestRunPremarketPipeline:
         # Research called only once (no retry)
         assert mock_res.call_count == 1
         assert result["session_meta"]["terminal_reason"] == "structural_block"
+
+    def test_no_viable_proposals_skips_risk_and_synthesis(self, tracer):
+        # Research returns empty proposals → risk and synthesis must NOT be called
+        empty_proposals = {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
+             patch("agents.orchestrator.run_research_agent", return_value=empty_proposals), \
+             patch("agents.orchestrator.run_risk_agent") as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic") as mock_ant:
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        mock_risk.assert_not_called()
+        mock_ant.return_value.messages.create.assert_not_called()
+        assert result["trades"] == []
+        assert result["session_meta"]["terminal_reason"] == "no_viable_proposals"
