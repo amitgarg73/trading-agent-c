@@ -274,6 +274,20 @@ def main() -> None:
     params = load_params()
     tracer = TraceLogger(session_id)
 
+    # Execute any premarket trades that were deferred past 9:30 AM market open.
+    if now_t >= time(9, 30):
+        from core.db import get_client as _get_client
+        _rows = _get_client().table("c_sessions").select("pending_trades") \
+            .eq("id", session_id).limit(1).execute().data or []
+        _pending = (_rows[0].get("pending_trades") if _rows else None) or []
+        if _pending:
+            print(f"[intraday] Executing {len(_pending)} deferred premarket trade(s)...")
+            from sessions.premarket import _execute_trades
+            _execute_trades(_pending, session_id, params.trail_pct)
+            _get_client().table("c_sessions").update(
+                {"pending_trades": None}
+            ).eq("id", session_id).execute()
+
     _sync_positions(session_id, params.trail_pct)
 
     daily_pnl   = get_daily_pnl(session_id)

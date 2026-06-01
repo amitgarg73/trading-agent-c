@@ -163,7 +163,11 @@ def main() -> None:
             _execute_trades(trades, session_id, params.trail_pct)
         elif trades:
             print(f"[premarket] Market not yet open ({now_et.strftime('%H:%M ET')}) "
-                  f"— analysis complete, {len(trades)} trade(s) queued; execution deferred to 9:30 AM")
+                  f"— storing {len(trades)} pending trade(s) for 9:30 AM execution")
+            from core.db import get_client
+            get_client().table("c_sessions").update(
+                {"pending_trades": trades}
+            ).eq("id", session_id).execute()
 
         # V1 shadow eval — non-blocking, does not affect trades
         try:

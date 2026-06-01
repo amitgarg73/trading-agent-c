@@ -258,15 +258,15 @@ class TestRunPremarketPipeline:
         assert mock_risk.call_count == 2
         assert result["session_meta"]["retry_triggered"] is True
 
-    def test_caution_shortcircuit_when_all_rejected(self, tracer):
-        # CAUTION + all risk verdicts rejected → synthesis NOT called, structural_block returned
+    def test_caution_all_rejected_still_runs_synthesis(self, tracer):
+        # CAUTION + all risk verdicts rejected → synthesis IS called (no more shortcircuit)
+        client = self._mock_synthesis(_FINAL_STRUCTURAL)
         with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
              patch("agents.orchestrator.run_risk_agent", return_value=_VERDICTS_REJECTED), \
-             patch("agents.orchestrator.anthropic.Anthropic") as mock_client:
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        mock_client.return_value.messages.create.assert_not_called()
-        assert result["trades"] == []
+        client.messages.create.assert_called_once()
         assert result["session_meta"]["terminal_reason"] == "structural_block"
 
     def test_caution_proceeds_when_some_approved(self, tracer):
@@ -281,7 +281,7 @@ class TestRunPremarketPipeline:
         assert result["session_meta"]["terminal_reason"] == "converged"
 
     def test_caution_no_retry_on_fixable_rejections(self, tracer):
-        # CAUTION + synthesis says retry_needed → retry suppressed, structural_block returned
+        # CAUTION + synthesis says retry_needed → retry suppressed, caution_no_retry returned
         client = self._mock_synthesis(_FINAL_RETRY_NEEDED)
         with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
@@ -289,7 +289,7 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
         mock_res.assert_called_once()
-        assert result["session_meta"]["terminal_reason"] == "structural_block"
+        assert result["session_meta"]["terminal_reason"] == "caution_no_retry"
         assert "retry_needed" not in result
 
     def test_structural_block_no_retry(self, tracer):

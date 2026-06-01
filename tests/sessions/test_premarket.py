@@ -223,9 +223,10 @@ class TestPremarketMain:
             main()
         mock_exec.assert_called_once()
 
-    def test_skips_execution_before_market_open(self, mock_supabase, capsys):
-        """Trades are selected but not submitted before 9:30 AM market open."""
-        mock_supabase.table.return_value = make_query([])
+    def test_skips_execution_before_market_open_stores_pending(self, mock_supabase, capsys):
+        """Trades are not submitted before 9:30 AM but are stored as pending_trades in c_sessions."""
+        q = make_query([])
+        mock_supabase.table.return_value = q
         with patch("sessions.premarket.is_trading_day", return_value=True), \
              patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
              patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
@@ -247,8 +248,14 @@ class TestPremarketMain:
             from sessions.premarket import main
             main()
         mock_exec.assert_not_called()
+        # pending_trades stored via c_sessions update
+        update_calls = [
+            c for c in q.update.call_args_list
+            if "pending_trades" in (c[0][0] if c[0] else c[1])
+        ]
+        assert len(update_calls) == 1
         out = capsys.readouterr().out
-        assert "deferred" in out
+        assert "pending" in out
 
     def test_no_execute_when_no_trades(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \

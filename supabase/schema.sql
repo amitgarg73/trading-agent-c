@@ -25,7 +25,8 @@ CREATE TABLE c_sessions (
   terminal_reason      TEXT NOT NULL,
   started_at           TIMESTAMPTZ NOT NULL,
   completed_at         TIMESTAMPTZ,
-  is_simulated         BOOL NOT NULL DEFAULT false
+  is_simulated         BOOL NOT NULL DEFAULT false,
+  pending_trades       JSONB
 );
 
 CREATE INDEX idx_c_sessions_date ON c_sessions(date DESC);
