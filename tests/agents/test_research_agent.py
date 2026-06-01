@@ -66,6 +66,7 @@ def _run(tracer, market_report=None, rejected_context=None,
     with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
          patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
          patch("agents.research_agent.get_sector_rotation",    return_value=_SECTOR), \
+         patch("core.alpaca.get_gap_up_tickers",               return_value=[]), \
          patch("agents.research_agent._investigate_ticker",    side_effect=investigate_side_effect):
         return run_research_agent(
             tracer, market_report or _MARKET_REPORT,
@@ -167,6 +168,7 @@ class TestRunResearchAgent:
         with patch("agents.research_agent.get_candidates",         return_value=candidates), \
              patch("agents.research_agent.get_premarket_snapshot", return_value=snapshot), \
              patch("agents.research_agent.get_sector_rotation",    return_value=_SECTOR), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]), \
              patch("agents.research_agent._investigate_ticker",    side_effect=side_effect):
             result = run_research_agent(tracer, report, StrategyParams())
 
@@ -188,13 +190,15 @@ class TestScreenCandidates:
             for i in range(10)
         ]
         with patch("agents.research_agent.get_candidates",         return_value=many), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=snaps):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snaps), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
         assert len(selected) <= _MAX_CANDIDATES
 
     def test_excludes_rejected_tickers(self):
         with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates(_MARKET_REPORT, _SECTOR, ["AAPL"])
         tickers = [s["ticker"] for s in selected]
         assert "AAPL" not in tickers
@@ -209,7 +213,8 @@ class TestScreenCandidates:
              "premarket_change_pct": 0.2},
         ]
         with patch("agents.research_agent.get_candidates",         return_value=low_candidates), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=low_snapshot):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=low_snapshot), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates(_CAUTION_REPORT, _SECTOR, [])
         assert len(selected) == 0
 
@@ -223,7 +228,8 @@ class TestScreenCandidates:
              "premarket_change_pct": 0.5},
         ]
         with patch("agents.research_agent.get_candidates",         return_value=strong_candidates), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=strong_snapshot):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=strong_snapshot), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates(_CAUTION_REPORT, _SECTOR, [])
         assert len(selected) == 1
         assert selected[0]["ticker"] == "STRONG"
@@ -242,7 +248,8 @@ class TestScreenCandidates:
              "premarket_change_pct": 1.0},
         ]
         with patch("agents.research_agent.get_candidates",         return_value=candidates), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=snapshot):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snapshot), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates({**_MARKET_REPORT, "max_positions": 2}, _SECTOR, [])
         assert selected[0]["ticker"] == "B"  # higher score first
 
@@ -253,11 +260,51 @@ class TestScreenCandidates:
              "avg_volume": 50_000_000, "sector": "Technology"},
         ]
         with patch("agents.research_agent.get_candidates",         return_value=candidates_with_error), \
-             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT):
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
             selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
         tickers = [s["ticker"] for s in selected]
         assert "AAPL" in tickers
         assert len(selected) == 1
+
+    def test_gap_up_ticker_added_when_not_in_scanner(self):
+        """A gap-up mover absent from scanner candidates is injected with score=6."""
+        gap_ups = [{"ticker": "NVDA", "gap_pct": 4.5, "price": 900.0}]
+        snap = _SNAPSHOT + [{"ticker": "NVDA", "scanner_price": 900.0,
+                              "premarket_price": 940.5, "premarket_change_pct": 4.5}]
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=snap), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=gap_ups):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
+        tickers = [s["ticker"] for s in selected]
+        assert "NVDA" in tickers
+
+    def test_gap_up_not_duplicated_if_already_in_scanner(self):
+        """Gap-up mover that is already a scanner candidate is not added twice."""
+        gap_ups = [{"ticker": "AAPL", "gap_pct": 3.0, "price": 188.0}]
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=gap_ups):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
+        assert [s["ticker"] for s in selected].count("AAPL") == 1
+
+    def test_gap_up_rejected_ticker_excluded(self):
+        """Gap-up mover in rejected_tickers must not be added."""
+        gap_ups = [{"ticker": "NVDA", "gap_pct": 5.0, "price": 900.0}]
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=gap_ups):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, ["NVDA"])
+        tickers = [s["ticker"] for s in selected]
+        assert "NVDA" not in tickers
+
+    def test_gap_up_failure_does_not_break_screening(self):
+        """get_gap_up_tickers returning [] (or raising handled internally) is safe."""
+        with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
+             patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
+             patch("core.alpaca.get_gap_up_tickers",               return_value=[]):
+            selected = _screen_candidates(_MARKET_REPORT, _SECTOR, [])
+        assert len(selected) == 2  # still returns scanner candidates
 
 
 _CONTEXT = {"score": 8, "premarket_change_pct": 1.0, "scanner_price": 185.0}

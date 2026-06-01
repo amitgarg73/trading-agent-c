@@ -369,3 +369,28 @@ def cancel_order(order_id: str) -> bool:
         return True
     except Exception:
         return False
+
+
+def get_gap_up_tickers(min_gap_pct: float = 2.0, top_n: int = 20) -> list[dict]:
+    """
+    Return today's top gainers with percent_change >= min_gap_pct.
+    Each dict: {ticker, gap_pct, price}.
+    Returns [] on any error so callers can treat it as an optional signal.
+    """
+    try:
+        from alpaca.data.historical.screener import ScreenerClient
+        from alpaca.data.requests import MarketMoversRequest
+        from alpaca.data.enums import MarketType
+        api_key    = os.environ.get("ALPACA_API_KEY", "")
+        secret_key = os.environ.get("ALPACA_SECRET_KEY", "")
+        client     = ScreenerClient(api_key, secret_key)
+        req        = MarketMoversRequest(market_type=MarketType.Stocks, top=top_n)
+        movers     = client.get_market_movers(req)
+        return [
+            {"ticker": m.symbol, "gap_pct": m.percent_change, "price": m.price}
+            for m in movers.gainers
+            if m.percent_change >= min_gap_pct
+        ]
+    except Exception as e:
+        print(f"  [alpaca] get_gap_up_tickers: {e}")
+        return []

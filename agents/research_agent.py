@@ -190,11 +190,32 @@ def _screen_candidates(
     rejected_tickers: list[str],
 ) -> list[dict]:
     """
-    Select up to 4 tickers to investigate.
+    Select up to _MAX_CANDIDATES tickers to investigate.
     Done deterministically so we save a full LLM call and 2-3 turns.
+
+    Sources (merged, deduped by ticker):
+      1. Scanner candidates (get_candidates) — technical-score ranked
+      2. Gap-up movers (get_gap_up_tickers) — Alpaca market movers >= 2% gain,
+         assigned score=6 so they compete with mid-tier scanner picks
     """
+    from core.alpaca import get_gap_up_tickers
+
     candidates = get_candidates(min_score=5)
     valid = [c for c in candidates if "error" not in c and c["ticker"] not in rejected_tickers]
+
+    # Merge gap-up movers that aren't already in the scanner pool
+    scanner_tickers = {c["ticker"] for c in valid}
+    gap_ups = get_gap_up_tickers(min_gap_pct=2.0)
+    for g in gap_ups:
+        if g["ticker"] not in scanner_tickers and g["ticker"] not in rejected_tickers:
+            valid.append({
+                "ticker":          g["ticker"],
+                "technical_score": 6,
+                "sector":          None,
+                "_source":         "gap_up",
+            })
+            scanner_tickers.add(g["ticker"])
+
     if not valid:
         return []
 
@@ -202,16 +223,17 @@ def _screen_candidates(
     snapshots = get_premarket_snapshot(tickers)
     snap_map  = {s["ticker"]: s for s in snapshots if "error" not in s}
 
-    is_caution    = market_report.get("decision") == "CAUTION"
-    leading_etfs  = {s.get("etf", "") for s in (sector_data or []) if (s.get("change_pct") or 0) > 0}
-    lagging_etfs  = {s.get("etf", "") for s in (sector_data or []) if (s.get("change_pct") or 0) < -0.5}
+    # Build a gap_pct lookup from Alpaca movers (premarket_snapshot may lag)
+    gap_pct_map = {g["ticker"]: g["gap_pct"] for g in gap_ups}
+
+    is_caution = market_report.get("decision") == "CAUTION"
 
     scored = []
     for c in valid:
         ticker = c["ticker"]
         snap   = snap_map.get(ticker, {})
         score  = c["technical_score"]
-        pct    = snap.get("premarket_change_pct") or 0
+        pct    = gap_pct_map.get(ticker) or snap.get("premarket_change_pct") or 0
 
         if is_caution and (score < 7 or pct <= 0.3):
             continue
@@ -221,7 +243,7 @@ def _screen_candidates(
             "score":                score,
             "premarket_change_pct": pct,
             "scanner_price":        snap.get("scanner_price"),
-            "premarket_price":      snap.get("premarket_price"),
+            "premarket_price":      snap.get("premarket_price") or c.get("price"),
             "sector":               c.get("sector"),
         })
 
