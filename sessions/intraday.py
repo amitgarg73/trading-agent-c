@@ -176,6 +176,7 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                 db.table("c_positions").update({
                     "status":       "closed",
                     "exit_reason":  exit_reason or "unknown",
+                    "exit_price":   fill_price,
                     "close_date":   date.today().isoformat(),
                     "close_time":   now_,
                     "realized_pnl": realized,

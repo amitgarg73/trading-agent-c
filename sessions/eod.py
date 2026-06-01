@@ -131,6 +131,7 @@ def force_close_positions(session_id: str) -> int:
         client.table("c_positions").update({
             "status":       "closed",
             "exit_reason":  "eod_forced",
+            "exit_price":   fill_price if fill_price else None,
             "close_date":   today,
             "close_time":   now_,
             "realized_pnl": realized,
@@ -189,6 +190,7 @@ def reconcile_positions(session_id: str) -> dict:
             updates.update({
                 "status":       "closed",
                 "exit_reason":  status["exit_reason"] or "bracket_exit_detected",
+                "exit_price":   status["exit_price"],
                 "close_date":   today,
                 "close_time":   now_,
                 "realized_pnl": realized,

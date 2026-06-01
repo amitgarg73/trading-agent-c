@@ -82,6 +82,7 @@ CREATE TABLE c_positions (
   entry_time       TIMESTAMPTZ NOT NULL,
   close_time       TIMESTAMPTZ,
   exit_reason      TEXT,         -- target | stop | eod_forced | manual
+  exit_price       FLOAT,
   realized_pnl     FLOAT,
   score_at_entry   INT,
   entry_context    TEXT,         -- premarket | intraday
