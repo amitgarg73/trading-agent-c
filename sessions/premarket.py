@@ -191,6 +191,8 @@ def main() -> None:
             _log_market_eval(session_id, v1_report, v2_report)
         except Exception as e:
             print(f"  [premarket] Shadow eval failed (non-fatal): {e}")
+
+        if trades:
             print(f"[premarket] {len(trades)} trade(s): "
                   f"{', '.join(t['ticker'] for t in trades)}")
         else:
