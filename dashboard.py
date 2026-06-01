@@ -13,28 +13,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Password gate ──────────────────────────────────────────────────────────────
-
-def _check_password() -> bool:
-    if st.session_state.get("authenticated"):
-        return True
-    correct = st.secrets.get("DASHBOARD_PASSWORD", "")
-    if not correct:
-        return True  # no password configured — open access
-    with st.form("login"):
-        st.markdown("### Trading Agent C")
-        pwd = st.text_input("Password", type="password")
-        if st.form_submit_button("Sign in"):
-            if pwd == correct:
-                st.session_state["authenticated"] = True
-                st.rerun()
-            else:
-                st.error("Incorrect password")
-    st.stop()
-
-_check_password()
-
-
 # ── Connection ─────────────────────────────────────────────────────────────────
 
 @st.cache_resource
