@@ -14,8 +14,8 @@ from core.protection import check_protection_status
 from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
-_PREMARKET_START = time(6, 0)   # 6:00 AM ET — earliest reasonable premarket
-_PREMARKET_END   = time(10, 30) # 10:30 AM ET — recovery window if 9:15/9:30 crons missed
+_PREMARKET_START = time(6, 0)   # default — overridable via c_agent_config.premarket_window_start
+_PREMARKET_END   = time(10, 30) # default — overridable via c_agent_config.premarket_window_end
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
@@ -110,6 +110,18 @@ def _build_premarket_alert(result: dict, session_id: str, now_et: datetime) -> t
     return subject, "\n".join(lines)
 
 
+def _window_time(config: dict, key: str, default: time) -> time:
+    """Parse HH:MM string from config, fall back to default on missing/invalid."""
+    val = config.get(key)
+    if not val:
+        return default
+    try:
+        h, m = str(val).split(":")
+        return time(int(h), int(m))
+    except (ValueError, TypeError):
+        return default
+
+
 def main() -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
@@ -118,9 +130,14 @@ def main() -> None:
         print(f"[premarket] Not a trading day ({weekday}). Exiting.")
         return
 
+    config        = load_agent_config()
+    window_start  = _window_time(config, "premarket_window_start", _PREMARKET_START)
+    window_end    = _window_time(config, "premarket_window_end",   _PREMARKET_END)
+
     now_t = now_et.time()
-    if not (_PREMARKET_START <= now_t <= _PREMARKET_END):
-        print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}). Exiting.")
+    if not (window_start <= now_t <= window_end):
+        print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}, "
+              f"allowed {window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')} ET). Exiting.")
         return
 
     protection = check_protection_status()
@@ -134,7 +151,6 @@ def main() -> None:
         return
 
     params     = load_params()
-    config     = load_agent_config()
     session_id = str(uuid4())
     tracer     = TraceLogger(session_id)
     print(f"[premarket] Session {session_id} — {now_et.strftime('%Y-%m-%d %H:%M ET')}")
