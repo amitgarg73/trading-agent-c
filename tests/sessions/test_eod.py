@@ -342,6 +342,8 @@ class TestEodMain:
              patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
              patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": True}), \
              patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   return_value={"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
              patch("sessions.eod.force_close_positions", return_value=0), \
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
@@ -361,6 +363,33 @@ class TestEodMain:
             main()
         mock_save.assert_called_once()
 
+    def test_reconcile_runs_before_force_close(self, mock_supabase):
+        """reconcile_positions must be called before force_close_positions."""
+        call_order = []
+        perf = self._default_perf()
+        with patch("sessions.eod.is_trading_day", return_value=True), \
+             patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": False}), \
+             patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   side_effect=lambda *a: call_order.append("reconcile") or
+                   {"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
+             patch("sessions.eod.force_close_positions",
+                   side_effect=lambda *a: call_order.append("force_close") or 0), \
+             patch("sessions.eod.get_today_trades", return_value=_TRADES), \
+             patch("sessions.eod.compute_performance", return_value=perf), \
+             patch("sessions.eod.save_performance"), \
+             patch("sessions.eod.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.eod.update_goal_progress"), \
+             patch("sessions.eod.record_goal_snapshots"), \
+             patch("sessions.eod.send_alert"), \
+             patch("sessions.eod.TraceLogger") as mock_tracer_cls:
+            mock_tracer_cls.return_value = MagicMock()
+            from sessions.eod import main
+            main()
+        assert call_order == ["reconcile", "force_close"]
+
     def test_learning_skipped_when_no_trades(self, mock_supabase):
         perf = DailyPerformance(
             session_id=_SESSION_ID, date="2026-05-27",
@@ -371,6 +400,8 @@ class TestEodMain:
              patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
              patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": True}), \
              patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   return_value={"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
              patch("sessions.eod.force_close_positions", return_value=0), \
              patch("sessions.eod.get_today_trades", return_value=[]), \
              patch("sessions.eod.compute_performance", return_value=perf), \
@@ -394,6 +425,8 @@ class TestEodMain:
              patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
              patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": False}), \
              patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   return_value={"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
              patch("sessions.eod.force_close_positions", return_value=0), \
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
@@ -418,6 +451,8 @@ class TestEodMain:
              patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
              patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": True}), \
              patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   return_value={"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
              patch("sessions.eod.force_close_positions", return_value=0), \
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
@@ -442,7 +477,15 @@ _OPEN_POS_WITH_ORDER = [
     {
         "id": "p1", "ticker": "AAPL", "shares": 18,
         "entry_price": 185.0, "entry_time": "2026-05-27T09:30:00Z",
-        "alpaca_order_id": "ord-bracket-1",
+        "alpaca_order_id": "ord-bracket-1", "trail_order_id": None,
+    },
+]
+
+_OPEN_POS_WITH_TRAIL = [
+    {
+        "id": "p2", "ticker": "AAPL", "shares": 18,
+        "entry_price": 185.0, "entry_time": "2026-05-27T09:30:00Z",
+        "alpaca_order_id": "ord-bracket-1", "trail_order_id": "ord-trail-1",
     },
 ]
 
@@ -524,8 +567,80 @@ class TestReconcilePositions:
         mock_supabase.table.assert_not_called()
 
     def test_skips_position_without_alpaca_order_id(self, mock_supabase):
-        pos = [{**_OPEN_POS_WITH_ORDER[0], "alpaca_order_id": None}]
-        with patch("sessions.eod.get_open_positions", return_value=pos):
+        pos = [{**_OPEN_POS_WITH_ORDER[0], "alpaca_order_id": None, "trail_order_id": None}]
+        with patch("sessions.eod.get_open_positions", return_value=pos), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)):
             result = reconcile_positions(_SESSION_ID)
         assert result == {"entry_updated": 0, "exits_synced": 0, "errors": 0}
         mock_supabase.table.assert_not_called()
+
+    def test_closes_via_trail_when_bracket_not_exited(self, mock_supabase):
+        """Trailing stop fill detected via trail_order_id when bracket is still open."""
+        updates_captured = {}
+
+        def capture(data):
+            updates_captured.update(data)
+            r = make_query([])
+            r.eq.return_value = r
+            return r
+
+        q = make_query([])
+        q.update.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        bracket_no_exit = {**_STATUS_ENTRY_ONLY}
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_TRAIL), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_no_exit), \
+             patch("core.alpaca.get_order_fill", return_value=(191.50, "NATIVE_TRAIL")):
+            result = reconcile_positions(_SESSION_ID)
+
+        assert result["exits_synced"] == 1
+        assert updates_captured.get("status")      == "closed"
+        assert updates_captured.get("exit_reason") == "NATIVE_TRAIL"
+        assert updates_captured.get("exit_price")  == pytest.approx(191.50)
+
+    def test_trail_exit_pnl_uses_actual_entry(self, mock_supabase):
+        """P&L from trailing stop exit uses actual entry fill price, not proposal price."""
+        updates_captured = {}
+
+        def capture(data):
+            updates_captured.update(data)
+            r = make_query([])
+            r.eq.return_value = r
+            return r
+
+        q = make_query([])
+        q.update.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        bracket_with_entry_fill = {**_STATUS_ENTRY_ONLY, "entry_price": 185.22}
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_TRAIL), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_with_entry_fill), \
+             patch("core.alpaca.get_order_fill", return_value=(191.50, "NATIVE_TRAIL")):
+            reconcile_positions(_SESSION_ID)
+
+        # (191.50 - 185.22) * 18 = 113.04
+        assert updates_captured.get("realized_pnl") == pytest.approx(113.04)
+
+    def test_bracket_exit_takes_priority_over_trail(self, mock_supabase):
+        """If bracket exit already fired, trailing stop is not checked."""
+        updates_captured = {}
+
+        def capture(data):
+            updates_captured.update(data)
+            r = make_query([])
+            r.eq.return_value = r
+            return r
+
+        q = make_query([])
+        q.update.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        mock_get_fill = MagicMock()
+        with patch("sessions.eod.get_open_positions", return_value=_OPEN_POS_WITH_TRAIL), \
+             patch("core.alpaca.get_bracket_status", return_value=_STATUS_FULL_EXIT), \
+             patch("core.alpaca.get_order_fill", mock_get_fill):
+            reconcile_positions(_SESSION_ID)
+
+        mock_get_fill.assert_not_called()
+        assert updates_captured.get("exit_reason") == "TARGET"
