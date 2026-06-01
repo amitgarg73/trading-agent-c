@@ -457,10 +457,10 @@ class TestIntradayMain:
         mock_place.assert_called_once()
 
     def test_executes_pending_trades_at_market_open(self, mock_supabase, capsys):
-        """Deferred premarket trades stored in c_sessions.pending_trades are executed at 9:30+."""
+        """Deferred premarket trades stored in c_sessions.pending_trades are executed at 9:45+."""
         import pytz
         _ET = pytz.timezone("America/New_York")
-        fake_now = datetime(2026, 5, 27, 9, 30, tzinfo=_ET)
+        fake_now = datetime(2026, 5, 27, 9, 45, tzinfo=_ET)
         _pending = [
             {"ticker": "AAPL", "entry_price": 185.0, "target_price": 192.0,
              "stop_loss": 183.0, "position_size": 3500, "shares": 18, "confidence": "HIGH"}
@@ -488,11 +488,37 @@ class TestIntradayMain:
         out = capsys.readouterr().out
         assert "deferred premarket" in out
 
-    def test_no_pending_execution_before_930(self, mock_supabase):
-        """Before 9:30 AM, pending_trades are not checked."""
+    def test_no_pending_execution_before_945(self, mock_supabase):
+        """Before 9:45 AM, pending_trades are not checked."""
         import pytz
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 9, 15, tzinfo=_ET)
+        mock_supabase.table.return_value = make_query([{"pending_trades": [{"ticker": "X"}]}])
+        with patch("sessions.intraday.is_trading_day", return_value=True), \
+             patch("sessions.intraday.datetime") as mock_dt, \
+             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.intraday.load_agent_config",
+                   return_value={"enable_intraday_entries": False}), \
+             patch("sessions.intraday.load_params", return_value=self._mock_params()), \
+             patch("sessions.intraday.get_daily_pnl", return_value=0.0), \
+             patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
+             patch("sessions.intraday._sync_positions"), \
+             patch("sessions.premarket._execute_trades") as mock_exec, \
+             patch("sessions.intraday.TraceLogger") as mock_tracer_cls:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            mock_tracer_cls.return_value = MagicMock()
+            from sessions.intraday import main
+            main()
+        mock_exec.assert_not_called()
+
+    def test_no_pending_execution_at_930(self, mock_supabase):
+        """At 9:30 AM (before 9:45 gate), pending_trades are not executed."""
+        import pytz
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 9, 30, tzinfo=_ET)
         mock_supabase.table.return_value = make_query([{"pending_trades": [{"ticker": "X"}]}])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \

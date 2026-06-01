@@ -275,8 +275,9 @@ def main() -> None:
     params = load_params()
     tracer = TraceLogger(session_id)
 
-    # Execute any premarket trades that were deferred past 9:30 AM market open.
-    if now_t >= time(9, 30):
+    # Execute any premarket trades that were deferred — wait for 9:45 AM so the
+    # first 15 minutes of open volatility settle before we enter.
+    if now_t >= time(9, 45):
         from core.db import get_client as _get_client
         _rows = _get_client().table("c_sessions").select("pending_trades") \
             .eq("id", session_id).limit(1).execute().data or []
