@@ -60,7 +60,10 @@ On CAUTION days (passed in context): require score >= 7 and above_vwap true.
 PROPOSAL RULES:
 - entry_price  = live_price (or premarket_price if pre-market)
 - target_price = round(entry_price * 1.08, 2)
-- stop_loss    = round(entry_price * 0.9933, 2)
+- stop_loss: use atr_pct from get_ticker_market_data.
+  stop_pct = max(atr_pct * 0.8, 0.5) / 100
+  stop_loss = round(entry_price * (1 - stop_pct), 2)
+  (0.8× ATR, minimum 0.5% floor — survives normal intraday noise)
 - position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
 
 Return JSON only — no prose:
