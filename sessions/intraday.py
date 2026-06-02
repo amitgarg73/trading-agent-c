@@ -124,8 +124,8 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
     - marks positions closed if Alpaca no longer holds them (bracket or trail exit fired)
     """
     from core.alpaca import (
-        get_open_alpaca_tickers, get_position_data, get_order_fill, submit_trailing_stop,
-        _cancel_bracket_stop_leg, _dclient,
+        get_open_alpaca_tickers, get_position_data, get_order_fill, get_bracket_status,
+        submit_trailing_stop, _cancel_bracket_stop_leg, _dclient,
     )
     from core.db import get_client
     db = get_client()
@@ -152,18 +152,23 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
         shares         = int(pos.get("shares") or 0)
 
         if ticker in alpaca_tickers:
-            data = get_position_data(ticker)
-            if data:
-                update: dict = {"entry_price": data["current_price"]}
-                # Entry just filled and no trailing stop yet — submit one now.
-                # Cancel bracket stop-loss leg first to avoid over-sell rejection.
-                if not trail_order_id:
-                    if order_id:
-                        _cancel_bracket_stop_leg(order_id)
+            get_position_data(ticker)  # keep for side-effects / future use
+            update: dict = {}
+            # Entry just filled (or still pending from open) — backfill actual fill price
+            # and submit trailing stop. get_bracket_status is only called while trail is
+            # absent; once trail_order_id is set, subsequent cycles skip this entirely.
+            if not trail_order_id and order_id:
+                bracket = get_bracket_status(order_id)
+                if bracket.get("entry_filled") and bracket.get("entry_price"):
+                    actual_entry = bracket["entry_price"]
+                    if abs(actual_entry - float(pos.get("entry_price") or 0)) > 0.001:
+                        update["entry_price"] = actual_entry
+                    _cancel_bracket_stop_leg(order_id)
                     new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
                     if new_trail_id:
                         update["trail_order_id"] = new_trail_id
                         print(f"  [intraday] {ticker} trailing stop submitted (post-fill): {new_trail_id[:8]}")
+            if update:
                 db.table("c_positions").update(update).eq("id", pos["id"]).execute()
         else:
             # Not in Alpaca — check trail order first, then bracket

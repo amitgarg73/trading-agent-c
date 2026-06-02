@@ -219,12 +219,50 @@ class TestSyncPositions:
 
     def test_submits_trailing_stop_when_missing(self, mock_supabase):
         mock_supabase.table.return_value = make_query([self._OPEN_POS])
+        bracket_status = {"entry_filled": True, "entry_price": 185.0}
         with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
              patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_status), \
+             patch("core.alpaca._cancel_bracket_stop_leg"), \
              patch("core.alpaca.submit_trailing_stop", return_value="trail-001") as mock_trail:
             from sessions.intraday import _sync_positions
             _sync_positions(_SESSION_ID, 0.008)
         mock_trail.assert_called_once_with("AAPL", 10, 0.008)
+
+    def test_backfills_entry_price_on_fill_confirmation(self, mock_supabase):
+        pos = {**self._OPEN_POS, "entry_price": 184.0}  # original requested price differs from fill
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        bracket_status = {"entry_filled": True, "entry_price": 185.5}
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_status), \
+             patch("core.alpaca._cancel_bracket_stop_leg"), \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-001"):
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("entry_price") == 185.5
+
+    def test_skips_trail_when_entry_not_yet_filled(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([self._OPEN_POS])
+        bracket_status = {"entry_filled": False, "entry_price": None}
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_status), \
+             patch("core.alpaca.submit_trailing_stop") as mock_trail:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_trail.assert_not_called()
 
     def test_skips_trail_submission_when_already_set(self, mock_supabase):
         pos = {**self._OPEN_POS, "trail_order_id": "trail-existing"}
@@ -260,8 +298,10 @@ class TestSyncPositions:
     def test_cancels_stop_leg_before_trail_retry(self, mock_supabase):
         """_cancel_bracket_stop_leg is called before submitting the trailing stop."""
         mock_supabase.table.return_value = make_query([self._OPEN_POS])
+        bracket_status = {"entry_filled": True, "entry_price": 185.0}
         with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
              patch("core.alpaca.get_position_data", return_value={"current_price": 186.0}), \
+             patch("core.alpaca.get_bracket_status", return_value=bracket_status), \
              patch("core.alpaca._cancel_bracket_stop_leg") as mock_cancel, \
              patch("core.alpaca.submit_trailing_stop", return_value="trail-001"):
             from sessions.intraday import _sync_positions
