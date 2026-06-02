@@ -203,11 +203,13 @@ def _screen_candidates(
     candidates = get_candidates(min_score=5)
     valid = [c for c in candidates if "error" not in c and c["ticker"] not in rejected_tickers]
 
-    # Merge gap-up movers that aren't already in the scanner pool
+    # Merge gap-up movers — universe-restricted so micro-caps/warrants can't enter
+    from scanner.universe import get_tickers as _get_universe_tickers
+    universe_set = set(_get_universe_tickers())
     scanner_tickers = {c["ticker"] for c in valid}
     gap_ups = get_gap_up_tickers(min_gap_pct=2.0)
     for g in gap_ups:
-        if g["ticker"] not in scanner_tickers and g["ticker"] not in rejected_tickers:
+        if g["ticker"] not in scanner_tickers and g["ticker"] not in rejected_tickers and g["ticker"] in universe_set:
             valid.append({
                 "ticker":          g["ticker"],
                 "technical_score": 6,
