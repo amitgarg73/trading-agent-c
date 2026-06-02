@@ -10,7 +10,7 @@ import re
 from datetime import datetime, timezone, timedelta
 
 
-STALE_HOURS = 3
+STALE_HOURS = 1
 
 
 def _parse_ts(ts: str) -> datetime:

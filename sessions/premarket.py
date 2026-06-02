@@ -122,6 +122,49 @@ def _window_time(config: dict, key: str, default: time) -> time:
         return default
 
 
+def _existing_session_guard(today: str) -> tuple[bool, str]:
+    """
+    Returns (should_skip, reason_msg).
+    Skip if today already has a completed session or an in_progress one started < 60 min ago.
+    Prevents concurrent runs when the cron fires twice or intraday triggers premarket.
+    """
+    from core.db import get_client
+    rows = (
+        get_client()
+        .table("c_sessions")
+        .select("id,terminal_reason,started_at")
+        .eq("date", today)
+        .order("started_at", desc=True)
+        .limit(1)
+        .execute()
+        .data or []
+    )
+    if not rows:
+        return False, ""
+    sess = rows[0]
+    term = sess.get("terminal_reason") or ""
+    sid  = sess["id"]
+    _COMPLETE = {
+        "no_opportunity", "converged", "error", "eod_complete", "no_candidates",
+        "risk_rejected", "manual_stop", "watchdog_timeout", "circuit_breaker",
+    }
+    if term in _COMPLETE:
+        return True, f"Session {sid[:8]} already completed ({term}). Skipping."
+    if term in ("in_progress", ""):
+        try:
+            started = sess.get("started_at") or ""
+            if started:
+                age_s = (datetime.utcnow() - datetime.fromisoformat(started.replace("Z", ""))).total_seconds()
+                if age_s < 3600:
+                    return True, (
+                        f"Session {sid[:8]} in_progress ({int(age_s / 60)}m old). "
+                        "Skipping concurrent run."
+                    )
+        except (ValueError, TypeError):
+            pass
+    return False, ""
+
+
 def main() -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
@@ -148,6 +191,11 @@ def main() -> None:
             f"Resume: {protection.resume_at}",
         )
         print(f"[premarket] Protection tier {protection.tier} suspended.")
+        return
+
+    should_skip, skip_msg = _existing_session_guard(date.today().isoformat())
+    if should_skip:
+        print(f"[premarket] {skip_msg}")
         return
 
     params     = load_params()

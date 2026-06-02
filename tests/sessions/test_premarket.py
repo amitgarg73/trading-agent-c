@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from unittest.mock import MagicMock, call, patch
 
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from sessions.premarket import (
     _build_premarket_alert,
     _execute_trades,
+    _existing_session_guard,
     _run_news_analyst,
 )
 from tests.conftest import make_query
@@ -157,6 +158,73 @@ class TestBuildPremarketAlert:
         assert "none" in body.lower() or "0" in body
 
 
+def _make_session_row(term: str, age_seconds: int = 7200) -> dict:
+    started = (datetime.utcnow() - timedelta(seconds=age_seconds)).isoformat()
+    return {"id": "aaaa-bbbb-cccc-dddd-eeee", "terminal_reason": term, "started_at": started}
+
+
+class TestExistingSessionGuard:
+    def _patch_db(self, rows: list[dict]):
+        q = MagicMock()
+        q.table.return_value = q
+        q.select.return_value = q
+        q.eq.return_value = q
+        q.order.return_value = q
+        q.limit.return_value = q
+        q.execute.return_value = MagicMock(data=rows)
+        return patch("core.db.get_client", return_value=q)
+
+    def test_no_sessions_today_returns_false(self):
+        with self._patch_db([]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is False
+        assert msg == ""
+
+    def test_completed_session_returns_true(self):
+        row = _make_session_row("converged")
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+        assert "converged" in msg
+
+    def test_error_session_returns_true(self):
+        row = _make_session_row("error")
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+
+    def test_watchdog_timeout_returns_true(self):
+        row = _make_session_row("watchdog_timeout")
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+
+    def test_in_progress_recent_returns_true(self):
+        row = _make_session_row("in_progress", age_seconds=300)
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+        assert "in_progress" in msg
+
+    def test_in_progress_stale_returns_false(self):
+        row = _make_session_row("in_progress", age_seconds=4000)
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is False
+
+    def test_no_candidates_returns_true(self):
+        row = _make_session_row("no_candidates")
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+
+    def test_no_opportunity_returns_true(self):
+        row = _make_session_row("no_opportunity")
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+
+
 class TestPremarketMain:
     def _mock_protection(self, suspended=False, tier=0, reason="", resume_at=None):
         p = MagicMock()
@@ -172,6 +240,34 @@ class TestPremarketMain:
     def _mock_params(self):
         from core.params import StrategyParams
         return StrategyParams()
+
+    def test_skips_when_completed_session_exists(self, mock_supabase, capsys):
+        with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
+             patch("sessions.premarket._existing_session_guard",
+                   return_value=(True, "Session abc12345 already completed (converged). Skipping.")):
+            from sessions.premarket import main
+            main()
+        out = capsys.readouterr().out
+        assert "Skipping" in out
+
+    def test_skips_when_in_progress_session_recent(self, mock_supabase, capsys):
+        with patch("sessions.premarket.is_trading_day", return_value=True), \
+             patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
+             patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
+             patch("sessions.premarket._existing_session_guard",
+                   return_value=(True, "Session abc12345 in_progress (4m old). Skipping concurrent run.")):
+            from sessions.premarket import main
+            main()
+        out = capsys.readouterr().out
+        assert "Skipping" in out
 
     def test_exits_on_non_trading_day(self, mock_supabase, capsys):
         with patch("sessions.premarket.is_trading_day", return_value=False):
