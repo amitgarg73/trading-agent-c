@@ -222,57 +222,63 @@ class TraceLogger:
         risk_rejections: int = 0,
         retry_triggered: bool = False,
     ) -> None:
-        """Write the c_sessions summary row. Call once at end of premarket session."""
+        """Finalize the c_sessions row for this session.
+
+        Uses update() so callers that attach to an existing session (EOD, intraday)
+        never overwrite started_at, cost_breakdown, or token counts set by premarket.
+        Cost/token fields are only written when this TraceLogger actually logged tokens.
+        """
         from core.db import get_client
 
-        total_input  = sum(v["input"]       for v in self._tokens.values())
-        total_output = sum(v["output"]      for v in self._tokens.values())
-
-        agent_costs = {}
-        for agent, v in self._tokens.items():
-            model = _agent_model(agent)
-            cost  = _estimate_cost(
-                model,
-                v["input"],
-                v["output"],
-                v.get("cache_read",  0),
-                v.get("cache_write", 0),
-            )
-            agent_costs[agent] = {
-                "model":        model,
-                "input":        v["input"],
-                "output":       v["output"],
-                "cache_read":   v.get("cache_read",  0),
-                "cache_write":  v.get("cache_write", 0),
-                "cost_usd":     round(cost, 6),
-            }
-        total_cost = sum(a["cost_usd"] for a in agent_costs.values())
-
         completed_at = datetime.utcnow()
-        latency_ms = int((completed_at - self._started_at).total_seconds() * 1000)
+        latency_ms   = int((completed_at - self._started_at).total_seconds() * 1000)
 
-        row = {
-            "id":                  self.session_id,
-            "date":                date.today().isoformat(),
-            "total_steps":         self._sequence,
-            "total_tool_calls":    self._count_tool_calls(),
-            "agents_invoked":      agents_invoked or list(self._tokens.keys()),
-            "loop_iterations":     loop_iterations,
-            "total_tokens_input":  total_input,
-            "total_tokens_output": total_output,
-            "total_cost_usd":      round(total_cost, 6),
-            "cost_breakdown":      agent_costs,
-            "total_latency_ms":    latency_ms,
-            "trades_proposed":     trades_proposed,
-            "trades_approved":     trades_approved,
-            "trades_executed":     trades_executed,
-            "risk_rejections":     risk_rejections,
-            "retry_triggered":     retry_triggered,
-            "terminal_reason":     terminal_reason,
-            "started_at":          self._started_at.isoformat(),
-            "completed_at":        completed_at.isoformat(),
+        row: dict[str, Any] = {
+            "date":            date.today().isoformat(),
+            "total_steps":     self._sequence,
+            "terminal_reason": terminal_reason,
+            "completed_at":    completed_at.isoformat(),
+            "trades_proposed": trades_proposed,
+            "trades_approved": trades_approved,
+            "trades_executed": trades_executed,
+            "risk_rejections": risk_rejections,
+            "retry_triggered": retry_triggered,
         }
-        get_client().table("c_sessions").upsert(row).execute()
+
+        if self._tokens:
+            agent_costs: dict[str, Any] = {}
+            for agent, v in self._tokens.items():
+                model = _agent_model(agent)
+                cost  = _estimate_cost(
+                    model,
+                    v["input"],
+                    v["output"],
+                    v.get("cache_read",  0),
+                    v.get("cache_write", 0),
+                )
+                agent_costs[agent] = {
+                    "model":        model,
+                    "input":        v["input"],
+                    "output":       v["output"],
+                    "cache_read":   v.get("cache_read",  0),
+                    "cache_write":  v.get("cache_write", 0),
+                    "cost_usd":     round(cost, 6),
+                }
+            total_cost   = sum(a["cost_usd"] for a in agent_costs.values())
+            total_input  = sum(v["input"]    for v in self._tokens.values())
+            total_output = sum(v["output"]   for v in self._tokens.values())
+            row.update({
+                "agents_invoked":      agents_invoked or list(self._tokens.keys()),
+                "loop_iterations":     loop_iterations,
+                "total_tool_calls":    self._count_tool_calls(),
+                "total_tokens_input":  total_input,
+                "total_tokens_output": total_output,
+                "total_cost_usd":      round(total_cost, 6),
+                "cost_breakdown":      agent_costs,
+                "total_latency_ms":    latency_ms,
+            })
+
+        get_client().table("c_sessions").update(row).eq("id", self.session_id).execute()
 
     # ── Private ────────────────────────────────────────────────────────────────
 

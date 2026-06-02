@@ -242,9 +242,8 @@ class TestCloseSession:
             retry_triggered=False,
         )
 
-        assert query.upsert.called
-        row = query.upsert.call_args[0][0]
-        assert row["id"] == "test-session-id-1234"
+        assert query.update.called
+        row = query.update.call_args[0][0]
         assert row["terminal_reason"] == "converged"
         assert row["trades_proposed"] == 3
         assert row["trades_approved"] == 2
@@ -253,11 +252,51 @@ class TestCloseSession:
         assert row["total_tokens_input"] == 400
         assert row["total_tokens_output"] == 80
 
+    def test_update_uses_session_id_filter(self, tracer, mock_supabase):
+        """close_session must filter by id, not embed it in the row."""
+        from unittest.mock import call
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.close_session("converged")
+        assert query.eq.call_args == call("id", "test-session-id-1234")
+
+    def test_started_at_not_overwritten(self, tracer, mock_supabase):
+        """close_session must not include started_at — it is set once by _insert_session_stub."""
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.log_tokens("market", _usage(400, 80))
+        tracer.close_session("converged")
+        row = query.update.call_args[0][0]
+        assert "started_at" not in row
+
+    def test_no_tokens_omits_cost_fields(self, tracer, mock_supabase):
+        """When no LLM calls were made (e.g. EOD), cost/token fields must be absent."""
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.close_session("eod_complete")
+        row = query.update.call_args[0][0]
+        assert "total_cost_usd"      not in row
+        assert "total_tokens_input"  not in row
+        assert "total_tokens_output" not in row
+        assert "cost_breakdown"      not in row
+        assert "agents_invoked"      not in row
+
+    def test_no_tokens_still_writes_terminal_reason(self, tracer, mock_supabase):
+        """EOD-style close with no tokens still commits terminal_reason and completed_at."""
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.close_session("eod_complete", trades_executed=2)
+        assert query.update.called
+        row = query.update.call_args[0][0]
+        assert row["terminal_reason"] == "eod_complete"
+        assert row["trades_executed"] == 2
+        assert "completed_at" in row
+
     def test_cost_is_positive_float(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         tracer.log_tokens("market", _usage(1000, 200))
         tracer.close_session("converged")
-        row = mock_supabase.table.return_value.upsert.call_args[0][0]
+        row = mock_supabase.table.return_value.update.call_args[0][0]
         assert row["total_cost_usd"] > 0
 
     def test_cost_breakdown_stored(self, tracer, mock_supabase):
@@ -265,7 +304,7 @@ class TestCloseSession:
         tracer.log_tokens("market",   _usage(400, 80, cache_read=200))
         tracer.log_tokens("research", _usage(3000, 600))
         tracer.close_session("converged")
-        row = mock_supabase.table.return_value.upsert.call_args[0][0]
+        row = mock_supabase.table.return_value.update.call_args[0][0]
         breakdown = row["cost_breakdown"]
         assert "market"   in breakdown
         assert "research" in breakdown
@@ -279,19 +318,13 @@ class TestCloseSession:
         cost_cached   = _estimate_cost("claude-sonnet-4-6", 0, 1_000, cache_read_tokens=10_000)
         assert cost_cached < cost_uncached
 
-    def test_session_id_in_row(self, tracer, mock_supabase):
-        mock_supabase.table.return_value = make_query([])
-        tracer.close_session("structural_block")
-        row = mock_supabase.table.return_value.upsert.call_args[0][0]
-        assert row["id"] == "test-session-id-1234"
-
     def test_total_steps_reflects_logged_calls(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         tracer.log_tool_call("market", "get_vix", {}, {})
         tracer.log_tool_call("market", "get_futures", {}, {})
         tracer.log_decision("orchestrator", "converged")
         tracer.close_session("converged")
-        row = mock_supabase.table.return_value.upsert.call_args[0][0]
+        row = mock_supabase.table.return_value.update.call_args[0][0]
         assert row["total_steps"] == 3
 
 
@@ -342,7 +375,7 @@ class TestFlushCostBreakdown:
         # research uses Haiku at $0.80/M input tokens
         assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
 
-    def test_close_session_overwrites_flush(self, tracer, mock_supabase):
+    def test_close_session_includes_all_accumulated_agents(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
         tracer.log_tokens("market_shadow", _usage(3000, 900))
@@ -351,10 +384,9 @@ class TestFlushCostBreakdown:
         tracer.log_tokens("research_NVDA", _usage(10000, 2000))
         tracer.close_session("converged")
 
-        # upsert (close_session) should include both agents
-        upsert_payload = query.upsert.call_args[0][0]
-        assert "market_shadow"  in upsert_payload["cost_breakdown"]
-        assert "research_NVDA"  in upsert_payload["cost_breakdown"]
+        update_payload = query.update.call_args[0][0]
+        assert "market_shadow" in update_payload["cost_breakdown"]
+        assert "research_NVDA" in update_payload["cost_breakdown"]
 
 
 # ── ingest_otel_span ──────────────────────────────────────────────────────────
