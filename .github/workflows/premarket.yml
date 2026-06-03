@@ -51,3 +51,44 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+
+      - name: Verify premarket wrote session record
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          from datetime import date
+          from supabase import create_client
+          sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
+          today = date.today().isoformat()
+          rows = sb.table("c_sessions").select("id").eq("date", today).neq("is_simulated", True).execute().data
+          if not rows:
+              print(f"ASSERTION FAILED: no real premarket session in c_sessions for {today}")
+              sys.exit(1)
+          print(f"Assertion passed: premarket session found for {today}")
+          PY
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL:        amit.thirdeyetrading@gmail.com
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          repo = "${{ github.repository }}"
+          run  = "${{ github.run_id }}"
+          url  = f"https://github.com/{repo}/actions/runs/{run}"
+          msg  = MIMEText(f"Strategy C premarket FAILED.\n\nLogs: {url}")
+          msg["Subject"] = f"[Strategy C] premarket FAILED"
+          msg["From"]    = os.environ["GMAIL_USER"]
+          msg["To"]      = os.environ["ALERT_EMAIL"]
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+              s.login(os.environ["GMAIL_USER"], os.environ["GMAIL_APP_PASSWORD"])
+              s.send_message(msg)
+          print("Failure alert sent.")
+          PY

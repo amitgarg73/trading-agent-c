@@ -44,3 +44,26 @@ jobs:
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL:        amit.thirdeyetrading@gmail.com
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          from email.mime.text import MIMEText
+          repo = "${{ github.repository }}"
+          run  = "${{ github.run_id }}"
+          url  = f"https://github.com/{repo}/actions/runs/{run}"
+          msg  = MIMEText(f"Strategy C intraday FAILED.\n\nLogs: {url}")
+          msg["Subject"] = f"[Strategy C] intraday FAILED"
+          msg["From"]    = os.environ["GMAIL_USER"]
+          msg["To"]      = os.environ["ALERT_EMAIL"]
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+              s.login(os.environ["GMAIL_USER"], os.environ["GMAIL_APP_PASSWORD"])
+              s.send_message(msg)
+          print("Failure alert sent.")
+          PY

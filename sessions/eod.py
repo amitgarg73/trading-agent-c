@@ -427,4 +427,13 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback as _tb
+        try:
+            from core.alerts import send_alert
+            send_alert("Strategy C — EOD Crashed", f"{e}\n\n{_tb.format_exc()[-2000:]}")
+        except Exception:
+            pass
+        raise
