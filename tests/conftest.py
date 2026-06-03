@@ -37,6 +37,7 @@ def make_query(data: list) -> MagicMock:
     q.insert.return_value = q
     q.upsert.return_value = q
     q.in_.return_value = q
+    q.neq.return_value = q
     q.execute.return_value = make_db_result(data)
     return q
 

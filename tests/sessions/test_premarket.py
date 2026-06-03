@@ -169,6 +169,7 @@ class TestExistingSessionGuard:
         q.table.return_value = q
         q.select.return_value = q
         q.eq.return_value = q
+        q.neq.return_value = q
         q.order.return_value = q
         q.limit.return_value = q
         q.execute.return_value = MagicMock(data=rows)

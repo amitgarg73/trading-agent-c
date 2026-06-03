@@ -180,7 +180,24 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                 fill_price, exit_reason = get_order_fill(order_id)
 
             if fill_price is None:
-                # Position gone from Alpaca with no fill record — use last trade price
+                # Before declaring external_close, verify entry actually filled.
+                # A pending limit order (never filled) lands here too — treat it as unfilled.
+                if order_id:
+                    from core.alpaca import cancel_order
+                    bracket = get_bracket_status(order_id)
+                    if not bracket.get("entry_filled"):
+                        cancel_order(order_id)
+                        db.table("c_positions").update({
+                            "status":       "closed",
+                            "exit_reason":  "unfilled",
+                            "exit_price":   float(pos.get("entry_price") or 0),
+                            "close_date":   date.today().isoformat(),
+                            "close_time":   datetime.utcnow().isoformat(),
+                            "realized_pnl": 0.0,
+                        }).eq("id", pos["id"]).execute()
+                        print(f"  [intraday] {ticker} limit order never filled — cancelled and marked unfilled")
+                        continue
+                # Entry was filled but position is gone with no fill record — use last trade price
                 exit_reason = "external_close"
                 try:
                     from alpaca.data.requests import StockLatestTradeRequest

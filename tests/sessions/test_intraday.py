@@ -308,8 +308,57 @@ class TestSyncPositions:
             _sync_positions(_SESSION_ID, 0.008)
         mock_cancel.assert_called_once_with("ord-001")
 
+    def test_unfilled_limit_order_marked_unfilled_not_external_close(self, mock_supabase):
+        """Limit order that never filled should be cancelled and marked unfilled with 0 P&L."""
+        pos = {**self._OPEN_POS, "trail_order_id": None}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": False}), \
+             patch("core.alpaca.cancel_order") as mock_cancel:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("status") == "closed"
+        assert updated.get("exit_reason") == "unfilled"
+        assert updated.get("realized_pnl") == pytest.approx(0.0)
+        mock_cancel.assert_called_once_with("ord-001")
+
+    def test_unfilled_does_not_use_external_close(self, mock_supabase):
+        """Unfilled limit order must not produce an external_close exit reason."""
+        pos = {**self._OPEN_POS, "trail_order_id": None}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": False}), \
+             patch("core.alpaca.cancel_order"):
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        assert updated.get("exit_reason") != "external_close"
+
     def test_external_close_uses_last_trade_price(self, mock_supabase):
-        """When position gone with no fill, close at last trade price with external_close reason."""
+        """When entry filled but position gone with no fill record, close at last trade price."""
         pos = {**self._OPEN_POS, "trail_order_id": None}
         updated = {}
 
@@ -328,6 +377,7 @@ class TestSyncPositions:
 
         with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
              patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": True}), \
              patch("core.alpaca._dclient") as mock_dc:
             mock_dc.return_value.get_stock_latest_trade.return_value = {"AAPL": trade_mock}
             from sessions.intraday import _sync_positions
@@ -354,6 +404,7 @@ class TestSyncPositions:
 
         with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
              patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": True}), \
              patch("core.alpaca._dclient", side_effect=Exception("rate limit")):
             from sessions.intraday import _sync_positions
             _sync_positions(_SESSION_ID, 0.008)
