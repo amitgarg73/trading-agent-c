@@ -27,6 +27,7 @@ def get_today_session_id() -> Optional[str]:
         .table("c_sessions")
         .select("id")
         .eq("date", date.today().isoformat())
+        .neq("is_simulated", True)
         .order("started_at", desc=True)
         .limit(1)
         .execute()

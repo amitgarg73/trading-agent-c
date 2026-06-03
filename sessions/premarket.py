@@ -134,6 +134,7 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
         .table("c_sessions")
         .select("id,terminal_reason,started_at")
         .eq("date", today)
+        .neq("is_simulated", True)
         .order("started_at", desc=True)
         .limit(1)
         .execute()
