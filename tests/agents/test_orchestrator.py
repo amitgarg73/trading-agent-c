@@ -127,7 +127,17 @@ class TestEmptySessionOutput:
         assert out["retry_needed"] is False
 
 
+_GATE_CANDIDATES = [{"ticker": "AAPL", "technical_score": 7, "price": 185.0, "sector": "Technology"}]
+
+
 class TestRunPremarketPipeline:
+    @pytest.fixture(autouse=True)
+    def _patch_gate(self):
+        # Default: scanner has candidates so the pre-research gate passes.
+        # Override in individual tests to simulate an empty scanner.
+        with patch("agents.orchestrator.get_candidates", return_value=_GATE_CANDIDATES):
+            yield
+
     def _mock_synthesis(self, result_json):
         client = MagicMock()
         client.messages.create.return_value = make_api_response(
@@ -315,3 +325,26 @@ class TestRunPremarketPipeline:
         mock_ant.return_value.messages.create.assert_not_called()
         assert result["trades"] == []
         assert result["session_meta"]["terminal_reason"] == "no_viable_proposals"
+
+    def test_no_viable_candidates_exits_before_research(self, tracer):
+        # Scanner returns nothing above threshold → research must NOT be called
+        with patch("agents.orchestrator.get_candidates", return_value=[]), \
+             patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent") as mock_res, \
+             patch("agents.orchestrator.run_risk_agent") as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic"):
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        mock_res.assert_not_called()
+        mock_risk.assert_not_called()
+        assert result["trades"] == []
+        assert result["session_meta"]["terminal_reason"] == "no_viable_candidates"
+
+    def test_no_viable_candidates_respects_strategy_min_score(self, tracer):
+        # Gate uses params.strategy_min_score, not a hardcoded value
+        params = StrategyParams(strategy_min_score=7)
+        with patch("agents.orchestrator.get_candidates", return_value=[]) as mock_gc, \
+             patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent"), \
+             patch("agents.orchestrator.anthropic.Anthropic"):
+            run_premarket_pipeline(tracer, params)
+        mock_gc.assert_called_once_with(min_score=7)

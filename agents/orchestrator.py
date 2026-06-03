@@ -12,6 +12,7 @@ from agents.market_agent import run_market_agent as run_market_agent_v1
 from agents.market_agent_shadow import run_market_agent_shadow
 from agents.research_agent import run_research_agent
 from agents.risk_agent import run_risk_agent
+from agents.tools.research_tools import get_candidates
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
@@ -157,7 +158,18 @@ def run_premarket_pipeline(
         out["_v2_market_report"] = market_report
         return out
 
-    # Step 2: Research Agent
+    # Step 2: Pre-research gate — check scanner before burning LLM budget
+    _gate_candidates = [c for c in get_candidates(min_score=params.strategy_min_score) if "error" not in c]
+    if not _gate_candidates:
+        tracer.log_decision(
+            "orchestrator", "no_viable_candidates",
+            detail={"strategy_min_score": params.strategy_min_score},
+        )
+        out = _empty_session_output(market_report, "no_viable_candidates")
+        out["_v2_market_report"] = market_report
+        return out
+
+    # Step 3: Research Agent
     trade_proposals = run_research_agent(tracer, market_report, params)
     tracer.flush_cost_breakdown()
 
@@ -170,11 +182,11 @@ def run_premarket_pipeline(
         out["_v2_market_report"] = market_report
         return out
 
-    # Step 3: Risk Agent
+    # Step 4: Risk Agent
     risk_verdicts = run_risk_agent(tracer, trade_proposals, params)
     tracer.flush_cost_breakdown()
 
-    # Step 4: Orchestrator synthesis
+    # Step 5: Orchestrator synthesis
     result = _run_synthesis_call(
         client, market_report, trade_proposals, risk_verdicts, tracer, loop_iteration=1
     )

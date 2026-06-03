@@ -188,6 +188,7 @@ def _screen_candidates(
     market_report: dict,
     sector_data: list[dict],
     rejected_tickers: list[str],
+    min_score: int = 5,
 ) -> list[dict]:
     """
     Select up to _MAX_CANDIDATES tickers to investigate.
@@ -200,7 +201,7 @@ def _screen_candidates(
     """
     from core.alpaca import get_gap_up_tickers
 
-    candidates = get_candidates(min_score=5)
+    candidates = get_candidates(min_score=min_score)
     valid = [c for c in candidates if "error" not in c and c["ticker"] not in rejected_tickers]
 
     # Merge gap-up movers — universe-restricted so micro-caps/warrants can't enter
@@ -277,7 +278,7 @@ def run_research_agent(
       means better selection, not more trades.
     """
     # Guard: no candidates
-    candidates = get_candidates(min_score=5)
+    candidates = get_candidates(min_score=params.strategy_min_score)
     valid = [c for c in candidates if "error" not in c]
     if not valid:
         tracer.log_decision("research", "no_candidates", detail={"raw": len(candidates)})
@@ -293,7 +294,7 @@ def run_research_agent(
     tracer.start_agent_span("research")
 
     # Phase 1: deterministic screening
-    selected = _screen_candidates(market_report, sector_data, rejected_tickers)
+    selected = _screen_candidates(market_report, sector_data, rejected_tickers, min_score=params.strategy_min_score)
     if not selected:
         tracer.log_decision("research", "no_candidates_after_screen")
         return {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
