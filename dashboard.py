@@ -204,8 +204,17 @@ if page == "Today":
     def _sum(rows, key):
         return sum(r.get(key) or 0 for r in rows)
 
-    a_unreal = _sum(a_open,   "unrealized_pnl")
-    b_unreal = _sum(b_open,   "unrealized_pnl")
+    def _live_unreal(rows):
+        total = 0
+        for r in rows:
+            cost   = r.get("fill_price") or r.get("entry_price") or 0
+            cur    = r.get("current_price") or 0
+            shares = r.get("shares") or 0
+            total += round((cur - cost) * shares, 2) if cost and cur else (r.get("unrealized_pnl") or 0)
+        return round(total, 2)
+
+    a_unreal = _live_unreal(a_open)
+    b_unreal = _live_unreal(b_open)
     c_unreal = _sum(c_open,   "unrealized_pnl")
     a_real   = _sum(a_closed, "realized_pnl")
     b_real   = _sum(b_closed, "realized_pnl")
