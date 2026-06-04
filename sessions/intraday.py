@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time as _time
 from datetime import date, datetime, time
 from typing import Optional
 
@@ -165,10 +166,13 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                     if abs(actual_entry - float(pos.get("entry_price") or 0)) > 0.001:
                         update["entry_price"] = actual_entry
                     _cancel_bracket_stop_leg(order_id)
+                    _time.sleep(2)  # wait for Alpaca to release bracket leg qty
                     new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
                     if new_trail_id:
                         update["trail_order_id"] = new_trail_id
                         print(f"  [intraday] {ticker} trailing stop submitted (post-fill): {new_trail_id[:8]}")
+                    else:
+                        print(f"  [intraday] ⚠️  Trail still pending for {ticker} — will retry next cycle")
             if update:
                 db.table("c_positions").update(update).eq("id", pos["id"]).execute()
         else:
