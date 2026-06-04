@@ -6,6 +6,9 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 import pytz
+from dotenv import load_dotenv
+
+load_dotenv()
 
 _ET = pytz.timezone("America/New_York")
 
