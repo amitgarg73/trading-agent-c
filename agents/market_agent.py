@@ -58,7 +58,7 @@ After calling all tools, return a JSON object:
 
 Decision rules:
 - SKIP if avg_futures_change < -1.5%
-- CAUTION if VIX > 20, or Fear&Greed < 25 with bearish futures confirmation
+- CAUTION if VIX > 20, or Fear&Greed < 15 with bearish futures confirmation
 - GO otherwise
 - max_positions scales with VIX: <20=15, 20-25=10, 25-30=5, 30-45=3, >45=2
 

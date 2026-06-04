@@ -49,13 +49,21 @@ SKIP RULES (return SKIP if ANY apply):
 
 CONFIDENCE RULES:
 - HIGH:   score >= 7, above_vwap true, rs_vs_spy >= 1.5, today_pct_change <= 2
-  (pre-market: score >= 8, premarket_change_pct > 0.5, conviction HIGH or MODERATE)
-- MEDIUM: score 5-6, or above_vwap with rs_vs_spy >= 0.8, today_pct_change <= 4
-  (pre-market: score 6-7, positive premarket_change, conviction not LOW)
+  (pre-market: score >= 7, premarket_change_pct > 0.5, conviction HIGH or MODERATE)
+- MEDIUM: score 5-6, above_vwap with rs_vs_spy >= 0.8, today_pct_change <= 4
+  (pre-market: score 6-7, positive premarket_change,
+   conviction MODERATE or higher,
+   OR conviction LOW with above_vwap true AND rs_vs_spy >= 1.0)
 - LOW:    score 5-6, mixed signals, or today_pct_change 2-4
+  conviction LOW is acceptable at LOW confidence if above_vwap true OR rs_vs_spy >= 0.8
 - Skip if nothing reaches LOW.
 
 On CAUTION days (passed in context): require score >= 7 and above_vwap true.
+
+CONVICTION NOTE: In low-volatility or Fear-regime markets, premarket volume is
+structurally thin across the board. conviction LOW does not mean the setup is weak —
+it means institutions are waiting. When price action confirms (above VWAP, positive RS),
+treat conviction LOW the same as MODERATE for the purpose of MEDIUM confidence.
 
 PROPOSAL RULES:
 - entry_price  = live_price (or premarket_price if pre-market)
