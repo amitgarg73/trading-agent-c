@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date
 from typing import Any
 
@@ -9,10 +10,11 @@ import pandas as pd
 
 from scanner.universe import get_tickers, get_sector
 
-_MIN_PRICE     = 10.0
-_MAX_PRICE     = 500.0
-_MAX_ATR_PCT   = 5.0
-_MIN_AVG_VOL   = 500_000   # filter illiquid tickers
+_MIN_PRICE       = 10.0
+_MAX_PRICE       = 500.0
+_MAX_ATR_PCT     = 5.0
+_MIN_AVG_VOL     = 500_000   # filter illiquid tickers
+_DOWNLOAD_TIMEOUT = 90       # seconds — yfinance can hang; abort and return 0
 _HISTORY_DAYS  = "60d"     # enough for SMA50 + ATR14 + MACD
 
 
@@ -159,17 +161,24 @@ def run_scanner(
     if not symbols:
         return len(existing)
 
-    # Bulk-fetch daily history for all tickers at once
+    # Bulk-fetch daily history for all tickers at once.
+    # Runs in a thread so a yfinance hang doesn't block the premarket session forever.
     try:
-        raw = yf.download(
-            symbols,
-            period=_HISTORY_DAYS,
-            interval="1d",
-            group_by="ticker",
-            auto_adjust=True,
-            progress=False,
-            threads=True,
-        )
+        with ThreadPoolExecutor(max_workers=1) as _pool:
+            _future = _pool.submit(
+                yf.download,
+                symbols,
+                period=_HISTORY_DAYS,
+                interval="1d",
+                group_by="ticker",
+                auto_adjust=True,
+                progress=False,
+                threads=True,
+            )
+            raw = _future.result(timeout=_DOWNLOAD_TIMEOUT)
+    except FuturesTimeoutError:
+        print(f"[scanner] yfinance download timed out after {_DOWNLOAD_TIMEOUT}s — aborting scan")
+        return 0
     except Exception as e:
         print(f"[scanner] yfinance download failed: {e}")
         return 0
@@ -183,6 +192,8 @@ def run_scanner(
             else:
                 hist = raw[ticker] if ticker in raw.columns.get_level_values(0) else pd.DataFrame()
 
+            if hist.empty or "Close" not in hist.columns:
+                continue
             hist = hist.dropna(subset=["Close"])
             fields = _score_ticker(hist)
 
