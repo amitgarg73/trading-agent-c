@@ -242,6 +242,8 @@ def run_scanner_agent(
                 "n_returned":    n,
                 "regime":        result.get("regime"),
                 "dropped_count": result.get("dropped_count", 0),
+                "scan_rationale": result.get("scan_rationale"),
+                "signals_used":   result.get("signals_used"),
             },
         )
         return result
