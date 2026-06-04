@@ -110,11 +110,12 @@ def submit_bracket_order(
     # The Research Agent's entry_price is the ask captured minutes earlier — using
     # bid lets the stock come to us instead of chasing a stale price upward.
     # Stop/target are reprojected at the same % distances from bid.
-    # Guard: if bid is >5% below entry_price the IEX feed is stale (premarket bid
-    # not yet updated). Fall back to entry_price so the order is placeable.
-    limit_px   = round(entry_price, 2)   # fallback: proposal price, no buffer
+    # If bid is unavailable (premarket ask/bid=0 on IEX), fall back to get_live_prices()
+    # and reproject from there so stop/target stay valid relative to actual fill.
+    limit_px   = round(entry_price, 2)   # fallback: proposal price
     eff_stop   = round(stop_price, 2)
     eff_target = round(target_price, 2)
+    _bid_found = False
     try:
         from alpaca.data.requests import StockLatestQuoteRequest
         req_q = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
@@ -125,18 +126,31 @@ def submit_bracket_order(
                 bid        = round(float(raw_bid), 4)
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
-                stale_pct  = (entry_price - bid) / entry_price
-                if stale_pct > 0.05:
-                    # Bid is >5% below research price — IEX stale premarket quote.
-                    # Keep entry_price as limit; reprojecton stays at proposal stops.
-                    print(f"  [alpaca] {ticker} stale bid ${bid:.2f} vs proposal ${entry_price:.2f} "
-                          f"({stale_pct:.1%} gap) — using proposal price")
-                else:
-                    limit_px   = round(bid, 2)
-                    eff_stop   = round(bid * (1 - stop_pct),   2)
-                    eff_target = round(bid * (1 + target_pct), 2)
+                limit_px   = round(bid, 2)
+                eff_stop   = round(bid * (1 - stop_pct),   2)
+                eff_target = round(bid * (1 + target_pct), 2)
+                _bid_found = True
+                if bid < entry_price * 0.95:
+                    print(f"  [alpaca] {ticker} market moved: bid ${bid:.2f} vs proposal ${entry_price:.2f} "
+                          f"({(entry_price-bid)/entry_price:.1%} gap) — passive limit at bid")
     except Exception:
         pass  # keep fallback prices
+
+    if not _bid_found:
+        # No bid available (premarket bid=0 on IEX feed).
+        # Fall back to get_live_prices() which accepts ask-only or bid-only quotes.
+        # Re-anchor stop/target to live price so they stay valid relative to fill.
+        try:
+            live_px = get_live_prices([ticker]).get(ticker)
+            if live_px and entry_price > 0 and abs(live_px - entry_price) / entry_price > 0.005:
+                stop_pct   = (entry_price - stop_price)  / entry_price
+                target_pct = (target_price - entry_price) / entry_price
+                limit_px   = round(live_px, 2)
+                eff_stop   = round(live_px * (1 - stop_pct),   2)
+                eff_target = round(live_px * (1 + target_pct), 2)
+                print(f"  [alpaca] {ticker} no bid/ask pair — live ${live_px:.2f} used (proposal ${entry_price:.2f})")
+        except Exception:
+            pass  # keep fallback prices
 
     req = LimitOrderRequest(
         symbol=ticker,

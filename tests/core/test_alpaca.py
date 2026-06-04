@@ -201,10 +201,10 @@ class TestSubmitBracketOrder:
             submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
         mc.return_value.get_order_by_id.assert_not_called()
 
-    def test_stale_bid_falls_back_to_proposal_price(self):
-        """If bid is >5% below entry_price (IEX stale premarket quote), use proposal price."""
-        order = _mock_order(status="filled", filled_avg_price=514.50)
-        # entry=514.50, bid=457.90 → 11% gap → stale, use proposal
+    def test_large_market_gap_uses_bid_passive_entry(self):
+        """Large gap between bid and proposal is a real market move — still use bid (passive entry)."""
+        order = _mock_order(status="filled", filled_avg_price=457.90)
+        # entry=514.50, bid=457.90 → 11% gap → real market drop, passive limit at bid
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("TMO", 457.90):
             mt.sleep = MagicMock()
@@ -213,10 +213,12 @@ class TestSubmitBracketOrder:
             from core.alpaca import submit_bracket_order
             submit_bracket_order("TMO", 5, 514.50, 555.66, 511.05)
         req = mc.return_value.submit_order.call_args[0][0]
-        assert req.limit_price == pytest.approx(514.50, rel=1e-3)
-        # stop/target at original proposal percentages, not bid-reprojected
-        assert req.stop_loss.stop_price    == pytest.approx(511.05, rel=1e-3)
-        assert req.take_profit.limit_price == pytest.approx(555.66, rel=1e-3)
+        assert req.limit_price == pytest.approx(457.90, rel=1e-3)
+        # stop/target reprojected at same percentages from bid
+        stop_pct   = (514.50 - 511.05) / 514.50
+        target_pct = (555.66 - 514.50) / 514.50
+        assert req.stop_loss.stop_price    == pytest.approx(round(457.90 * (1 - stop_pct),   2), rel=1e-3)
+        assert req.take_profit.limit_price == pytest.approx(round(457.90 * (1 + target_pct), 2), rel=1e-3)
 
     def test_tight_bid_uses_bid_not_proposal(self):
         """If bid is within 5% of entry_price, use bid as limit (normal passive entry)."""
