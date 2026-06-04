@@ -1,13 +1,13 @@
 # Strategy C — Architecture
 
-True multi-agent agentic system. Six specialized Claude agents coordinate through a shared session context, each with its own tool set and a hard turn cap. Built trace-first: every tool call, agent message, and decision is logged to `c_traces` for full observability. Three daily sessions: premarket, intraday polling, and EOD analysis with adaptive learning.
+True multi-agent agentic system. Seven specialized Claude agents coordinate through a shared session context, each with its own tool set and a hard turn cap. Built trace-first: every tool call, agent message, and decision is logged to `c_traces` for full observability. Three daily sessions: premarket, intraday polling, and EOD analysis with adaptive learning.
 
 ---
 
 ## Daily Schedule
 
 ```
- 7:15 AM ET   premarket.yml            Market scan → Research → Risk → Orchestrator → orders
+ 7:15 AM ET   premarket.yml            Market Agent → Scanner Agent → Research → Risk → Orchestrator → orders
  9:15–3:50 PM intraday.yml             Every 15 min: sync positions, optional new entries
  3:55 PM ET   eod.yml                  Force-close → Learning Agent → param updates
  Every hour   watchdog.yml             Kill orphaned in-progress sessions > 60 min old
@@ -21,6 +21,7 @@ True multi-agent agentic system. Six specialized Claude agents coordinate throug
 flowchart LR
     subgraph "Premarket & Intraday"
         MA["Market Agent\nmarket_agent_shadow.py\nclaude-haiku-4-5\n6 mandatory tools\nDecision: GO|CAUTION|SKIP"]:::haiku
+        SA["Scanner Agent\nscanner_agent.py\nclaude-haiku-4-5\n5 tools\nRegime-aware · Dynamic N\nOutputs candidate list"]:::haiku
         RA["Research Agent\nresearch_agent.py\nclaude-haiku-4-5\n4 tools per ticker\nParallel mini-agents\n(ThreadPoolExecutor)\nup to 6 tickers × 120s"]:::haiku
         RKA["Risk Agent\nrisk_agent.py\nclaude-haiku-4-5\n4 mandatory tools\nPortfolio constraint check"]:::haiku
         OA["Orchestrator\norchestrator.py\nclaude-sonnet-4-6\n0 tools (synthesis only)\n1 optional retry"]:::sonnet
@@ -38,7 +39,8 @@ flowchart LR
         MAV1["Market Agent V1\nmarket_agent.py\nclaude-haiku-4-5\n4 tools\nLogs to c_market_evals\nNot used for decisions"]:::shadow
     end
 
-    MA --> OA
+    MA --> SA
+    SA --> RA
     RA --> OA
     RKA --> OA
     OA --> LA
@@ -59,28 +61,24 @@ flowchart TD
 
     PM --> GUARD["Pre-checks\n─────────────────\ncheck_protection_status() ← c_protection_events\nis_trading_day() ← c_agent_config\nload_params() ← c_strategy_params\n_existing_session_guard() ← c_sessions\n(skips if completed session today)"]:::filter
 
-    GUARD --> SCANNER["scanner.run_scanner()\n─────────────────\nyfinance bars per universe\nWrites c_scan_results\n{ticker, score, price, sector}"]:::agent
-
-    SCANNER --> MA["① Market Agent Shadow\nrun_market_agent_shadow()\n─────────────────\nModel: claude-haiku-4-5\nPre-LLM circuit breakers (Python):\n  VIX > 35 → SKIP\n  avg futures < -2% → SKIP\n  all 3 indices < -1% → SKIP\n6 tools called (all mandatory)"]:::haiku
+    GUARD --> MA["① Market Agent Shadow\nrun_market_agent_shadow()\n─────────────────\nModel: claude-haiku-4-5\nPre-LLM circuit breakers (Python):\n  VIX > 35 → SKIP\n  avg futures < -2% → SKIP\n  all 3 indices < -1% → SKIP\n6 tools called (all mandatory)"]:::haiku
 
     MA --> MAGATE{decision?}
     MAGATE -->|SKIP| HALT["Log to c_sessions\nterminal_reason=market_skip\nSend alert"]:::filter
-    MAGATE -->|GO / CAUTION| PREGATE
+    MAGATE -->|GO / CAUTION| SA["② Scanner Agent\nscanner_agent.py\n─────────────────\nModel: claude-haiku-4-5\nReceives session_params from Market Agent\nRegime-aware tool selection:\n  High VIX (>25) → mean-reversion signals\n  Low VIX (<15) → momentum signals\n  CAUTION → strict threshold, N≤15\nDynamic N: 12–30 tickers\n5 tools · Emits c_traces spans"]:::haiku
 
-    PREGATE["Pre-research gate\nget_candidates() ← c_scan_results\nSkip research if no candidates"]:::filter --> RA
+    SA --> RA["③ Research Agent\nrun_research_agent()\n─────────────────\nModel: claude-haiku-4-5\nReceives candidate list from Scanner Agent\n(screening absorbed by Scanner Agent)\nParallel mini-agents:\n  ThreadPoolExecutor\n  360s wall-clock · 120s per ticker\n  4 tools per ticker (in order)"]:::haiku
 
-    RA["② Research Agent\nrun_research_agent()\n─────────────────\nModel: claude-haiku-4-5\nPhase 1: deterministic screening\n  get_candidates() + get_gap_up_tickers()\n  get_premarket_snapshot()\n  Select up to 6 tickers\nPhase 2: parallel mini-agents\n  ThreadPoolExecutor\n  360s wall-clock · 120s per ticker\n  4 tools per ticker (in order)"]:::haiku
+    RA --> RKA["④ Risk Agent\nrun_risk_agent()\n─────────────────\nModel: claude-haiku-4-5\n4 mandatory tools\nConstraints in order:\n  loss_limit → duplicate\n  → capital → concentration\n  → position count"]:::haiku
 
-    RA --> RKA["③ Risk Agent\nrun_risk_agent()\n─────────────────\nModel: claude-haiku-4-5\n4 mandatory tools\nConstraints in order:\n  loss_limit → duplicate\n  → capital → concentration\n  → position count"]:::haiku
-
-    RKA --> OA["④ Orchestrator\n_run_synthesis_call()\n─────────────────\nModel: claude-sonnet-4-6\nNo tools — pure synthesis\nInput: market + research + risk\nOutputs: trades[] + session_meta\nretry_needed flag"]:::sonnet
+    RKA --> OA["⑤ Orchestrator\n_run_synthesis_call()\n─────────────────\nModel: claude-sonnet-4-6\nNo tools — pure synthesis\nInput: market + scanner + research + risk\nOutputs: trades[] + session_meta\nretry_needed flag"]:::sonnet
 
     OA --> RETRY{retry_needed\nAND not CAUTION?}
-    RETRY -->|yes| RERUN["Re-run Research (if all rejected)\nor re-run Risk (if some survived)\nthen second synthesis\nloop_iteration=2"]:::filter
+    RETRY -->|yes| RERUN["Re-synthesize with rejection reasons\nin context (loop_iteration=2)\nResearch re-run only if all rejected"]:::filter
     RETRY -->|no| EXEC
     RERUN --> EXEC
 
-    EXEC["⑤ _execute_trades()\n─────────────────\nOnly if now ≥ 9:30 AM ET\nElse: store in c_sessions.pending_trades\nfor intraday 9:45 AM execution"]:::agent
+    EXEC["⑥ _execute_trades()\n─────────────────\nOnly if now ≥ 9:30 AM ET\nElse: store in c_sessions.pending_trades\nfor intraday 9:45 AM execution"]:::agent
 
     EXEC --> BRACKET["submit_bracket_order()\n─────────────────\nAlpaca LimitOrderRequest\nOrderClass.BRACKET\n  entry: limit (bid-adjusted)\n  take-profit: limit leg\n  stop-loss: leg\nPolls 30s for fill\nReturns (order_id, fill_price)\nPrefix: stratc_{ticker}_{ts}"]:::infra
 
@@ -88,7 +86,7 @@ flowchart TD
 
     TRAIL --> DBWRITE[("c_positions INSERT\nsession_id · ticker · entry_price\ntarget_price · stop_loss\nshares · position_size\nconfidence · entry_context\nalpaca_order_id · trail_order_id")]:::db
 
-    DBWRITE --> MAV1["⑥ Market Agent V1 (shadow)\n─────────────────\n4 tools (subset of V2)\nResults written to c_market_evals\nFor V1 vs V2 comparison only\nDoes not affect trades"]:::shadow
+    DBWRITE --> MAV1["⑦ Market Agent V1 (shadow)\n─────────────────\n4 tools (subset of V2)\nResults written to c_market_evals\nFor V1 vs V2 comparison only\nDoes not affect trades"]:::shadow
 
     classDef agent fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
     classDef haiku fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
@@ -123,15 +121,34 @@ flowchart LR
     classDef out fill:#fef3c7,stroke:#f59e0b,color:#78350f
 ```
 
+### Scanner Agent — 5 Tools
+
+```mermaid
+flowchart LR
+    SA["Scanner Agent\nscanner_agent.py\nclaude-haiku-4-5"]:::haiku
+
+    SA --> T1["scan_universe(regime_context)\n→ {tickers[], raw_technical_data}\nyfinance bars: 430+ universe\nFilters price>0, rsi not None"]:::tool
+    SA --> T2["get_momentum_signals(tickers)\n→ [{ticker, rsi, macd\n    volume_ratio, gap_pct\n    signal_strength}]\nRSI 40–70 · MACD cross\nVolume >1.5x avg · gap ≥1%"]:::tool
+    SA --> T3["get_mean_reversion_signals(tickers)\n→ [{ticker, rsi\n    distance_sma200\n    signal_strength}]\nRSI <30 or >70\nDistance from SMA200"]:::tool
+    SA --> T4["get_gap_ups(min_pct=2.0)\n→ [{ticker, gap_pct\n    premarket_vol}]\nAlpaca ScreenerClient movers\nmin_pct adjusts with regime"]:::tool
+    SA --> T5["filter_and_rank(candidates, criteria)\n→ {candidates[]\n   n_returned, scan_rationale\n   signals_used, dropped_count}\nQuality threshold (not top-N)\n12–30 tickers depending on day\nCAUTION mode: strict, N≤15"]:::tool
+
+    SA --> OUT["Output\n─────────────────\n{candidates: [ticker...]\n n_returned: int\n scan_rationale: str\n signals_used: [str]\n dropped_count: int}"]:::out
+
+    classDef haiku fill:#dbeafe,stroke:#3b82f6,color:#1e3a5f
+    classDef tool fill:#dcfce7,stroke:#22c55e,color:#14532d
+    classDef out fill:#fef3c7,stroke:#f59e0b,color:#78350f
+```
+
 ### Research Agent — 4 Tools per Ticker (Parallel)
 
 ```mermaid
 flowchart TD
     RA["Research Agent\nclaude-haiku-4-5\nOrchestrates parallel mini-agents"]:::haiku
 
-    SCREEN["Deterministic screening\n(before LLM calls)\n─────────────────\nget_candidates() ← c_scan_results\nget_gap_up_tickers() ← Alpaca movers ≥2%\nget_premarket_snapshot()\n  ← Alpaca StockLatestQuoteRequest\nSelect up to 6 tickers\nApply CAUTION filter: score≥7 + pmkt≥0.3%"]:::filter
+    IN["Input from Scanner Agent\n─────────────────\ncandidates[]: pre-ranked tickers\nRegime filtering already applied\n12–30 tickers → up to 6 analyzed"]:::filter
 
-    SCREEN --> TP["ThreadPoolExecutor\n360s total · 120s per ticker\nUp to 6 parallel mini-agents"]
+    IN --> TP["ThreadPoolExecutor\n360s total · 120s per ticker\nUp to 6 parallel mini-agents"]
 
     TP --> T1["① get_news(ticker)\n→ {blackout: bool, headlines: []}\nyfinance .calendar + .news\n(SKIP if blackout=true)"]:::tool
     TP --> T2["② get_ticker_fundamentals(ticker)\n→ {float_shares_m, short_pct_float\n   low_float, squeeze_potential\n   prev_day_high, low, close, range_pct}\nyfinance .info + .history(5d)"]:::tool
@@ -195,6 +212,7 @@ sequenceDiagram
     participant GHA as GitHub Actions
     participant PRE as premarket.py
     participant MA as Market Agent
+    participant SA as Scanner Agent
     participant RA as Research Agent
     participant RKA as Risk Agent
     participant ORC as Orchestrator
@@ -206,9 +224,6 @@ sequenceDiagram
     PRE->>DB: check c_sessions (concurrent guard)
     PRE->>DB: load c_strategy_params
     PRE->>DB: check c_protection_events
-
-    PRE->>PRE: scanner.run_scanner()
-    PRE->>DB: write c_scan_results
 
     PRE->>MA: run_market_agent_shadow()
     Note over MA: Circuit breakers checked BEFORE LLM
@@ -226,13 +241,18 @@ sequenceDiagram
         PRE-->>GHA: exit
     end
 
-    PRE->>RA: run_research_agent(market_report)
-    Note over RA: Deterministic screening first
-    RA->>DB: get_candidates() from c_scan_results
-    RA->>ALP: get_gap_up_tickers() via ScreenerClient
-    RA->>ALP: get_premarket_snapshot() batch quotes
+    PRE->>SA: run_scanner_agent(session_params)
+    Note over SA: Regime-aware tool selection
+    SA->>SA: scan_universe(regime_context) → yfinance 430+ universe
+    SA->>SA: get_momentum_signals(tickers) [Low VIX path]
+    SA->>SA: get_mean_reversion_signals(tickers) [High VIX path]
+    SA->>ALP: get_gap_ups(min_pct) via ScreenerClient
+    SA->>SA: filter_and_rank(candidates, criteria)
+    SA-->>TRC: log 5 tool calls + scan_rationale
+    SA-->>PRE: {candidates[], n_returned, scan_rationale}
 
-    Note over RA: Parallel mini-agents (up to 6 tickers)
+    PRE->>RA: run_research_agent(candidates, market_report)
+    Note over RA: Parallel mini-agents per candidate ticker
     par Per ticker (360s total budget)
         RA->>RA: get_news() → yfinance calendar+news
         RA->>RA: get_ticker_fundamentals() → yfinance info
@@ -362,6 +382,7 @@ flowchart LR
 | Agent | Outcomes |
 |---|---|
 | Market | `go` · `caution` · `skip` |
+| Scanner | `candidates_selected` · `low_quality_halt` · `regime_adjusted` · `caution_strict` |
 | Research | `proposed` · `skipped_blackout` · `skipped_below_vwap` · `skipped_atr` · `skipped_score` · `skipped_price_moved` |
 | Risk | `approved` · `rejected_loss_limit` · `rejected_capital` · `rejected_concentration` · `rejected_duplicate` · `rejected_count` |
 | Orchestrator | `converged` · `retry_triggered` · `structural_block` · `time_limit` · `tool_cap` · `skip_propagated` · `caution_no_retry` |
@@ -518,7 +539,7 @@ flowchart LR
     end
 
     subgraph "AI"
-        ANT["Anthropic API\n• Market Agent: claude-haiku-4-5\n• Research Agent: claude-haiku-4-5\n• Risk Agent: claude-haiku-4-5\n• Orchestrator: claude-sonnet-4-6\n• Learning Agent: claude-sonnet-4-6\nAll via base.py _dispatch_with_timeout\n25s per tool call hard limit"]
+        ANT["Anthropic API\n• Market Agent: claude-haiku-4-5\n• Scanner Agent: claude-haiku-4-5\n• Research Agent: claude-haiku-4-5\n• Risk Agent: claude-haiku-4-5\n• Orchestrator: claude-sonnet-4-6\n• Learning Agent: claude-sonnet-4-6\nAll via base.py _dispatch_with_timeout\n25s per tool call hard limit"]
     end
 
     subgraph "Storage"
@@ -557,11 +578,12 @@ flowchart LR
 
 | Dimension | Strategy A / B | Strategy C |
 |---|---|---|
-| Claude invocations | 1 per day | 5–8 per day (5 agents + optional retry) |
+| Claude invocations | 1 per day | 6–9 per day (6 agents + optional retry) |
 | Tool use | Agents are Python functions, no LLM tools | Each Claude agent has its own tool set; decides what to look up |
+| Scanner | Deterministic Python, no trace, fixed top-N | Scanner Agent (Haiku) reasons about regime, selects tickers dynamically, full trace in c_traces |
 | Research | Batch scan → one Claude call | Parallel per-ticker mini-agents, each with 4 tools and individual context |
 | Risk assessment | Deterministic Python rules | Risk Agent (Haiku) reasons about portfolio using 4 live DB queries |
-| Synthesis | Claude selects from pre-filtered list | Orchestrator (Sonnet) synthesizes 3 agent reports, can trigger retry loop |
+| Synthesis | Claude selects from pre-filtered list | Orchestrator (Sonnet) synthesizes 4 agent reports, can trigger retry loop |
 | Adaptive learning | Manual config changes | Learning Agent rewrites its own strategy params with cooldown protection |
 | Observability | scan_results JSON blob | Full span-level trace in c_traces: every tool call, token count, latency, cost |
 | Protection | Single daily loss limit | 6-tier protection system with immutable audit log |

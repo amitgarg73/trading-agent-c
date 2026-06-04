@@ -111,7 +111,7 @@ style: |
 
 ## Strategy C — Agentic Architecture
 
-6 agents · Haiku + Sonnet · Learning Agent · Full trace observability
+7 agents · Haiku + Sonnet · Scanner Agent · Learning Agent · Full trace observability
 
 Phase 0 — Simulation · June 2026
 
@@ -137,7 +137,8 @@ Phase 0 — Simulation · June 2026
 ## Strategy C (agentic)
 
 - Agents decide what to look up via tools
-- 6 specialized agents, each minimal
+- 7 specialized agents, each minimal
+- Scanner Agent: regime-aware, dynamic N
 - Orchestrator coordinates the loop
 - Research Agent runs per ticker in parallel
 - Learning Agent adjusts params nightly
@@ -150,11 +151,12 @@ Phase 0 — Simulation · June 2026
 
 ---
 
-# Six-Agent Roster
+# Seven-Agent Roster
 
 | Agent | Model | Language | Role | Tools |
 |---|---|---|---|---|
 | **Market Agent** | Haiku | Python | GO / CAUTION / SKIP + session params | 6 |
+| **Scanner Agent** | Haiku | Python | Regime-aware ticker selection, dynamic N | 5 |
 | **News Analyst** | Haiku | TypeScript | Per-candidate news *(Phase 0: stubbed)* | 2 |
 | **Research Agent** | Haiku | Python ×N | Per-ticker conviction score, parallel | 4 |
 | **Risk Agent** | Haiku | Python | Validates each trade proposal individually | 4 |
@@ -170,21 +172,27 @@ Phase 0 — Simulation · June 2026
 <div class="flow">
 <div class="fb">Market Agent<br><small>Haiku · 6 tools</small></div>
 <div class="arr">→</div>
-<div class="fb">Scanner<br><small>Python · 430+</small></div>
+<div class="fb">Scanner Agent<br><small>Haiku · 5 tools</small></div>
 <div class="arr">→</div>
 <div class="fb">Research ×N<br><small>Haiku · parallel</small></div>
 <div class="arr">→</div>
-<div class="fb a">Orchestrator<br><small>Sonnet · synthesis</small></div>
-<div class="arr">→</div>
 <div class="fb r">Risk Agent<br><small>Haiku · 4 tools</small></div>
+<div class="arr">→</div>
+<div class="fb a">Orchestrator<br><small>Sonnet · synthesis</small></div>
 <div class="arr">→</div>
 <div class="fb g">Orders<br><small>Alpaca bracket</small></div>
 </div>
 
+**Scanner Agent** receives `session_params` from Market Agent and selects tickers based on regime:
+
+- High VIX (>25) → mean-reversion signals, smaller N
+- Low VIX (<15) → momentum signals, larger N
+- CAUTION → strict threshold, N ≤ 15. Dynamic N: 12–30 tickers per day
+
 **Retry gate** — triggered when Risk Agent rejects proposals:
 
-- All rejected → re-run Research Agent, then second synthesis (`loop_iteration = 2`)
-- Some survived → re-run Risk Agent only
+- Re-synthesize with rejection reasons in context (`loop_iteration = 2`)
+- All rejected → re-run Research Agent first, then re-synthesize
 - CAUTION mode: retry disabled regardless
 
 > Hard limit: max 2 loop iterations. Output: `{ trades[], retry_needed, terminal_reason }`
