@@ -12,7 +12,7 @@ from agents.market_agent import run_market_agent as run_market_agent_v1
 from agents.market_agent_shadow import run_market_agent_shadow
 from agents.research_agent import run_research_agent
 from agents.risk_agent import run_risk_agent
-from agents.tools.research_tools import get_candidates
+from agents.scanner_agent import run_scanner_agent
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
@@ -158,19 +158,26 @@ def run_premarket_pipeline(
         out["_v2_market_report"] = market_report
         return out
 
-    # Step 2: Pre-research gate — check scanner before burning LLM budget
-    _gate_candidates = [c for c in get_candidates(min_score=params.strategy_min_score) if "error" not in c]
-    if not _gate_candidates:
+    # Step 2: Scanner Agent — regime-aware ticker selection
+    scanner_result = run_scanner_agent(tracer, market_report, params)
+    tracer.flush_cost_breakdown()
+    scanner_candidates = scanner_result.get("candidates") or []
+    if not scanner_candidates:
         tracer.log_decision(
             "orchestrator", "no_viable_candidates",
-            detail={"strategy_min_score": params.strategy_min_score},
+            detail={
+                "scanner_rationale": scanner_result.get("scan_rationale", ""),
+                "regime":            scanner_result.get("regime"),
+            },
         )
         out = _empty_session_output(market_report, "no_viable_candidates")
         out["_v2_market_report"] = market_report
         return out
 
-    # Step 3: Research Agent
-    trade_proposals = run_research_agent(tracer, market_report, params)
+    # Step 3: Research Agent — receives curated list from Scanner Agent
+    trade_proposals = run_research_agent(
+        tracer, market_report, params, candidates=scanner_candidates,
+    )
     tracer.flush_cost_breakdown()
 
     if not trade_proposals.get("proposals"):
@@ -238,9 +245,12 @@ def run_premarket_pipeline(
             ),
         }
     else:
-        # All proposals were rejected — need fresh candidates from the research agent.
+        # All proposals were rejected — re-synthesize with rejection reasons.
+        # Pass same scanner candidates; rejected tickers filtered inside research agent.
         trade_proposals_retry = run_research_agent(
-            tracer, market_report, params, rejected_context=rejected
+            tracer, market_report, params,
+            candidates=scanner_candidates,
+            rejected_context=rejected,
         )
         tracer.flush_cost_breakdown()
 

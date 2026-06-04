@@ -269,43 +269,65 @@ def run_research_agent(
     tracer: TraceLogger,
     market_report: dict,
     params: StrategyParams,
+    candidates: Optional[list[dict]] = None,
     rejected_context: Optional[list[dict]] = None,
 ) -> dict:
     """
     Run the Research Agent pipeline.
 
-    Phase 1 (deterministic, ~2s):
-      Screen candidates via get_candidates + get_premarket_snapshot.
-      Select up to max_positions tickers — no LLM call needed.
+    When candidates is provided (premarket path via Scanner Agent):
+      Skip Phase 1 entirely. candidates is the pre-curated list from Scanner Agent.
+
+    When candidates is None (intraday path):
+      Phase 1 (deterministic, ~2s): screen via get_candidates + get_premarket_snapshot.
 
     Phase 2 (parallel, ~40-90s wall clock):
       Spawn one mini-agent per ticker in a thread pool (up to _MAX_CANDIDATES).
       Each mini-agent: 4 tools, 12 turn cap, 120s timeout.
       Parallel execution means 6 tickers take as long as 1.
-      Post-investigation cap trims proposals to max_positions — more candidates
-      means better selection, not more trades.
     """
-    # Guard: no candidates
-    candidates = get_candidates(min_score=params.strategy_min_score)
-    valid = [c for c in candidates if "error" not in c]
-    if not valid:
-        tracer.log_decision("research", "no_candidates", detail={"raw": len(candidates)})
-        return {"proposals": [], "skipped": [], "summary": "No scan candidates today."}
-
-    try:
-        sector_data = get_sector_rotation()
-    except Exception:
-        sector_data = []
-
     rejected_tickers = [r["ticker"] for r in (rejected_context or [])]
 
     tracer.start_agent_span("research")
 
-    # Phase 1: deterministic screening
-    selected = _screen_candidates(market_report, sector_data, rejected_tickers, min_score=params.strategy_min_score)
-    if not selected:
-        tracer.log_decision("research", "no_candidates_after_screen")
-        return {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
+    if candidates is not None:
+        # Premarket path: Scanner Agent already selected and ranked candidates.
+        # Normalize to the context format expected by _investigate_ticker.
+        selected = [
+            {
+                "ticker":               c["ticker"],
+                "score":                c.get("technical_score", c.get("score", 5)),
+                "premarket_change_pct": c.get("premarket_change_pct", 0.0),
+                "scanner_price":        c.get("price"),
+                "premarket_price":      c.get("price"),
+                "sector":               c.get("sector"),
+            }
+            for c in candidates
+            if c.get("ticker") not in rejected_tickers
+        ]
+        if not selected:
+            tracer.log_decision("research", "no_candidates_after_screen")
+            return {"proposals": [], "skipped": [], "summary": "No candidates after rejected-ticker filter."}
+    else:
+        # Intraday / fallback path: deterministic Phase 1 screening.
+        raw = get_candidates(min_score=params.strategy_min_score)
+        valid = [c for c in raw if "error" not in c]
+        if not valid:
+            tracer.log_decision("research", "no_candidates", detail={"raw": len(raw)})
+            return {"proposals": [], "skipped": [], "summary": "No scan candidates today."}
+
+        try:
+            sector_data = get_sector_rotation()
+        except Exception:
+            sector_data = []
+
+        selected = _screen_candidates(
+            market_report, sector_data, rejected_tickers,
+            min_score=params.strategy_min_score,
+        )
+        if not selected:
+            tracer.log_decision("research", "no_candidates_after_screen")
+            return {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
 
     # Phase 2: parallel per-ticker investigation
     proposals: list[dict] = []

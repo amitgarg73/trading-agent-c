@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.research_agent import run_research_agent, _screen_candidates, _investigate_ticker
+from agents.research_agent import run_research_agent, _screen_candidates, _investigate_ticker, _MAX_CANDIDATES
 from tests.conftest import make_api_response, tool_block
 from core.params import StrategyParams
 
@@ -60,8 +60,17 @@ _SKIP_MSFT = {
 }
 
 
+_SCANNER_CANDIDATES = [
+    {"ticker": "AAPL", "technical_score": 8, "premarket_change_pct": 1.0,
+     "price": 185.0, "sector": "Technology"},
+    {"ticker": "MSFT", "technical_score": 7, "premarket_change_pct": 0.5,
+     "price": 420.0, "sector": "Technology"},
+]
+
+
 def _run(tracer, market_report=None, rejected_context=None,
-         investigate_side_effect=None):
+         investigate_side_effect=None, candidates=None):
+    """Run research agent. When candidates=None uses intraday (Phase 1) path."""
     investigate_side_effect = investigate_side_effect or (lambda *a, **kw: _PROPOSE_AAPL)
     with patch("agents.research_agent.get_candidates",         return_value=_CANDIDATES), \
          patch("agents.research_agent.get_premarket_snapshot", return_value=_SNAPSHOT), \
@@ -70,7 +79,21 @@ def _run(tracer, market_report=None, rejected_context=None,
          patch("agents.research_agent._investigate_ticker",    side_effect=investigate_side_effect):
         return run_research_agent(
             tracer, market_report or _MARKET_REPORT,
-            StrategyParams(), rejected_context=rejected_context,
+            StrategyParams(), candidates=candidates, rejected_context=rejected_context,
+        )
+
+
+def _run_with_candidates(tracer, candidates=None, market_report=None,
+                         investigate_side_effect=None, rejected_context=None):
+    """Run research agent via Scanner Agent path (candidates provided, skip Phase 1)."""
+    investigate_side_effect = investigate_side_effect or (lambda *a, **kw: _PROPOSE_AAPL)
+    effective_candidates = _SCANNER_CANDIDATES if candidates is None else candidates
+    with patch("agents.research_agent._investigate_ticker", side_effect=investigate_side_effect):
+        return run_research_agent(
+            tracer, market_report or _MARKET_REPORT,
+            StrategyParams(),
+            candidates=effective_candidates,
+            rejected_context=rejected_context,
         )
 
 
@@ -347,3 +370,73 @@ class TestCircuitBreaker:
              patch("agents.research_agent._investigate_dispatch", return_value={"headlines": []}):
             result = _investigate_ticker("AAPL", _CONTEXT, _GO_REPORT, tracer)
         assert result.get("action") == "SKIP"
+
+
+# ── Scanner Agent path (candidates provided) ─────────────────────────────────
+
+class TestCandidatesPath:
+    def test_skips_phase1_when_candidates_provided(self, tracer):
+        investigate_calls = []
+
+        def side_effect(ticker, *args, **kwargs):
+            investigate_calls.append(ticker)
+            return _PROPOSE_AAPL
+
+        _run_with_candidates(tracer, investigate_side_effect=side_effect)
+        # Should investigate only the tickers in the provided candidate list
+        assert set(investigate_calls) <= {"AAPL", "MSFT"}
+
+    def test_does_not_call_get_candidates_when_provided(self, tracer):
+        mock_get_candidates = MagicMock(return_value=_CANDIDATES)
+        with patch("agents.research_agent.get_candidates", mock_get_candidates), \
+             patch("agents.research_agent._investigate_ticker", return_value=_PROPOSE_AAPL):
+            run_research_agent(
+                tracer, _MARKET_REPORT, StrategyParams(),
+                candidates=_SCANNER_CANDIDATES,
+            )
+        mock_get_candidates.assert_not_called()
+
+    def test_returned_proposals_from_provided_candidates(self, tracer):
+        result = _run_with_candidates(tracer)
+        assert "proposals" in result
+        assert len(result["proposals"]) > 0
+
+    def test_rejected_tickers_filtered_from_candidates(self, tracer):
+        investigate_calls = []
+
+        def side_effect(ticker, *args, **kwargs):
+            investigate_calls.append(ticker)
+            return _PROPOSE_AAPL
+
+        _run_with_candidates(
+            tracer,
+            rejected_context=[{"ticker": "AAPL", "reason": "sector concentration"}],
+            investigate_side_effect=side_effect,
+        )
+        assert "AAPL" not in investigate_calls
+
+    def test_all_candidates_rejected_returns_empty(self, tracer):
+        rejected = [
+            {"ticker": "AAPL", "reason": "sector"},
+            {"ticker": "MSFT", "reason": "capital"},
+        ]
+        result = _run_with_candidates(tracer, rejected_context=rejected)
+        assert result["proposals"] == []
+        assert result["skipped"] == []
+
+    def test_context_format_normalized(self, tracer):
+        investigated_contexts = []
+
+        def side_effect(ticker, context, *args, **kwargs):
+            investigated_contexts.append(context)
+            return _PROPOSE_AAPL
+
+        _run_with_candidates(tracer, investigate_side_effect=side_effect)
+        for ctx in investigated_contexts:
+            assert "score" in ctx
+            assert "premarket_change_pct" in ctx
+
+    def test_empty_candidates_returns_immediately(self, tracer):
+        result = _run_with_candidates(tracer, candidates=[])
+        assert result["proposals"] == []
+        assert result["skipped"] == []

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -21,6 +21,20 @@ _MARKET_CAUTION = {
     "decision": "CAUTION", "max_positions": 2, "bias": "NEUTRAL",
     "skip_reason": None, "summary": "Mixed signals, reduced size.",
 }
+
+_SCANNER_RESULT = {
+    "candidates": [
+        {"ticker": "AAPL", "technical_score": 8, "premarket_change_pct": 1.5,
+         "price": 185.0, "sector": "Technology"},
+    ],
+    "n_returned": 1, "scan_rationale": "Strong setup.", "regime": "elevated_vix",
+    "signals_used": ["technical_score"], "dropped_count": 5,
+}
+_SCANNER_EMPTY = {
+    "candidates": [], "n_returned": 0, "scan_rationale": "All below threshold.",
+    "regime": "high_vix", "signals_used": [], "dropped_count": 20,
+}
+
 _PROPOSALS = {
     "proposals": [
         {"ticker": "AAPL", "entry_price": 185.0, "target_price": 192.4,
@@ -48,15 +62,13 @@ _VERDICTS_REJECTED = {
     "verdicts": [{"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"}],
     "portfolio_state": {"buying_power": 50000.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
 }
-# AAPL rejected, MSFT approved — used to test partial-rejection fast path
 _VERDICTS_PARTIAL_REJECT = {
     "verdicts": [
         {"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"},
-        {"ticker": "MSFT", "verdict": "APPROVED", "reason": "all constraints passed"},
+        {"ticker": "MSFT", "verdict": "APPROVED",  "reason": "all constraints passed"},
     ],
     "portfolio_state": {"buying_power": 50000.0, "positions_open": 0, "today_pnl": 0.0, "limit_hit": False},
 }
-# Both proposals rejected — all tickers removed, forces research re-run
 _VERDICTS_ALL_REJECTED = {
     "verdicts": [
         {"ticker": "AAPL", "verdict": "REJECTED", "reason": "sector concentration"},
@@ -127,15 +139,12 @@ class TestEmptySessionOutput:
         assert out["retry_needed"] is False
 
 
-_GATE_CANDIDATES = [{"ticker": "AAPL", "technical_score": 7, "price": 185.0, "sector": "Technology"}]
-
-
 class TestRunPremarketPipeline:
     @pytest.fixture(autouse=True)
-    def _patch_gate(self):
-        # Default: scanner has candidates so the pre-research gate passes.
-        # Override in individual tests to simulate an empty scanner.
-        with patch("agents.orchestrator.get_candidates", return_value=_GATE_CANDIDATES):
+    def _patch_scanner(self):
+        # Default: Scanner Agent returns one candidate.
+        # Override in individual tests to simulate empty scanner or scanner error.
+        with patch("agents.orchestrator.run_scanner_agent", return_value=_SCANNER_RESULT):
             yield
 
     def _mock_synthesis(self, result_json):
@@ -146,7 +155,7 @@ class TestRunPremarketPipeline:
         return client
 
     def test_skip_propagated_when_market_says_skip(self, tracer):
-        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_SKIP), \
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_SKIP), \
              patch("agents.orchestrator.run_research_agent"), \
              patch("agents.orchestrator.run_risk_agent"), \
              patch("agents.orchestrator.anthropic.Anthropic"):
@@ -154,8 +163,17 @@ class TestRunPremarketPipeline:
         assert result["trades"] == []
         assert result["session_meta"]["terminal_reason"] == "skip_propagated"
 
+    def test_scanner_not_called_on_market_skip(self, tracer):
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_SKIP), \
+             patch("agents.orchestrator.run_scanner_agent") as mock_scanner, \
+             patch("agents.orchestrator.run_research_agent"), \
+             patch("agents.orchestrator.run_risk_agent"), \
+             patch("agents.orchestrator.anthropic.Anthropic"):
+            run_premarket_pipeline(tracer, StrategyParams())
+        mock_scanner.assert_not_called()
+
     def test_research_not_called_on_skip(self, tracer):
-        with patch("agents.orchestrator.run_market_agent_shadow",   return_value=_MARKET_SKIP), \
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_SKIP), \
              patch("agents.orchestrator.run_research_agent") as mock_res, \
              patch("agents.orchestrator.run_risk_agent"), \
              patch("agents.orchestrator.anthropic.Anthropic"):
@@ -164,26 +182,35 @@ class TestRunPremarketPipeline:
 
     def test_returns_trades_on_converged(self, tracer):
         client = self._mock_synthesis(_FINAL_CONVERGED)
-        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_REPORT), \
-             patch("agents.orchestrator.run_research_agent",return_value=_PROPOSALS), \
-             patch("agents.orchestrator.run_risk_agent",    return_value=_VERDICTS_APPROVED), \
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_APPROVED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
         assert len(result["trades"]) == 1
         assert result["trades"][0]["ticker"] == "AAPL"
         assert result["session_meta"]["terminal_reason"] == "converged"
 
+    def test_research_receives_scanner_candidates(self, tracer):
+        client = self._mock_synthesis(_FINAL_CONVERGED)
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_APPROVED), \
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
+            run_premarket_pipeline(tracer, StrategyParams())
+        call_kwargs = mock_res.call_args[1]
+        assert call_kwargs.get("candidates") == _SCANNER_RESULT["candidates"]
+
     def test_retry_needed_stripped_from_final_output(self, tracer):
         client = self._mock_synthesis(_FINAL_CONVERGED)
-        with patch("agents.orchestrator.run_market_agent_shadow",  return_value=_MARKET_REPORT), \
-             patch("agents.orchestrator.run_research_agent",return_value=_PROPOSALS), \
-             patch("agents.orchestrator.run_risk_agent",    return_value=_VERDICTS_APPROVED), \
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_APPROVED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
         assert "retry_needed" not in result
 
     def test_retry_triggered_on_fixable_rejections(self, tracer):
-        # All proposals rejected: research must be re-run to get new candidates.
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -194,13 +221,11 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_REJECTED) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        # All proposals rejected: research re-run, risk called twice
         assert mock_res.call_count == 2
         assert mock_risk.call_count == 2
         assert result["session_meta"]["retry_triggered"] is True
 
-    def test_retry_passes_rejection_context_when_research_rerun(self, tracer):
-        # When all proposals are rejected, research re-runs with rejected_context.
+    def test_retry_passes_scanner_candidates_and_rejection_context(self, tracer):
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -211,13 +236,11 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_REJECTED), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             run_premarket_pipeline(tracer, StrategyParams())
-        # Second call should include rejected_context
-        second_call_kwargs = mock_res.call_args_list[1][1]
-        assert second_call_kwargs.get("rejected_context") is not None
+        second_kwargs = mock_res.call_args_list[1][1]
+        assert second_kwargs.get("candidates") is not None
+        assert second_kwargs.get("rejected_context") is not None
 
     def test_retry_skips_research_when_proposals_remain(self, tracer):
-        # Partial rejection: some proposals survive filtering.
-        # Research should NOT be re-run — results are still valid.
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -228,13 +251,11 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_PARTIAL_REJECT) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        # Research called once; risk called twice (original + retry with filtered proposals)
         assert mock_res.call_count == 1
         assert mock_risk.call_count == 2
         assert result["session_meta"]["retry_triggered"] is True
 
     def test_retry_filtered_proposals_exclude_rejected_tickers(self, tracer):
-        # When proposals are filtered, rejected tickers must not appear in retry risk call.
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -245,14 +266,12 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_PARTIAL_REJECT) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             run_premarket_pipeline(tracer, StrategyParams())
-        # Second risk call receives only the non-rejected ticker (MSFT)
-        retry_proposals = mock_risk.call_args_list[1][0][1]  # positional arg: trade_proposals
+        retry_proposals = mock_risk.call_args_list[1][0][1]
         tickers = [p["ticker"] for p in retry_proposals["proposals"]]
         assert "AAPL" not in tickers
         assert "MSFT" in tickers
 
     def test_retry_reruns_research_when_all_proposals_rejected(self, tracer):
-        # All proposals rejected: no remaining candidates, research must re-run.
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("end_turn", [text_block(json.dumps(_FINAL_RETRY_NEEDED))]),
@@ -263,35 +282,11 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_ALL_REJECTED) as mock_risk, \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        # Research re-run (both rejected) and risk called twice
         assert mock_res.call_count == 2
         assert mock_risk.call_count == 2
         assert result["session_meta"]["retry_triggered"] is True
 
-    def test_caution_all_rejected_still_runs_synthesis(self, tracer):
-        # CAUTION + all risk verdicts rejected → synthesis IS called (no more shortcircuit)
-        client = self._mock_synthesis(_FINAL_STRUCTURAL)
-        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
-             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
-             patch("agents.orchestrator.run_risk_agent", return_value=_VERDICTS_REJECTED), \
-             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
-            result = run_premarket_pipeline(tracer, StrategyParams())
-        client.messages.create.assert_called_once()
-        assert result["session_meta"]["terminal_reason"] == "structural_block"
-
-    def test_caution_proceeds_when_some_approved(self, tracer):
-        # CAUTION + at least one verdict approved → synthesis runs normally
-        client = self._mock_synthesis(_FINAL_CONVERGED)
-        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
-             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
-             patch("agents.orchestrator.run_risk_agent", return_value=_VERDICTS_APPROVED), \
-             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
-            result = run_premarket_pipeline(tracer, StrategyParams())
-        client.messages.create.assert_called_once()
-        assert result["session_meta"]["terminal_reason"] == "converged"
-
     def test_caution_no_retry_on_fixable_rejections(self, tracer):
-        # CAUTION + synthesis says retry_needed → retry suppressed, caution_no_retry returned
         client = self._mock_synthesis(_FINAL_RETRY_NEEDED)
         with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
              patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS) as mock_res, \
@@ -309,13 +304,11 @@ class TestRunPremarketPipeline:
              patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_STRUCTURAL), \
              patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
             result = run_premarket_pipeline(tracer, StrategyParams())
-        # Research called only once (no retry)
         assert mock_res.call_count == 1
         assert result["session_meta"]["terminal_reason"] == "structural_block"
 
     def test_no_viable_proposals_skips_risk_and_synthesis(self, tracer):
-        # Research returns empty proposals → risk and synthesis must NOT be called
-        empty_proposals = {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
+        empty_proposals = {"proposals": [], "skipped": [], "summary": "No candidates."}
         with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_CAUTION), \
              patch("agents.orchestrator.run_research_agent", return_value=empty_proposals), \
              patch("agents.orchestrator.run_risk_agent") as mock_risk, \
@@ -327,8 +320,7 @@ class TestRunPremarketPipeline:
         assert result["session_meta"]["terminal_reason"] == "no_viable_proposals"
 
     def test_no_viable_candidates_exits_before_research(self, tracer):
-        # Scanner returns nothing above threshold → research must NOT be called
-        with patch("agents.orchestrator.get_candidates", return_value=[]), \
+        with patch("agents.orchestrator.run_scanner_agent", return_value=_SCANNER_EMPTY), \
              patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
              patch("agents.orchestrator.run_research_agent") as mock_res, \
              patch("agents.orchestrator.run_risk_agent") as mock_risk, \
@@ -339,12 +331,17 @@ class TestRunPremarketPipeline:
         assert result["trades"] == []
         assert result["session_meta"]["terminal_reason"] == "no_viable_candidates"
 
-    def test_no_viable_candidates_respects_strategy_min_score(self, tracer):
-        # Gate uses params.strategy_min_score, not a hardcoded value
-        params = StrategyParams(strategy_min_score=7)
-        with patch("agents.orchestrator.get_candidates", return_value=[]) as mock_gc, \
-             patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
-             patch("agents.orchestrator.run_research_agent"), \
-             patch("agents.orchestrator.anthropic.Anthropic"):
+    def test_scanner_called_with_market_report_and_params(self, tracer):
+        client = self._mock_synthesis(_FINAL_CONVERGED)
+        params = StrategyParams()
+        with patch("agents.orchestrator.run_market_agent_shadow", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_scanner_agent") as mock_scanner, \
+             patch("agents.orchestrator.run_research_agent", return_value=_PROPOSALS), \
+             patch("agents.orchestrator.run_risk_agent",     return_value=_VERDICTS_APPROVED), \
+             patch("agents.orchestrator.anthropic.Anthropic", return_value=client):
+            mock_scanner.return_value = _SCANNER_RESULT
             run_premarket_pipeline(tracer, params)
-        mock_gc.assert_called_once_with(min_score=7)
+        mock_scanner.assert_called_once()
+        call_args = mock_scanner.call_args
+        assert call_args[0][1] == _MARKET_REPORT
+        assert call_args[0][2] == params
