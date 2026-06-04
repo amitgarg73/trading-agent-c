@@ -188,11 +188,11 @@ if page == "Today":
         st.warning("Strategy A/B data unavailable — add SUPABASE_URL_AB and SUPABASE_KEY_AB to Streamlit Cloud secrets.")
 
     # ── Fetch data ──────────────────────────────────────────────────────────
-    a_open   = q_ab("positions",   "ticker,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
+    a_open   = q_ab("positions",   "ticker,entry_price,fill_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
                     filters={"status": "OPEN"})
     a_closed = q_ab("positions",   "ticker,entry_price,close_price,fill_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
-    b_open   = q_ab("b_positions", "ticker,pool,entry_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
+    b_open   = q_ab("b_positions", "ticker,pool,entry_price,fill_price,current_price,target_price,stop_loss,shares,unrealized_pnl,opened_at,close_reason,exit_mechanism,trail_order_id",
                     filters={"status": "OPEN"})
     b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,fill_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
@@ -258,14 +258,18 @@ if page == "Today":
             st.caption("Connect A/B database to see positions")
         elif a_open:
             for p in a_open:
-                unreal = p.get("unrealized_pnl") or 0
+                cost   = p.get("fill_price") or p.get("entry_price") or 0
+                cur    = p.get("current_price") or 0
+                shares = p.get("shares") or 0
+                unreal = round((cur - cost) * shares, 2) if cost and cur else (p.get("unrealized_pnl") or 0)
                 uc     = "#3fb950" if unreal >= 0 else "#f85149"
+                fill_note = f" <span style='color:#888;font-size:0.8rem'>(filled &#36;{cost:.2f})</span>" if cost and p.get("entry_price") and abs(cost - p["entry_price"]) > 0.01 else ""
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
-                    f"Now &#36;{p.get('current_price') or 0:.2f} · "
-                    f"{p.get('shares', 0)} sh<br>"
+                    f"Entry &#36;{p.get('entry_price', 0):.2f}{fill_note} · "
+                    f"Now &#36;{cur:.2f} · "
+                    f"{shares} sh<br>"
                     f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
                     f"Target &#36;{p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
@@ -317,15 +321,19 @@ if page == "Today":
             st.caption("Connect A/B database to see positions")
         elif b_open:
             for p in b_open:
-                unreal = p.get("unrealized_pnl") or 0
+                cost   = p.get("fill_price") or p.get("entry_price") or 0
+                cur    = p.get("current_price") or 0
+                shares = p.get("shares") or 0
+                unreal = round((cur - cost) * shares, 2) if cost and cur else (p.get("unrealized_pnl") or 0)
                 uc     = "#3fb950" if unreal >= 0 else "#f85149"
                 pb     = badge(f"Pool {p.get('pool', '?')}", "#388bfd")
+                fill_note = f" <span style='color:#888;font-size:0.8rem'>(filled &#36;{cost:.2f})</span>" if cost and p.get("entry_price") and abs(cost - p["entry_price"]) > 0.01 else ""
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; {pb} &nbsp; {_trail_badge(p)}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
-                    f"Now &#36;{p.get('current_price') or 0:.2f} · "
-                    f"{p.get('shares', 0)} sh<br>"
+                    f"Entry &#36;{p.get('entry_price', 0):.2f}{fill_note} · "
+                    f"Now &#36;{cur:.2f} · "
+                    f"{shares} sh<br>"
                     f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
                     f"Target &#36;{p.get('target_price', 0):.2f} "
                     f"({_pct_to_target(p.get('current_price'), p.get('target_price'))})<br>"
