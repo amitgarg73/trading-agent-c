@@ -201,7 +201,7 @@ def main() -> None:
 
     params     = load_params()
     session_id = str(uuid4())
-    tracer     = TraceLogger(session_id)
+    tracer     = TraceLogger(session_id, session_type="premarket")
     print(f"[premarket] Session {session_id} — {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
     try:
@@ -212,7 +212,10 @@ def main() -> None:
 
         if candidate_count == 0:
             print("[premarket] No scanner candidates today. Exiting.")
-            tracer.close_session(terminal_reason="no_candidates")
+            tracer.close_session(
+                terminal_reason="no_candidates",
+                result_summary="Scanner returned 0 candidates. No pipeline run.",
+            )
             send_alert(
                 f"Strategy C — No Candidates {now_et.strftime('%Y-%m-%d')}",
                 "Scanner returned 0 results. Market data issue or all tickers filtered.",
@@ -247,19 +250,25 @@ def main() -> None:
         else:
             print(f"[premarket] No trades. Terminal: {terminal}")
 
+        if trades:
+            tickers = ", ".join(t["ticker"] for t in trades)
+            summary = f"{len(trades)} trade(s) executed: {tickers}"
+        else:
+            summary = f"No trades. {terminal}"
         tracer.close_session(
             terminal_reason=terminal,
             trades_proposed=len(result.get("trades", [])),
             trades_approved=len(trades),
             trades_executed=len(trades),
             retry_triggered=result["session_meta"].get("retry_triggered", False),
+            result_summary=summary,
         )
         subject, body = _build_premarket_alert(result, session_id, now_et)
         send_alert(subject, body)
 
     except Exception as e:
         tracer.log_error("orchestrator", str(e))
-        tracer.close_session(terminal_reason="error")
+        tracer.close_session(terminal_reason="error", result_summary=f"Error: {e}")
         send_alert("Strategy C — Premarket Error", str(e))
         raise
 

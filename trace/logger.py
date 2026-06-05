@@ -45,9 +45,10 @@ class TraceLogger:
         tracer.close_session("converged", trades_proposed=3, trades_approved=2, trades_executed=2)
     """
 
-    def __init__(self, session_id: str, workflow_id: Optional[str] = None):
+    def __init__(self, session_id: str, workflow_id: Optional[str] = None, session_type: Optional[str] = None):
         self.session_id = session_id
         self._workflow_id = workflow_id
+        self._session_type = session_type
         self._sequence = 0
         self._agent_spans: dict[str, str] = {}   # agent -> current span_id
         self._session_span_id = str(uuid4())
@@ -225,6 +226,7 @@ class TraceLogger:
         trades_executed: int = 0,
         risk_rejections: int = 0,
         retry_triggered: bool = False,
+        result_summary: Optional[str] = None,
     ) -> None:
         """Finalize the ag_sessions row for this session.
 
@@ -254,6 +256,8 @@ class TraceLogger:
             "status":          "completed",
             "metadata":        metadata,
         }
+        if result_summary:
+            row["result_summary"] = result_summary
 
         if self._tokens:
             agent_costs: dict[str, Any] = {}
@@ -296,14 +300,17 @@ class TraceLogger:
     def _insert_session_stub(self) -> None:
         """Upsert a minimal ag_sessions row so ag_traces FK is satisfied from the start."""
         from core.db import get_client
-        get_client().table("ag_sessions").upsert({
+        stub: dict[str, Any] = {
             "id":              self.session_id,
             "tenant_id":       _TENANT_ID,
             "workflow_id":     self._workflow_id,
             "started_at":      self._started_at.isoformat(),
             "status":          "in_progress",
             "terminal_reason": "in_progress",
-        }, on_conflict="id", ignore_duplicates=True).execute()
+        }
+        if self._session_type:
+            stub["session_type"] = self._session_type
+        get_client().table("ag_sessions").upsert(stub, on_conflict="id", ignore_duplicates=True).execute()
 
     def _write(self, fields: dict) -> str:
         from core.db import get_client

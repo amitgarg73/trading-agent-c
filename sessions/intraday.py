@@ -315,7 +315,7 @@ def main() -> None:
 
     config = load_agent_config()
     params = load_params()
-    tracer = TraceLogger(session_id)
+    tracer = TraceLogger(session_id, session_type="intraday")
 
     # Execute any premarket trades that were deferred — wait for 9:45 AM so the
     # first 15 minutes of open volatility settle before we enter.

@@ -334,7 +334,7 @@ def main() -> None:
 
     config = load_agent_config()
     params = load_params()
-    tracer = TraceLogger(session_id)
+    tracer = TraceLogger(session_id, session_type="eod")
     print(f"[eod] Session {session_id} — {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
     # Reconcile first — catches positions that exited via bracket/trail between last poll and now
@@ -416,9 +416,11 @@ def main() -> None:
     send_alert(subject, build_daily_summary(perf, trades, learnings))
 
     # Finalize session
+    pnl_sign = "+" if perf.realized_pnl >= 0 else ""
     tracer.close_session(
         terminal_reason="eod_complete",
         trades_executed=perf.trades_total,
+        result_summary=f"{perf.trades_total} trade(s), P&L {pnl_sign}${perf.realized_pnl:.2f}",
     )
     tracer.log_decision("orchestrator", "eod_complete",
                         detail={"pnl": perf.realized_pnl, "trades": perf.trades_total})

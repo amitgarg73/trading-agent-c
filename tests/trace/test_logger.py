@@ -326,6 +326,52 @@ class TestCloseSession:
         row = mock_supabase.table.return_value.update.call_args[0][0]
         assert row["metadata"]["total_steps"] == 3
 
+    def test_result_summary_written_when_provided(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.close_session("converged", result_summary="2 trade(s) executed: AAPL, MSFT")
+        row = query.update.call_args[0][0]
+        assert row["result_summary"] == "2 trade(s) executed: AAPL, MSFT"
+
+    def test_result_summary_omitted_when_not_provided(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        tracer.close_session("converged")
+        row = query.update.call_args[0][0]
+        assert "result_summary" not in row
+
+
+# ── session_type ──────────────────────────────────────────────────────────────
+
+class TestSessionType:
+    def test_session_type_written_to_stub(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("sess-001", session_type="premarket")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert upsert_payload["session_type"] == "premarket"
+
+    def test_session_type_omitted_when_none(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("sess-002")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert "session_type" not in upsert_payload
+
+    def test_intraday_session_type(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("sess-003", session_type="intraday")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert upsert_payload["session_type"] == "intraday"
+
+    def test_eod_session_type(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("sess-004", session_type="eod")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert upsert_payload["session_type"] == "eod"
+
 
 # ── flush_cost_breakdown ──────────────────────────────────────────────────────
 
