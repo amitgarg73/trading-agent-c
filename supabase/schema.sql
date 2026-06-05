@@ -2,63 +2,58 @@
 -- Run this in the Supabase SQL Editor for the trading-agent-c project.
 -- After this, run seed.sql to populate initial config and parameters.
 -- For the test project (trading-agent-c-test), run schema.sql only.
+--
+-- Observability tables (ag_sessions, ag_traces) are shared with the Argus
+-- platform. The canonical definition lives in argus/schema/schema.sql.
+-- The columns below reflect the live production state as of 2026-06-05.
 
--- ── Observability ──────────────────────────────────────────────────────────────
+-- ── Observability (shared with Argus) ──────────────────────────────────────────
 
-CREATE TABLE c_sessions (
-  id                   UUID PRIMARY KEY,
-  date                 DATE NOT NULL,
-  total_steps          INT NOT NULL DEFAULT 0,
-  total_tool_calls     INT NOT NULL DEFAULT 0,
-  agents_invoked       TEXT[],
-  loop_iterations      INT NOT NULL DEFAULT 1,
-  total_tokens_input   INT NOT NULL DEFAULT 0,
-  total_tokens_output  INT NOT NULL DEFAULT 0,
-  total_cost_usd       FLOAT NOT NULL DEFAULT 0,
-  cost_breakdown       JSONB,
-  total_latency_ms     INT NOT NULL DEFAULT 0,
-  trades_proposed      INT NOT NULL DEFAULT 0,
-  trades_approved      INT NOT NULL DEFAULT 0,
-  trades_executed      INT NOT NULL DEFAULT 0,
-  risk_rejections      INT NOT NULL DEFAULT 0,
-  retry_triggered      BOOL NOT NULL DEFAULT false,
-  terminal_reason      TEXT NOT NULL,
-  started_at           TIMESTAMPTZ NOT NULL,
-  completed_at         TIMESTAMPTZ,
+CREATE TABLE ag_sessions (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id            UUID NOT NULL,
+  workflow_id          UUID,
+  started_at           TIMESTAMPTZ DEFAULT now(),
+  ended_at             TIMESTAMPTZ,
+  status               TEXT DEFAULT 'in_progress',  -- in_progress | completed | failed
+  total_cost_usd       FLOAT DEFAULT 0,
+  total_tokens_input   INT DEFAULT 0,
+  total_tokens_output  INT DEFAULT 0,
+  terminal_reason      TEXT,
+  quality_score        FLOAT,
+  outcome_score        FLOAT,
+  metadata             JSONB,   -- trades_executed, cost_breakdown, total_steps, etc.
+  session_type         TEXT,    -- premarket | intraday | eod
+  result_summary       TEXT,
   is_simulated         BOOL NOT NULL DEFAULT false,
-  pending_trades       JSONB
+  created_at           TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX idx_c_sessions_date ON c_sessions(date DESC);
+CREATE INDEX idx_ag_sessions_tenant   ON ag_sessions(tenant_id);
+CREATE INDEX idx_ag_sessions_started  ON ag_sessions(started_at DESC);
 
 
-CREATE TABLE c_traces (
-  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  session_id       UUID NOT NULL REFERENCES c_sessions(id),
-  span_id          UUID NOT NULL,
-  parent_span_id   UUID,
-  entity_id        TEXT,
-  date             DATE NOT NULL,
-  sequence         INT NOT NULL,
-  agent            TEXT NOT NULL,
-  step_type        TEXT NOT NULL,  -- tool_call | agent_message | decision | error
-  tool_name        TEXT,
-  tool_input       JSONB,
-  tool_output      JSONB,
-  agent_reasoning  TEXT,
-  outcome          TEXT,
-  tokens_input     INT NOT NULL DEFAULT 0,
-  tokens_output    INT NOT NULL DEFAULT 0,
-  latency_ms       INT NOT NULL DEFAULT 0,
-  model            TEXT,
-  error            TEXT,
-  created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
+CREATE TABLE ag_traces (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id     UUID NOT NULL,
+  session_id    UUID NOT NULL REFERENCES ag_sessions(id) ON DELETE CASCADE,
+  agent         TEXT,
+  step_type     TEXT,    -- tool_call | agent_message | decision | error
+  tool_name     TEXT,
+  outcome       TEXT,    -- success | error | timeout | failed | completed
+  error         TEXT,
+  latency_ms    FLOAT,
+  tokens_input  INT,
+  tokens_output INT,
+  cost_usd      FLOAT,
+  payload       JSONB,   -- span_id, parent_span_id, entity_id, date, sequence,
+                         -- model, tool_input, tool_output, agent_reasoning
+  created_at    TIMESTAMPTZ DEFAULT now()
 );
 
-CREATE INDEX idx_c_traces_session    ON c_traces(session_id);
-CREATE INDEX idx_c_traces_entity     ON c_traces(entity_id) WHERE entity_id IS NOT NULL;
-CREATE INDEX idx_c_traces_agent_date ON c_traces(agent, date DESC);
-CREATE INDEX idx_c_traces_step_type  ON c_traces(step_type, session_id);
+CREATE INDEX idx_ag_traces_tenant   ON ag_traces(tenant_id);
+CREATE INDEX idx_ag_traces_session  ON ag_traces(session_id);
+CREATE INDEX idx_ag_traces_created  ON ag_traces(created_at DESC);
 
 
 -- ── Execution ──────────────────────────────────────────────────────────────────
