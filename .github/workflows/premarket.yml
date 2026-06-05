@@ -57,8 +57,8 @@ jobs:
 
       - name: Verify premarket wrote session record
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
         run: |
           python - <<'PY'
           import os, sys
