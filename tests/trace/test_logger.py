@@ -40,7 +40,7 @@ class TestStartAgentSpan:
 # ── log_tool_call ──────────────────────────────────────────────────────────────
 
 class TestLogToolCall:
-    def test_writes_row_to_c_traces(self, tracer, mock_supabase):
+    def test_writes_row_to_ag_traces(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
 
@@ -51,8 +51,8 @@ class TestLogToolCall:
         assert row["step_type"] == "tool_call"
         assert row["agent"] == "market"
         assert row["tool_name"] == "get_vix"
-        assert row["tool_input"] == {}
-        assert row["tool_output"] == {"vix": 18.4}
+        assert row["payload"]["tool_input"] == {}
+        assert row["payload"]["tool_output"] == {"vix": 18.4}
         assert row["latency_ms"] == 220
         assert row["session_id"] == "test-session-id-1234"
 
@@ -69,7 +69,7 @@ class TestLogToolCall:
         tracer.log_tool_call("research", "get_candidates", {}, {})
 
         row = query.insert.call_args[0][0]
-        assert row["parent_span_id"] == agent_span
+        assert row["payload"]["parent_span_id"] == agent_span
 
     def test_entity_id_included_when_provided(self, tracer, mock_supabase):
         query = make_query([])
@@ -78,7 +78,7 @@ class TestLogToolCall:
         tracer.log_tool_call("research", "get_news", {"ticker": "AAPL"}, {}, entity_id="AAPL")
 
         row = query.insert.call_args[0][0]
-        assert row["entity_id"] == "AAPL"
+        assert row["payload"]["entity_id"] == "AAPL"
 
     def test_entity_id_auto_derived_for_research_ticker_agent(self, tracer, mock_supabase):
         query = make_query([])
@@ -87,7 +87,7 @@ class TestLogToolCall:
         tracer.log_tool_call("research_NVDA", "get_news", {"ticker": "NVDA"}, {})
 
         row = query.insert.call_args[0][0]
-        assert row["entity_id"] == "NVDA"
+        assert row["payload"]["entity_id"] == "NVDA"
 
     def test_entity_id_explicit_overrides_auto_derive(self, tracer, mock_supabase):
         query = make_query([])
@@ -96,7 +96,7 @@ class TestLogToolCall:
         tracer.log_tool_call("research_NVDA", "get_news", {}, {}, entity_id="OVERRIDE")
 
         row = query.insert.call_args[0][0]
-        assert row["entity_id"] == "OVERRIDE"
+        assert row["payload"]["entity_id"] == "OVERRIDE"
 
     def test_non_research_agent_no_auto_derive(self, tracer, mock_supabase):
         query = make_query([])
@@ -105,7 +105,7 @@ class TestLogToolCall:
         tracer.log_tool_call("market_shadow", "get_spy_price", {}, {})
 
         row = query.insert.call_args[0][0]
-        assert row["entity_id"] is None
+        assert row["payload"]["entity_id"] is None
 
     def test_sequence_increments_per_call(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -122,7 +122,7 @@ class TestLogToolCall:
         tracer.log_tool_call("market", "get_vix", {}, 18.4)
 
         row = query.insert.call_args[0][0]
-        assert row["tool_output"] == {"value": 18.4}
+        assert row["payload"]["tool_output"] == {"value": 18.4}
 
 
 # ── log_agent_message ──────────────────────────────────────────────────────────
@@ -138,11 +138,11 @@ class TestLogAgentMessage:
         row = query.insert.call_args[0][0]
         assert row["step_type"] == "agent_message"
         assert row["agent"] == "market"
-        assert row["agent_reasoning"] == "VIX at 18 — GO"
+        assert row["payload"]["agent_reasoning"] == "VIX at 18 — GO"
         assert row["outcome"] == "go"
         assert row["tokens_input"] == 400
         assert row["tokens_output"] == 80
-        assert row["model"] == "claude-haiku-4-5-20251001"
+        assert row["payload"]["model"] == "claude-haiku-4-5-20251001"
 
     def test_returns_span_id(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -162,14 +162,14 @@ class TestLogDecision:
         row = query.insert.call_args[0][0]
         assert row["step_type"] == "decision"
         assert row["outcome"] == "converged"
-        assert row["tool_output"] == {"trades": 3}
+        assert row["payload"]["tool_output"] == {"trades": 3}
 
     def test_no_entity_id_on_decision(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
         tracer.log_decision("orchestrator", "skip_propagated")
         row = query.insert.call_args[0][0]
-        assert row["entity_id"] is None
+        assert row["payload"]["entity_id"] is None
 
 
 # ── log_error ─────────────────────────────────────────────────────────────────
@@ -229,7 +229,7 @@ class TestLogTokens:
 # ── close_session ─────────────────────────────────────────────────────────────
 
 class TestCloseSession:
-    def test_writes_c_sessions_row(self, tracer, mock_supabase):
+    def test_writes_ag_sessions_row(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
 
@@ -245,16 +245,15 @@ class TestCloseSession:
         assert query.update.called
         row = query.update.call_args[0][0]
         assert row["terminal_reason"] == "converged"
-        assert row["trades_proposed"] == 3
-        assert row["trades_approved"] == 2
-        assert row["trades_executed"] == 2
-        assert row["retry_triggered"] is False
+        assert row["metadata"]["trades_proposed"] == 3
+        assert row["metadata"]["trades_approved"] == 2
+        assert row["metadata"]["trades_executed"] == 2
+        assert row["metadata"]["retry_triggered"] is False
         assert row["total_tokens_input"] == 400
         assert row["total_tokens_output"] == 80
 
     def test_update_uses_session_id_filter(self, tracer, mock_supabase):
         """close_session must filter by id, not embed it in the row."""
-        from unittest.mock import call
         query = make_query([])
         mock_supabase.table.return_value = query
         tracer.close_session("converged")
@@ -278,19 +277,19 @@ class TestCloseSession:
         assert "total_cost_usd"      not in row
         assert "total_tokens_input"  not in row
         assert "total_tokens_output" not in row
-        assert "cost_breakdown"      not in row
-        assert "agents_invoked"      not in row
+        assert "cost_breakdown"      not in row.get("metadata", {})
+        assert "agents_invoked"      not in row.get("metadata", {})
 
     def test_no_tokens_still_writes_terminal_reason(self, tracer, mock_supabase):
-        """EOD-style close with no tokens still commits terminal_reason and completed_at."""
+        """EOD-style close with no tokens still commits terminal_reason and ended_at."""
         query = make_query([])
         mock_supabase.table.return_value = query
         tracer.close_session("eod_complete", trades_executed=2)
         assert query.update.called
         row = query.update.call_args[0][0]
         assert row["terminal_reason"] == "eod_complete"
-        assert row["trades_executed"] == 2
-        assert "completed_at" in row
+        assert row["metadata"]["trades_executed"] == 2
+        assert "ended_at" in row
 
     def test_cost_is_positive_float(self, tracer, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -305,7 +304,7 @@ class TestCloseSession:
         tracer.log_tokens("research", _usage(3000, 600))
         tracer.close_session("converged")
         row = mock_supabase.table.return_value.update.call_args[0][0]
-        breakdown = row["cost_breakdown"]
+        breakdown = row["metadata"]["cost_breakdown"]
         assert "market"   in breakdown
         assert "research" in breakdown
         assert breakdown["market"]["cache_read"] == 200
@@ -325,7 +324,7 @@ class TestCloseSession:
         tracer.log_decision("orchestrator", "converged")
         tracer.close_session("converged")
         row = mock_supabase.table.return_value.update.call_args[0][0]
-        assert row["total_steps"] == 3
+        assert row["metadata"]["total_steps"] == 3
 
 
 # ── flush_cost_breakdown ──────────────────────────────────────────────────────
@@ -340,8 +339,8 @@ class TestFlushCostBreakdown:
 
         assert query.update.called
         payload = query.update.call_args[0][0]
-        assert "market_shadow" in payload["cost_breakdown"]
-        assert payload["cost_breakdown"]["market_shadow"]["cost_usd"] > 0
+        assert "market_shadow" in payload["metadata"]["cost_breakdown"]
+        assert payload["metadata"]["cost_breakdown"]["market_shadow"]["cost_usd"] > 0
         assert payload["total_cost_usd"] > 0
 
     def test_flush_is_cumulative_across_agents(self, tracer, mock_supabase):
@@ -353,8 +352,8 @@ class TestFlushCostBreakdown:
         tracer.flush_cost_breakdown()
 
         payload = query.update.call_args[0][0]
-        assert "market_shadow" in payload["cost_breakdown"]
-        assert "research_NVDA" in payload["cost_breakdown"]
+        assert "market_shadow" in payload["metadata"]["cost_breakdown"]
+        assert "research_NVDA" in payload["metadata"]["cost_breakdown"]
 
     def test_flush_does_nothing_when_no_tokens(self, tracer, mock_supabase):
         query = make_query([])
@@ -373,7 +372,7 @@ class TestFlushCostBreakdown:
 
         payload = query.update.call_args[0][0]
         # research uses Haiku at $0.80/M input tokens
-        assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
+        assert payload["metadata"]["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
 
     def test_close_session_includes_all_accumulated_agents(self, tracer, mock_supabase):
         query = make_query([])
@@ -385,8 +384,8 @@ class TestFlushCostBreakdown:
         tracer.close_session("converged")
 
         update_payload = query.update.call_args[0][0]
-        assert "market_shadow" in update_payload["cost_breakdown"]
-        assert "research_NVDA" in update_payload["cost_breakdown"]
+        assert "market_shadow" in update_payload["metadata"]["cost_breakdown"]
+        assert "research_NVDA" in update_payload["metadata"]["cost_breakdown"]
 
 
 # ── ingest_otel_span ──────────────────────────────────────────────────────────

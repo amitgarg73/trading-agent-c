@@ -59,11 +59,11 @@ class TestNormalizeOtelSpan:
 
     def test_tool_input_extracted_from_flat_attributes(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["tool_input"] == {"ticker": "AAPL"}
+        assert row["payload"]["tool_input"] == {"ticker": "AAPL"}
 
     def test_tool_output_extracted_from_flat_attributes(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["tool_output"] == {"signal": "neutral"}
+        assert row["payload"]["tool_output"] == {"signal": "neutral"}
 
     def test_step_type_tool_call_when_tool_name_present(self):
         row = normalize_otel_span(_make_span(), 1)
@@ -96,62 +96,64 @@ class TestNormalizeOtelSpan:
 
     def test_entity_id_from_ticker_input(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["entity_id"] == "AAPL"
+        assert row["payload"]["entity_id"] == "AAPL"
 
     def test_entity_id_none_when_no_ticker(self):
         span = _make_span()
         del span["attributes"]["tool.input.ticker"]
         row = normalize_otel_span(span, 1)
-        assert row["entity_id"] is None
+        assert row["payload"]["entity_id"] is None
 
     def test_span_id_from_span(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["span_id"] == "def456"
+        assert row["payload"]["span_id"] == "def456"
 
     def test_span_id_generated_when_missing(self):
         span = _make_span()
         del span["spanId"]
         row = normalize_otel_span(span, 1)
-        assert len(row["span_id"]) == 36
+        assert len(row["payload"]["span_id"]) == 36
 
     def test_parent_span_id_preserved(self):
         span = _make_span(parentSpanId="parent-xyz")
         row = normalize_otel_span(span, 1)
-        assert row["parent_span_id"] == "parent-xyz"
+        assert row["payload"]["parent_span_id"] == "parent-xyz"
 
     def test_sequence_stored(self):
         row = normalize_otel_span(_make_span(), 7)
-        assert row["sequence"] == 7
+        assert row["payload"]["sequence"] == 7
 
     def test_model_extracted(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["model"] == "claude-haiku-4-5-20251001"
+        assert row["payload"]["model"] == "claude-haiku-4-5-20251001"
 
     def test_tool_input_none_when_no_tool_input_attrs(self):
         span = _make_span()
         attrs = {k: v for k, v in span["attributes"].items() if not k.startswith("tool.input.")}
         span["attributes"] = attrs
         row = normalize_otel_span(span, 1)
-        assert row["tool_input"] is None
+        assert row["payload"]["tool_input"] is None
 
     def test_tool_output_none_when_no_tool_output_attrs(self):
         span = _make_span()
         attrs = {k: v for k, v in span["attributes"].items() if not k.startswith("tool.output.")}
         span["attributes"] = attrs
         row = normalize_otel_span(span, 1)
-        assert row["tool_output"] is None
+        assert row["payload"]["tool_output"] is None
 
     def test_multiple_tool_input_fields(self):
         span = _make_span()
         span["attributes"]["tool.input.limit"] = 10
         row = normalize_otel_span(span, 1)
-        assert row["tool_input"]["ticker"] == "AAPL"
-        assert row["tool_input"]["limit"] == 10
+        assert row["payload"]["tool_input"]["ticker"] == "AAPL"
+        assert row["payload"]["tool_input"]["limit"] == 10
 
     def test_required_keys_present(self):
         row = normalize_otel_span(_make_span(), 1)
-        for key in ("session_id", "span_id", "agent", "step_type", "sequence", "date", "created_at"):
+        for key in ("session_id", "agent", "step_type", "created_at"):
             assert key in row
+        for key in ("span_id", "sequence", "date"):
+            assert key in row["payload"]
 
 
 # ── normalize_log_line ────────────────────────────────────────────────────────
@@ -204,30 +206,32 @@ class TestNormalizeLogLine:
             'event=summary finding="momentum works" sample_size=5 confidence=0.8'
         )
         row = normalize_log_line(line, 1)
-        assert row["tool_output"]["finding"] == "momentum works"
-        assert row["tool_output"]["sample_size"] == "5"
+        assert row["payload"]["tool_output"]["finding"] == "momentum works"
+        assert row["payload"]["tool_output"]["sample_size"] == "5"
 
     def test_tool_output_none_when_no_finding(self):
         row = normalize_log_line(self._SAMPLE, 1)
-        assert row["tool_output"] is None
+        assert row["payload"]["tool_output"] is None
 
     def test_sequence_stored(self):
         row = normalize_log_line(self._SAMPLE, 5)
-        assert row["sequence"] == 5
+        assert row["payload"]["sequence"] == 5
 
     def test_entity_from_kv(self):
         line = '2026-05-27T20:15:04Z [learning_agent] session=sess-abc event=tool_call entity=AAPL'
         row = normalize_log_line(line, 1)
-        assert row["entity_id"] == "AAPL"
+        assert row["payload"]["entity_id"] == "AAPL"
 
     def test_entity_none_when_missing(self):
         row = normalize_log_line(self._SAMPLE, 1)
-        assert row["entity_id"] is None
+        assert row["payload"]["entity_id"] is None
 
     def test_required_keys_present(self):
         row = normalize_log_line(self._SAMPLE, 1)
-        for key in ("session_id", "span_id", "agent", "step_type", "sequence", "date", "created_at"):
+        for key in ("session_id", "agent", "step_type", "created_at"):
             assert key in row
+        for key in ("span_id", "sequence", "date"):
+            assert key in row["payload"]
 
     def test_created_at_matches_timestamp_in_line(self):
         row = normalize_log_line(self._SAMPLE, 1)

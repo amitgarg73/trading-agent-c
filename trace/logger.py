@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime
 from typing import Any, Optional
 from uuid import uuid4
 
 import pytz
+
+_TENANT_ID = os.environ.get("TENANT_ID", "")
 
 # Token cost per million tokens (Anthropic pricing, mid-2026)
 # cache_read = prompt cache hit; cache_write = cache creation (first write)
@@ -32,7 +35,7 @@ def _estimate_cost(
 
 class TraceLogger:
     """
-    Writes structured trace rows to c_traces and a summary row to c_sessions.
+    Writes structured trace rows to ag_traces and a summary row to ag_sessions.
 
     Usage:
         tracer = TraceLogger(session_id)
@@ -42,8 +45,9 @@ class TraceLogger:
         tracer.close_session("converged", trades_proposed=3, trades_approved=2, trades_executed=2)
     """
 
-    def __init__(self, session_id: str):
+    def __init__(self, session_id: str, workflow_id: Optional[str] = None):
         self.session_id = session_id
+        self._workflow_id = workflow_id
         self._sequence = 0
         self._agent_spans: dict[str, str] = {}   # agent -> current span_id
         self._session_span_id = str(uuid4())
@@ -146,7 +150,7 @@ class TraceLogger:
         """
         Accumulate token counts for an agent. `usage` is an Anthropic Usage object
         or a plain dict. Captures cache tokens for accurate cost calculation.
-        Written to c_sessions at close_session().
+        Written to ag_sessions at close_session().
         """
         if hasattr(usage, "input_tokens"):
             inp   = usage.input_tokens
@@ -168,21 +172,21 @@ class TraceLogger:
 
     def ingest_otel_span(self, span: dict) -> None:
         """
-        Normalize an OTel span emitted by a TypeScript agent and insert into c_traces.
+        Normalize an OTel span emitted by a TypeScript agent and insert into ag_traces.
         Called by the session driver for each OTEL_SPAN: line from subprocess stdout.
         """
         from trace.normalizer import normalize_otel_span
         self._sequence += 1
-        row = normalize_otel_span(span, self._sequence, self.session_id)
+        row = normalize_otel_span(span, self._sequence, self.session_id, _TENANT_ID)
         if row:
             from core.db import get_client
-            get_client().table("c_traces").insert(row).execute()
+            get_client().table("ag_traces").insert(row).execute()
 
     def flush_cost_breakdown(self) -> None:
         """
-        Upsert the current accumulated cost_breakdown and total_cost_usd to c_sessions
-        without closing the session. Call after each major agent completes so partial
-        cost is captured even if the process is killed before close_session().
+        Upsert the current accumulated cost breakdown to ag_sessions without closing
+        the session. Call after each major agent completes so partial cost is captured
+        even if the process is killed before close_session().
         """
         if not self._tokens:
             return
@@ -206,9 +210,9 @@ class TraceLogger:
                 "cost_usd":    round(cost, 6),
             }
         total_cost = sum(a["cost_usd"] for a in agent_costs.values())
-        get_client().table("c_sessions").update({
-            "cost_breakdown":  agent_costs,
-            "total_cost_usd":  round(total_cost, 6),
+        get_client().table("ag_sessions").update({
+            "metadata":       {"cost_breakdown": agent_costs},
+            "total_cost_usd": round(total_cost, 6),
         }).eq("id", self.session_id).execute()
 
     def close_session(
@@ -222,10 +226,10 @@ class TraceLogger:
         risk_rejections: int = 0,
         retry_triggered: bool = False,
     ) -> None:
-        """Finalize the c_sessions row for this session.
+        """Finalize the ag_sessions row for this session.
 
         Uses update() so callers that attach to an existing session (EOD, intraday)
-        never overwrite started_at, cost_breakdown, or token counts set by premarket.
+        never overwrite started_at or token counts set by premarket.
         Cost/token fields are only written when this TraceLogger actually logged tokens.
         """
         from core.db import get_client
@@ -233,16 +237,22 @@ class TraceLogger:
         completed_at = datetime.utcnow()
         latency_ms   = int((completed_at - self._started_at).total_seconds() * 1000)
 
+        metadata: dict[str, Any] = {
+            "date":             date.today().isoformat(),
+            "total_steps":      self._sequence,
+            "trades_proposed":  trades_proposed,
+            "trades_approved":  trades_approved,
+            "trades_executed":  trades_executed,
+            "risk_rejections":  risk_rejections,
+            "retry_triggered":  retry_triggered,
+            "total_latency_ms": latency_ms,
+        }
+
         row: dict[str, Any] = {
-            "date":            date.today().isoformat(),
-            "total_steps":     self._sequence,
             "terminal_reason": terminal_reason,
-            "completed_at":    completed_at.isoformat(),
-            "trades_proposed": trades_proposed,
-            "trades_approved": trades_approved,
-            "trades_executed": trades_executed,
-            "risk_rejections": risk_rejections,
-            "retry_triggered": retry_triggered,
+            "ended_at":        completed_at.isoformat(),
+            "status":          "completed",
+            "metadata":        metadata,
         }
 
         if self._tokens:
@@ -268,28 +278,31 @@ class TraceLogger:
             total_input  = sum(v["input"]    for v in self._tokens.values())
             total_output = sum(v["output"]   for v in self._tokens.values())
             row.update({
-                "agents_invoked":      agents_invoked or list(self._tokens.keys()),
-                "loop_iterations":     loop_iterations,
-                "total_tool_calls":    self._count_tool_calls(),
                 "total_tokens_input":  total_input,
                 "total_tokens_output": total_output,
                 "total_cost_usd":      round(total_cost, 6),
-                "cost_breakdown":      agent_costs,
-                "total_latency_ms":    latency_ms,
+            })
+            metadata.update({
+                "agents_invoked":   agents_invoked or list(self._tokens.keys()),
+                "loop_iterations":  loop_iterations,
+                "total_tool_calls": self._count_tool_calls(),
+                "cost_breakdown":   agent_costs,
             })
 
-        get_client().table("c_sessions").update(row).eq("id", self.session_id).execute()
+        get_client().table("ag_sessions").update(row).eq("id", self.session_id).execute()
 
     # ── Private ────────────────────────────────────────────────────────────────
 
     def _insert_session_stub(self) -> None:
-        """Upsert a minimal c_sessions row so c_traces FK is satisfied from the start."""
+        """Upsert a minimal ag_sessions row so ag_traces FK is satisfied from the start."""
         from core.db import get_client
-        get_client().table("c_sessions").upsert({
+        get_client().table("ag_sessions").upsert({
             "id":              self.session_id,
-            "date":            date.today().isoformat(),
-            "terminal_reason": "in_progress",
+            "tenant_id":       _TENANT_ID,
+            "workflow_id":     self._workflow_id,
             "started_at":      self._started_at.isoformat(),
+            "status":          "in_progress",
+            "terminal_reason": "in_progress",
         }, on_conflict="id", ignore_duplicates=True).execute()
 
     def _write(self, fields: dict) -> str:
@@ -303,28 +316,48 @@ class TraceLogger:
         if entity_id is None and "_" in agent and agent.split("_", 1)[0] == "research":
             entity_id = agent.split("_", 1)[1].upper()
 
-        row: dict[str, Any] = {
-            "session_id":      self.session_id,
-            "span_id":         span_id,
-            "parent_span_id":  self._agent_spans.get(agent),
-            "entity_id":       entity_id,
-            "date":            date.today().isoformat(),
-            "sequence":        self._sequence,
-            "agent":           agent,
-            "step_type":       fields.get("step_type"),
-            "tool_name":       fields.get("tool_name"),
-            "tool_input":      fields.get("tool_input"),
-            "tool_output":     fields.get("tool_output"),
-            "agent_reasoning": fields.get("agent_reasoning"),
-            "outcome":         fields.get("outcome"),
-            "tokens_input":    fields.get("tokens_input", 0),
-            "tokens_output":   fields.get("tokens_output", 0),
-            "latency_ms":      fields.get("latency_ms", 0),
-            "model":           fields.get("model"),
-            "error":           fields.get("error"),
-            "created_at":      datetime.utcnow().isoformat(),
+        tokens_input  = fields.get("tokens_input", 0)
+        tokens_output = fields.get("tokens_output", 0)
+        model         = fields.get("model")
+        cost_usd: Optional[float] = None
+        if tokens_input or tokens_output:
+            cost_usd = round(_estimate_cost(
+                model or _agent_model(agent),
+                tokens_input,
+                tokens_output,
+            ), 8)
+
+        payload: dict[str, Any] = {
+            "span_id":        span_id,
+            "parent_span_id": self._agent_spans.get(agent),
+            "entity_id":      entity_id,
+            "date":           date.today().isoformat(),
+            "sequence":       self._sequence,
+            "model":          model,
         }
-        get_client().table("c_traces").insert(row).execute()
+        if fields.get("tool_input") is not None:
+            payload["tool_input"] = fields["tool_input"]
+        if fields.get("tool_output") is not None:
+            payload["tool_output"] = fields["tool_output"]
+        if fields.get("agent_reasoning") is not None:
+            payload["agent_reasoning"] = fields["agent_reasoning"]
+
+        row: dict[str, Any] = {
+            "tenant_id":    _TENANT_ID,
+            "session_id":   self.session_id,
+            "agent":        agent,
+            "step_type":    fields.get("step_type"),
+            "tool_name":    fields.get("tool_name"),
+            "outcome":      fields.get("outcome"),
+            "error":        fields.get("error"),
+            "latency_ms":   fields.get("latency_ms", 0),
+            "tokens_input": tokens_input,
+            "tokens_output": tokens_output,
+            "cost_usd":     cost_usd,
+            "payload":      payload,
+            "created_at":   datetime.utcnow().isoformat(),
+        }
+        get_client().table("ag_traces").insert(row).execute()
         return span_id
 
     def _count_tool_calls(self) -> int:

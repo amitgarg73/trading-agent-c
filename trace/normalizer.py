@@ -6,11 +6,16 @@ from typing import Any, Optional
 from uuid import uuid4
 
 
-# ── Format 2: OTel span → c_traces row ────────────────────────────────────────
+# ── Format 2: OTel span → ag_traces row ───────────────────────────────────────
 
-def normalize_otel_span(span: dict, sequence: int, session_id: Optional[str] = None) -> Optional[dict]:
+def normalize_otel_span(
+    span: dict,
+    sequence: int,
+    session_id: Optional[str] = None,
+    tenant_id: str = "",
+) -> Optional[dict]:
     """
-    Convert an OTel-compatible span (emitted by TypeScript agents) to a c_traces row.
+    Convert an OTel-compatible span (emitted by TypeScript agents) to an ag_traces row.
     Returns None if the span is missing required fields.
 
     Required attributes: agent.name, agent.language, session.id (or session_id arg), model
@@ -54,30 +59,35 @@ def normalize_otel_span(span: dict, sequence: int, session_id: Optional[str] = N
     # entity_id from tool input ticker if present
     entity_id = tool_input.get("ticker") or attrs.get("tool.input.ticker")
 
+    payload: dict[str, Any] = {
+        "span_id":        span.get("spanId", str(uuid4())),
+        "parent_span_id": span.get("parentSpanId"),
+        "entity_id":      entity_id,
+        "date":           datetime.utcnow().date().isoformat(),
+        "sequence":       sequence,
+        "model":          attrs.get("model"),
+        "tool_input":     tool_input or None,
+        "tool_output":    tool_output or None,
+    }
+
     return {
-        "session_id":      sid,
-        "span_id":         span.get("spanId", str(uuid4())),
-        "parent_span_id":  span.get("parentSpanId"),
-        "entity_id":       entity_id,
-        "date":            datetime.utcnow().date().isoformat(),
-        "sequence":        sequence,
-        "agent":           agent,
-        "step_type":       step_type,
-        "tool_name":       tool_name,
-        "tool_input":      tool_input or None,
-        "tool_output":     tool_output or None,
-        "agent_reasoning": None,
-        "outcome":         attrs.get("outcome"),
-        "tokens_input":    int(attrs.get("tokens.input", 0)),
-        "tokens_output":   int(attrs.get("tokens.output", 0)),
-        "latency_ms":      latency_ms,
-        "model":           attrs.get("model"),
-        "error":           attrs.get("error"),
-        "created_at":      datetime.utcnow().isoformat(),
+        "tenant_id":    tenant_id,
+        "session_id":   sid,
+        "agent":        agent,
+        "step_type":    step_type,
+        "tool_name":    tool_name,
+        "outcome":      attrs.get("outcome"),
+        "error":        attrs.get("error"),
+        "latency_ms":   latency_ms,
+        "tokens_input": int(attrs.get("tokens.input", 0)),
+        "tokens_output": int(attrs.get("tokens.output", 0)),
+        "cost_usd":     None,
+        "payload":      payload,
+        "created_at":   datetime.utcnow().isoformat(),
     }
 
 
-# ── Format 3: Structured log line → c_traces row ──────────────────────────────
+# ── Format 3: Structured log line → ag_traces row ─────────────────────────────
 
 # Pattern: 2026-05-27T20:15:04Z [learning_agent] session=uuid key=value ...
 _LOG_PATTERN = re.compile(
@@ -87,9 +97,9 @@ _LOG_PATTERN = re.compile(
 _KV_PATTERN = re.compile(r'(\w+)=("(?:[^"\\]|\\.)*"|[^\s]+)')
 
 
-def normalize_log_line(line: str, sequence: int) -> Optional[dict]:
+def normalize_log_line(line: str, sequence: int, tenant_id: str = "") -> Optional[dict]:
     """
-    Convert a structured log line from the Learning Agent to a c_traces row.
+    Convert a structured log line from the Learning Agent to an ag_traces row.
     Returns None if the line does not match the expected format.
     """
     m = _LOG_PATTERN.match(line.strip())
@@ -116,24 +126,28 @@ def normalize_log_line(line: str, sequence: int) -> Optional[dict]:
             if k in kv
         }
 
+    payload: dict[str, Any] = {
+        "span_id":        str(uuid4()),
+        "parent_span_id": None,
+        "entity_id":      kv.get("entity"),
+        "date":           datetime.utcnow().date().isoformat(),
+        "sequence":       sequence,
+        "model":          "claude-sonnet-4-6",
+        "tool_output":    tool_output,
+    }
+
     return {
-        "session_id":      sid,
-        "span_id":         str(uuid4()),
-        "parent_span_id":  None,
-        "entity_id":       kv.get("entity"),
-        "date":            datetime.utcnow().date().isoformat(),
-        "sequence":        sequence,
-        "agent":           agent,
-        "step_type":       step_type,
-        "tool_name":       kv.get("tool"),
-        "tool_input":      None,
-        "tool_output":     tool_output,
-        "agent_reasoning": kv.get("finding"),
-        "outcome":         outcome,
-        "tokens_input":    0,
-        "tokens_output":   0,
-        "latency_ms":      0,
-        "model":           "claude-sonnet-4-6",
-        "error":           None,
-        "created_at":      ts,
+        "tenant_id":    tenant_id,
+        "session_id":   sid,
+        "agent":        agent,
+        "step_type":    step_type,
+        "tool_name":    kv.get("tool"),
+        "outcome":      outcome,
+        "error":        None,
+        "latency_ms":   0,
+        "tokens_input": 0,
+        "tokens_output": 0,
+        "cost_usd":     None,
+        "payload":      payload,
+        "created_at":   ts,
     }
