@@ -7,6 +7,16 @@ on:
     branches: [main]
 
 jobs:
+  lint-workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run actionlint
+        uses: rhysd/actionlint@v1
+
   python-tests:
     name: Python tests
     runs-on: ubuntu-latest
