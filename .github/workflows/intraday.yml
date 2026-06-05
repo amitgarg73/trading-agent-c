@@ -40,6 +40,7 @@ jobs:
           ALPACA_API_SECRET_KEY_C: ${{ secrets.ALPACA_API_SECRET_KEY_C }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          TENANT_ID: ${{ secrets.TENANT_ID_C }}
           NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
