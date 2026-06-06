@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 from datetime import date
 from typing import Optional
@@ -14,6 +15,7 @@ from agents.research_agent import run_research_agent
 from agents.risk_agent import run_risk_agent
 from agents.scanner_agent import run_scanner_agent
 from core.params import StrategyParams
+from evals.judge import evaluate_session_outputs
 from trace.logger import TraceLogger
 
 _MODEL = "claude-sonnet-4-6"
@@ -207,6 +209,8 @@ def run_premarket_pipeline(
             result["session_meta"]["terminal_reason"],
             detail={"trades": len(result["trades"])},
         )
+        _run_semantic_evals(tracer.session_id, market_report, scanner_result,
+                            trade_proposals, risk_verdicts, result)
         return result
 
     # CAUTION days: suppress retry — market already signaled reduced risk appetite.
@@ -217,6 +221,8 @@ def run_premarket_pipeline(
         result["session_meta"]["terminal_reason"] = "caution_no_retry"
         result["_v2_market_report"] = market_report
         tracer.log_decision("orchestrator", "caution_no_retry", detail={"trades": len(result.get("trades", []))})
+        _run_semantic_evals(tracer.session_id, market_report, scanner_result,
+                            trade_proposals, risk_verdicts, result)
         return result
 
     # Step 5: One retry on fixable rejections.
@@ -270,4 +276,44 @@ def run_premarket_pipeline(
         result["session_meta"]["terminal_reason"],
         detail={"trades": len(result["trades"]), "retry": True},
     )
+
+    _run_semantic_evals(tracer.session_id, market_report, scanner_result,
+                        trade_proposals_retry, risk_verdicts_retry, result)
     return result
+
+
+def _run_semantic_evals(
+    session_id: str,
+    market_report: dict,
+    scanner_result: dict,
+    trade_proposals: dict,
+    risk_verdicts: dict,
+    orchestrator_result: dict,
+) -> None:
+    """
+    Run LLM-as-judge after all agents complete. Scores are written to ag_evals.
+    Non-blocking on failure — exceptions are logged, session is not affected.
+    Agent names must match ag_eval_configs.agent values configured in Argus.
+    """
+    agent_outputs = {
+        "market":       json.dumps(market_report,       indent=2),
+        "scanner":      json.dumps(scanner_result,      indent=2),
+        "research":     json.dumps(trade_proposals,     indent=2),
+        "risk":         json.dumps(risk_verdicts,        indent=2),
+        "orchestrator": json.dumps(
+            {k: v for k, v in orchestrator_result.items() if not k.startswith("_")},
+            indent=2,
+        ),
+    }
+    def _run() -> None:
+        try:
+            results = evaluate_session_outputs(session_id, agent_outputs)
+            if results:
+                total  = sum(len(v) for v in results.values())
+                passed = sum(1 for v in results.values() for r in v if r["passed"])
+                print(f"[judge] {passed}/{total} criteria passed across {len(results)} agents")
+        except Exception as exc:
+            print(f"[judge] semantic eval skipped: {exc}")
+
+    threading.Thread(target=_run, daemon=True, name=f"judge-{session_id[:8]}").start()
+    print(f"[judge] semantic eval started in background for session {session_id[:8]}")
