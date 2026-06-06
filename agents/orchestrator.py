@@ -156,6 +156,10 @@ def run_premarket_pipeline(
             "orchestrator", "skip_propagated",
             detail={"skip_reason": market_report.get("skip_reason")},
         )
+        # Still evaluate market agent quality on skip sessions
+        _run_semantic_evals(
+            tracer.session_id, market_report, {}, {}, {}, {"terminal_reason": "skip_propagated"},
+        )
         out = _empty_session_output(market_report, "skip_propagated")
         out["_v2_market_report"] = market_report
         return out
@@ -295,15 +299,18 @@ def _run_semantic_evals(
     Non-blocking on failure — exceptions are logged, session is not affected.
     Agent names must match ag_eval_configs.agent values configured in Argus.
     """
+    # Only evaluate agents that actually ran and produced non-trivial output
+    candidates = {
+        "market":       market_report,
+        "scanner":      scanner_result,
+        "research":     trade_proposals,
+        "risk":         risk_verdicts,
+        "orchestrator": {k: v for k, v in orchestrator_result.items() if not k.startswith("_")},
+    }
     agent_outputs = {
-        "market":       json.dumps(market_report,       indent=2),
-        "scanner":      json.dumps(scanner_result,      indent=2),
-        "research":     json.dumps(trade_proposals,     indent=2),
-        "risk":         json.dumps(risk_verdicts,        indent=2),
-        "orchestrator": json.dumps(
-            {k: v for k, v in orchestrator_result.items() if not k.startswith("_")},
-            indent=2,
-        ),
+        name: json.dumps(output, indent=2)
+        for name, output in candidates.items()
+        if output and len(output) > 1
     }
     def _run() -> None:
         try:

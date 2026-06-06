@@ -107,10 +107,16 @@ def _score_criterion(
     )
     raw = next((b.text for b in response.content if hasattr(b, "text")), "{}")
 
+    # Strip markdown code fences if present
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        stripped = stripped.split("\n", 1)[-1]
+        stripped = stripped.rsplit("```", 1)[0].strip()
+
     try:
-        verdict = json.loads(raw)
+        verdict = json.loads(stripped)
     except (json.JSONDecodeError, ValueError):
-        verdict = {"score": 0, "passed": False, "reasoning": "Judge parse error"}
+        verdict = {"score": 0, "passed": False, "reasoning": f"Judge parse error: {raw[:100]}"}
 
     raw_score      = max(0.0, min(10.0, float(verdict.get("score", 0))))
     score_norm     = round(raw_score / 10.0, 3)

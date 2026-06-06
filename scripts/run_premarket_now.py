@@ -14,8 +14,14 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
+import threading
 from datetime import date
 from uuid import uuid4
+
+# Load .env before any module-level os.environ reads (e.g. trace/logger.py)
+from dotenv import load_dotenv
+load_dotenv()
 
 # ── Args ─────────────────────────────────────────────────────────────────────
 
@@ -78,7 +84,7 @@ try:
     _sc_rows = (
         get_client()
         .table("ag_traces")
-        .select("tool_output")
+        .select("payload")
         .eq("session_id", session_id)
         .eq("agent", "scanner")
         .eq("step_type", "decision")
@@ -87,7 +93,8 @@ try:
     )
     scanner_detail = {}
     if _sc_rows:
-        raw = _sc_rows[0].get("tool_output") or {}
+        payload = _sc_rows[0].get("payload") or {}
+        raw = payload.get("tool_output") or payload
         scanner_detail = raw if isinstance(raw, dict) else (json.loads(raw) if isinstance(raw, str) else {})
 
     print("\n" + "=" * 60)
@@ -109,6 +116,14 @@ try:
         print(f"    dropped:    {scanner_detail.get('dropped_count', '?')}")
         print(f"    rationale:  {scanner_detail.get('scan_rationale', '?')}")
     print("=" * 60)
+
+    # Wait for background judge thread to finish before exiting
+    judge_threads = [t for t in threading.enumerate() if t.name.startswith("judge-")]
+    if judge_threads:
+        print(f"\n[validate] Waiting for judge thread ({judge_threads[0].name})...")
+        for t in judge_threads:
+            t.join(timeout=60)
+        print("[validate] Judge thread done.")
 
 except Exception as e:
     tracer.close_session(terminal_reason="error")

@@ -7,7 +7,19 @@ from uuid import uuid4
 
 import pytz
 
-_TENANT_ID = os.environ.get("TENANT_ID", "")
+def _get_tenant_id() -> str:
+    tid = os.environ.get("TENANT_ID", "")
+    if not tid:
+        # Try loading .env lazily (local runs where load_dotenv wasn't called first)
+        try:
+            from dotenv import load_dotenv as _ld
+            _ld()
+            tid = os.environ.get("TENANT_ID", "")
+        except ImportError:
+            pass
+    return tid
+
+_TENANT_ID = _get_tenant_id()
 
 # Token cost per million tokens (Anthropic pricing, mid-2026)
 # cache_read = prompt cache hit; cache_write = cache creation (first write)
