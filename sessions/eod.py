@@ -361,6 +361,10 @@ def main() -> None:
     tracer.log_decision("orchestrator", "performance_saved",
                         detail={"pnl": perf.realized_pnl, "trades": perf.trades_total})
 
+    # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
+    from evals.outcomes import write_eod_outcome_metrics
+    write_eod_outcome_metrics(session_id, perf.realized_pnl, perf.win_rate, perf.trades_total)
+
     # Principal protection check
     protection = check_protection_status()
     if protection.tier and protection.tier > 0:
