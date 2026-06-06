@@ -11,6 +11,7 @@ from core.agent_config import is_trading_day, load_agent_config
 from core.alerts import send_alert
 from core.params import load_params
 from core.protection import check_protection_status
+from evals.business import write_premarket_outcome_evals
 from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
@@ -255,6 +256,12 @@ def main() -> None:
             summary = f"{len(trades)} trade(s) executed: {tickers}"
         else:
             summary = f"No trades. {terminal}"
+        write_premarket_outcome_evals(
+            session_id=session_id,
+            trades_proposed=len(result.get("trades", [])),
+            trades_approved=len(trades),
+            terminal_reason=terminal,
+        )
         tracer.close_session(
             terminal_reason=terminal,
             trades_proposed=len(result.get("trades", [])),

@@ -35,6 +35,7 @@ args = parser.parse_args()
 from agents.orchestrator import run_premarket_pipeline
 from core.db import get_client
 from core.params import load_params
+from evals.business import write_premarket_outcome_evals
 from trace.logger import TraceLogger
 
 # ── Scanner ───────────────────────────────────────────────────────────────────
@@ -72,6 +73,12 @@ try:
     terminal = result["session_meta"]["terminal_reason"]
     meta     = result["session_meta"]
 
+    write_premarket_outcome_evals(
+        session_id=session_id,
+        trades_proposed=len(result.get("trades", [])),
+        trades_approved=len(trades),
+        terminal_reason=terminal,
+    )
     tracer.close_session(
         terminal_reason=terminal,
         trades_proposed=len(result.get("trades", [])),
