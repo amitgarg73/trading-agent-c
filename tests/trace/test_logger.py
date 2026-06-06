@@ -102,7 +102,7 @@ class TestLogToolCall:
         query = make_query([])
         mock_supabase.table.return_value = query
 
-        tracer.log_tool_call("market_shadow", "get_spy_price", {}, {})
+        tracer.log_tool_call("market", "get_spy_price", {}, {})
 
         row = query.insert.call_args[0][0]
         assert row["payload"]["entity_id"] is None
@@ -379,26 +379,26 @@ class TestFlushCostBreakdown:
     def test_writes_cost_breakdown_mid_session(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
-        tracer.log_tokens("market_shadow", _usage(3000, 900))
+        tracer.log_tokens("market", _usage(3000, 900))
 
         tracer.flush_cost_breakdown()
 
         assert query.update.called
         payload = query.update.call_args[0][0]
-        assert "market_shadow" in payload["metadata"]["cost_breakdown"]
-        assert payload["metadata"]["cost_breakdown"]["market_shadow"]["cost_usd"] > 0
+        assert "market" in payload["metadata"]["cost_breakdown"]
+        assert payload["metadata"]["cost_breakdown"]["market"]["cost_usd"] > 0
         assert payload["total_cost_usd"] > 0
 
     def test_flush_is_cumulative_across_agents(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
-        tracer.log_tokens("market_shadow", _usage(3000, 900))
+        tracer.log_tokens("market", _usage(3000, 900))
         tracer.log_tokens("research_NVDA", _usage(10000, 2000))
 
         tracer.flush_cost_breakdown()
 
         payload = query.update.call_args[0][0]
-        assert "market_shadow" in payload["metadata"]["cost_breakdown"]
+        assert "market" in payload["metadata"]["cost_breakdown"]
         assert "research_NVDA" in payload["metadata"]["cost_breakdown"]
 
     def test_flush_does_nothing_when_no_tokens(self, tracer, mock_supabase):
@@ -423,14 +423,14 @@ class TestFlushCostBreakdown:
     def test_close_session_includes_all_accumulated_agents(self, tracer, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
-        tracer.log_tokens("market_shadow", _usage(3000, 900))
+        tracer.log_tokens("market", _usage(3000, 900))
         tracer.flush_cost_breakdown()
 
         tracer.log_tokens("research_NVDA", _usage(10000, 2000))
         tracer.close_session("converged")
 
         update_payload = query.update.call_args[0][0]
-        assert "market_shadow" in update_payload["metadata"]["cost_breakdown"]
+        assert "market" in update_payload["metadata"]["cost_breakdown"]
         assert "research_NVDA" in update_payload["metadata"]["cost_breakdown"]
 
 

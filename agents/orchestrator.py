@@ -9,8 +9,8 @@ from typing import Optional
 import anthropic
 
 from agents.base import parse_json_response
-from agents.market_agent import run_market_agent as run_market_agent_v1
-from agents.market_agent_shadow import run_market_agent_shadow
+from agents.market_agent import run_market_agent
+from agents.market_agent_v1 import run_market_agent as run_market_agent_v1
 from agents.research_agent import run_research_agent
 from agents.risk_agent import run_risk_agent
 from agents.scanner_agent import run_scanner_agent
@@ -149,7 +149,7 @@ def run_premarket_pipeline(
     tracer.start_agent_span("orchestrator")
 
     # Step 1: Market Agent
-    market_report = run_market_agent_shadow(tracer, params)
+    market_report = run_market_agent(tracer, params)
     tracer.flush_cost_breakdown()
     if market_report.get("decision") == "SKIP":
         tracer.log_decision(
