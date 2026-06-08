@@ -19,57 +19,44 @@ def _is_premarket() -> bool:
 
 def get_ticker_fundamentals(ticker: str) -> dict[str, Any]:
     """
-    Fetch float/short-interest and previous-day levels in one yfinance session.
-    Replaces: get_float_short_interest + get_prev_day_levels (was 2 LLM turns, now 1).
+    Fetch previous-day OHLC from Alpaca snapshot (one call, no yfinance).
+    Float/short interest not available via Alpaca — those fields return None.
+    Replaces: get_float_short_interest + get_prev_day_levels.
     """
+    from core.alpaca import _dclient
+    from alpaca.data.requests import StockSnapshotRequest
+
+    result: dict[str, Any] = {
+        "float_shares_m":    None,
+        "short_pct_float":   None,
+        "short_ratio_days":  None,
+        "low_float":         None,
+        "squeeze_potential": None,
+    }
+
     try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
+        snapshot_map = _dclient().get_stock_snapshot(
+            StockSnapshotRequest(symbol_or_symbols=[ticker])
+        )
+        snap = snapshot_map.get(ticker) if snapshot_map else None
+        prev = getattr(snap, "previous_daily_bar", None) if snap else None
 
-        result: dict[str, Any] = {}
-
-        # Float + short interest
-        try:
-            info          = t.info
-            float_shares  = info.get("floatShares")
-            short_pct     = info.get("shortPercentOfFloat")
-            short_ratio   = info.get("shortRatio")
-            float_m       = round(float_shares / 1_000_000, 1) if float_shares else None
-            short_pct_disp = round(short_pct * 100, 1) if short_pct is not None else None
-            low_float     = float_m is not None and float_m < 20
-            high_short    = short_pct is not None and short_pct > 0.15
+        if prev:
+            pdh = round(float(prev.high),  2)
+            pdl = round(float(prev.low),   2)
+            pdc = round(float(prev.close), 2)
             result.update({
-                "float_shares_m":   float_m,
-                "short_pct_float":  short_pct_disp,
-                "short_ratio_days": short_ratio,
-                "low_float":        low_float,
-                "squeeze_potential": low_float and high_short,
+                "prev_day_high":      pdh,
+                "prev_day_low":       pdl,
+                "prev_day_close":     pdc,
+                "prev_day_range_pct": round((pdh - pdl) / pdc * 100, 2) if pdc else 0.0,
             })
-        except Exception as e:
-            result["float_error"] = str(e)
-
-        # Previous-day high / low / close
-        try:
-            hist = t.history(period="5d")
-            if len(hist) >= 2:
-                prev = hist.iloc[-2]   # always yesterday, whether or not today appears
-                pdh  = round(float(prev["High"]),  2)
-                pdl  = round(float(prev["Low"]),   2)
-                pdc  = round(float(prev["Close"]), 2)
-                result.update({
-                    "prev_day_high":      pdh,
-                    "prev_day_low":       pdl,
-                    "prev_day_close":     pdc,
-                    "prev_day_range_pct": round((pdh - pdl) / pdc * 100, 2) if pdc else 0.0,
-                })
-            else:
-                result["prev_day_error"] = "insufficient history"
-        except Exception as e:
-            result["prev_day_error"] = str(e)
-
-        return result
+        else:
+            result["prev_day_error"] = "no snapshot data"
     except Exception as e:
-        return {"error": str(e)}
+        result["prev_day_error"] = str(e)
+
+    return result
 
 
 def get_ticker_market_data(ticker: str) -> dict[str, Any]:
@@ -261,47 +248,44 @@ def get_candidates(min_score: int = 5) -> list[dict[str, Any]]:
 
 def get_news(ticker: str) -> dict[str, Any]:
     """
-    Check earnings blackout and fetch recent headlines for a ticker.
-    Blackout = earnings today or tomorrow.
+    Fetch recent headlines from Alpaca news and detect earnings blackout
+    by scanning for earnings keywords in the last 3 days. No yfinance dependency.
     """
+    from core.alpaca import _nclient
+    from alpaca.data.requests import NewsRequest
+    from datetime import datetime, timedelta, timezone
+
+    _EARNINGS_KW = (
+        "earnings", "quarterly result", " eps ", "beats estimate",
+        "misses estimate", "q1 result", "q2 result", "q3 result", "q4 result",
+    )
+
     try:
-        import yfinance as yf
-        t = yf.Ticker(ticker)
-        cal = t.calendar
+        start    = datetime.now(timezone.utc) - timedelta(days=7)
+        news_set = _nclient().get_news(NewsRequest(symbols=ticker, limit=10, start=start))
+        items    = news_set.data.get("news", []) if (news_set and hasattr(news_set, "data")) else []
 
         blackout = False
         reason: str | None = None
+        headlines: list[str] = []
+        recent_cutoff = datetime.now(timezone.utc) - timedelta(days=3)
 
-        # yfinance returns a DataFrame or a dict depending on version/data availability
-        import pandas as pd
-        if cal is not None:
-            if isinstance(cal, pd.DataFrame):
-                earn_dates_raw = cal.loc["Earnings Date"] if "Earnings Date" in cal.index else []
-            elif isinstance(cal, dict):
-                earn_dates_raw = cal.get("Earnings Date", [])
-            else:
-                earn_dates_raw = []
+        for item in items:
+            headline = getattr(item, "headline", "") or ""
+            headlines.append(headline)
 
-            if not hasattr(earn_dates_raw, "__iter__") or isinstance(earn_dates_raw, str):
-                earn_dates_raw = [earn_dates_raw]
-            earn_dates_list = list(earn_dates_raw)
+            if not blackout:
+                created_at = getattr(item, "created_at", None)
+                if created_at:
+                    if getattr(created_at, "tzinfo", None) is None:
+                        created_at = created_at.replace(tzinfo=timezone.utc)
+                    if created_at >= recent_cutoff:
+                        lower = headline.lower()
+                        if any(kw in lower for kw in _EARNINGS_KW):
+                            blackout = True
+                            reason   = f"earnings news: {headline[:60]}"
 
-            today    = date.today()
-            tomorrow = today + timedelta(days=1)
-            for ed in earn_dates_list:
-                try:
-                    ed_date = ed.date() if hasattr(ed, "date") else date.fromisoformat(str(ed))
-                    if ed_date in (today, tomorrow):
-                        blackout = True
-                        reason   = f"earnings {ed_date.isoformat()}"
-                        break
-                except Exception:
-                    continue
-
-        news_items = t.news or []
-        headlines  = [n.get("title", "") for n in news_items[:3] if n.get("title")]
-
-        return {"blackout": blackout, "reason": reason, "headlines": headlines}
+        return {"blackout": blackout, "reason": reason, "headlines": headlines[:3]}
     except Exception as e:
         return {"error": str(e)}
 

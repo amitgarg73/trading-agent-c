@@ -37,7 +37,7 @@ Call ALL FOUR tools in this order, then output your decision.
 
 TOOL ORDER (mandatory):
 1. get_news           — if blackout: true, return SKIP immediately.
-2. get_ticker_fundamentals — float, short interest, PDH/PDL levels.
+2. get_ticker_fundamentals — PDH/PDL levels (float/short unavailable via Alpaca).
 3. get_ticker_market_data  — ATR, volume conviction, VWAP, RS, ORB, live price.
 4. get_position_history    — recent win rate on this ticker.
 
@@ -101,8 +101,8 @@ INVESTIGATE_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "get_ticker_fundamentals",
         "description": (
-            "One call for float/short-interest and previous-day high/low/close. "
-            "squeeze_potential: true when float < 20M and short > 15%."
+            "Fetch previous-day high/low/close from Alpaca snapshot. "
+            "Float/short interest not available — those fields return None."
         ),
         "input_schema": {
             "type": "object",

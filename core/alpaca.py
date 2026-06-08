@@ -20,6 +20,7 @@ _ORDER_PREFIX = "stratc_"
 
 _trading_client = None
 _data_client    = None
+_news_client    = None
 
 
 def _client():
@@ -36,6 +37,14 @@ def _dclient():
         from alpaca.data import StockHistoricalDataClient
         _data_client = StockHistoricalDataClient(_API_KEY, _SECRET)
     return _data_client
+
+
+def _nclient():
+    global _news_client
+    if _news_client is None:
+        from alpaca.data import NewsClient
+        _news_client = NewsClient(_API_KEY, _SECRET)
+    return _news_client
 
 
 def _is_market_open() -> bool:

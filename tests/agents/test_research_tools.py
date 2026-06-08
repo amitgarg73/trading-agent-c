@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -79,100 +79,64 @@ class TestGetCandidates:
 
 # ── get_news ───────────────────────────────────────────────────────────────────
 
+def _news_item(headline: str, days_ago: float = 1.0) -> MagicMock:
+    item = MagicMock()
+    item.headline   = headline
+    item.created_at = datetime.now(timezone.utc) - timedelta(days=days_ago)
+    return item
+
+
+def _news_client_mock(items: list) -> patch:
+    news_set      = MagicMock()
+    news_set.data = {"news": items}
+    client        = MagicMock()
+    client.get_news.return_value = news_set
+    return patch("core.alpaca._nclient", MagicMock(return_value=client))
+
+
 class TestGetNews:
-    def test_no_blackout_when_no_calendar(self):
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = None
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
+    def test_no_blackout_with_normal_headlines(self):
+        items = [_news_item("Apple launches new product"), _news_item("CEO interview")]
+        with _news_client_mock(items):
             result = get_news("AAPL")
         assert result["blackout"] is False
         assert result["reason"] is None
 
-    def test_blackout_when_earnings_today(self):
-        mock_ticker = MagicMock()
-        today_ts = pd.Timestamp(date.today())
-        cal = pd.DataFrame({"Earnings Date": [today_ts]}, index=["Earnings Date"])
-        mock_ticker.calendar = cal
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
+    def test_blackout_on_earnings_keyword_recent(self):
+        items = [_news_item("Apple reports earnings beat", days_ago=1)]
+        with _news_client_mock(items):
             result = get_news("AAPL")
         assert result["blackout"] is True
         assert "earnings" in result["reason"]
 
-    def test_blackout_when_earnings_tomorrow(self):
-        mock_ticker = MagicMock()
-        tomorrow_ts = pd.Timestamp(date.today() + timedelta(days=1))
-        cal = pd.DataFrame({"Earnings Date": [tomorrow_ts]}, index=["Earnings Date"])
-        mock_ticker.calendar = cal
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
+    def test_blackout_on_eps_keyword(self):
+        items = [_news_item("AAPL beats EPS estimates for Q2", days_ago=0)]
+        with _news_client_mock(items):
             result = get_news("AAPL")
         assert result["blackout"] is True
 
-    def test_no_blackout_when_earnings_far_future(self):
-        mock_ticker = MagicMock()
-        future_ts = pd.Timestamp(date.today() + timedelta(days=30))
-        cal = pd.DataFrame({"Earnings Date": [future_ts]}, index=["Earnings Date"])
-        mock_ticker.calendar = cal
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
+    def test_no_blackout_when_earnings_headline_too_old(self):
+        items = [_news_item("Company reports quarterly results", days_ago=5)]
+        with _news_client_mock(items):
             result = get_news("AAPL")
         assert result["blackout"] is False
 
-    def test_headlines_extracted(self):
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = None
-        mock_ticker.news = [
-            {"title": "Apple Q2 strong"},
-            {"title": "iPhone sales up"},
-            {"title": "Analyst upgrade"},
-            {"title": "Fourth headline"},
-        ]
-        with patch("yfinance.Ticker", return_value=mock_ticker):
+    def test_headlines_limited_to_3(self):
+        items = [_news_item(f"Headline {i}") for i in range(5)]
+        with _news_client_mock(items):
             result = get_news("AAPL")
         assert len(result["headlines"]) == 3
 
+    def test_empty_news_returns_no_blackout(self):
+        with _news_client_mock([]):
+            result = get_news("AAPL")
+        assert result["blackout"] is False
+        assert result["headlines"] == []
+
     def test_returns_error_on_exception(self):
-        with patch("yfinance.Ticker", side_effect=Exception("err")):
+        with patch("core.alpaca._nclient", MagicMock(side_effect=Exception("network"))):
             result = get_news("AAPL")
         assert "error" in result
-
-    def test_dict_calendar_blackout_today(self):
-        """yfinance returns a dict instead of DataFrame on some versions/days."""
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = {"Earnings Date": [pd.Timestamp(date.today())]}
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = get_news("MS")
-        assert result["blackout"] is True
-        assert "earnings" in result["reason"]
-
-    def test_dict_calendar_no_blackout_far_future(self):
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = {"Earnings Date": [pd.Timestamp(date.today() + timedelta(days=30))]}
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = get_news("MS")
-        assert result["blackout"] is False
-
-    def test_dict_calendar_empty_earnings_key(self):
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = {"Earnings Date": []}
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = get_news("MS")
-        assert result["blackout"] is False
-        assert "error" not in result
-
-    def test_dict_calendar_missing_earnings_key(self):
-        mock_ticker = MagicMock()
-        mock_ticker.calendar = {"Ex-Dividend Date": [pd.Timestamp(date.today())]}
-        mock_ticker.news = []
-        with patch("yfinance.Ticker", return_value=mock_ticker):
-            result = get_news("MS")
-        assert result["blackout"] is False
-        assert "error" not in result
 
 
 # ── get_live_price ─────────────────────────────────────────────────────────────
@@ -499,92 +463,61 @@ class TestGetPrevDayLevels:
 
 # ── get_ticker_fundamentals tests ─────────────────────────────────────────────
 
+def _snapshot_dclient(high=188.0, low=184.0, close=187.0, ticker="AAPL") -> patch:
+    prev_bar       = MagicMock()
+    prev_bar.high  = high
+    prev_bar.low   = low
+    prev_bar.close = close
+    snap           = MagicMock()
+    snap.previous_daily_bar = prev_bar
+    client         = MagicMock()
+    client.get_stock_snapshot.return_value = {ticker: snap}
+    return patch("core.alpaca._dclient", MagicMock(return_value=client))
+
+
 class TestGetTickerFundamentals:
-    def _mock_ticker(self, info: dict, history_rows: list):
-        """Return a context manager that patches yfinance.Ticker."""
-        cols = ["Open", "High", "Low", "Close", "Volume"]
-        df   = pd.DataFrame(history_rows, columns=cols)
-
-        mock_t = MagicMock()
-        mock_t.info    = info
-        mock_t.history = MagicMock(return_value=df)
-
-        return patch("yfinance.Ticker", return_value=mock_t)
-
-    def _info(self, float_shares=15_800_000, short_pct=0.082, short_ratio=2.1):
-        return {
-            "floatShares":         float_shares,
-            "shortPercentOfFloat": short_pct,
-            "shortRatio":          short_ratio,
-        }
-
-    def _rows(self):
-        # 3 rows: [two days ago, yesterday, today]
-        # iloc[-2] = yesterday → High=188, Low=184, Close=187
-        return [
-            [183.0, 186.0, 182.5, 185.0, 1_000_000],
-            [185.0, 188.0, 184.0, 187.0, 1_200_000],
-            [187.0, 190.0, 186.0, 189.0, 1_400_000],
-        ]
-
-    def test_returns_float_data(self):
-        with self._mock_ticker(self._info(), self._rows()):
-            result = get_ticker_fundamentals("AAPL")
-        assert result["float_shares_m"] == pytest.approx(15.8, abs=0.1)
-        assert result["short_pct_float"] == pytest.approx(8.2, abs=0.1)
-        assert result["short_ratio_days"] == pytest.approx(2.1, abs=0.1)
-
-    def test_low_float_flag(self):
-        with self._mock_ticker(self._info(float_shares=10_000_000), self._rows()):
-            result = get_ticker_fundamentals("AAPL")
-        assert result["low_float"] is True
-
-    def test_not_low_float_above_20m(self):
-        with self._mock_ticker(self._info(float_shares=50_000_000), self._rows()):
-            result = get_ticker_fundamentals("AAPL")
-        assert result["low_float"] is False
-
-    def test_squeeze_potential_requires_low_float_and_high_short(self):
-        info = self._info(float_shares=10_000_000, short_pct=0.20)  # >15% short
-        with self._mock_ticker(info, self._rows()):
-            result = get_ticker_fundamentals("AAPL")
-        assert result["squeeze_potential"] is True
-
-    def test_no_squeeze_when_short_below_threshold(self):
-        info = self._info(float_shares=10_000_000, short_pct=0.05)  # only 5%
-        with self._mock_ticker(info, self._rows()):
-            result = get_ticker_fundamentals("AAPL")
-        assert result["squeeze_potential"] is False
-
-    def test_prev_day_levels_populated(self):
-        with self._mock_ticker(self._info(), self._rows()):
+    def test_prev_day_levels_from_snapshot(self):
+        with _snapshot_dclient(high=188.0, low=184.0, close=187.0):
             result = get_ticker_fundamentals("AAPL")
         assert result["prev_day_high"]  == pytest.approx(188.0)
         assert result["prev_day_low"]   == pytest.approx(184.0)
         assert result["prev_day_close"] == pytest.approx(187.0)
 
-    def test_prev_day_error_on_insufficient_history(self):
-        one_row = [[185.0, 188.0, 184.0, 187.0, 1_000_000]]
-        with self._mock_ticker(self._info(), one_row):
+    def test_range_pct_calculated(self):
+        # range = 10, close = 185 → 10/185*100
+        with _snapshot_dclient(high=190.0, low=180.0, close=185.0):
+            result = get_ticker_fundamentals("AAPL")
+        assert result["prev_day_range_pct"] == pytest.approx(10 / 185 * 100, rel=1e-2)
+
+    def test_float_fields_all_none(self):
+        with _snapshot_dclient():
+            result = get_ticker_fundamentals("AAPL")
+        assert result["float_shares_m"]    is None
+        assert result["short_pct_float"]   is None
+        assert result["short_ratio_days"]  is None
+        assert result["low_float"]         is None
+        assert result["squeeze_potential"] is None
+
+    def test_prev_day_error_when_ticker_not_in_snapshot(self):
+        client = MagicMock()
+        client.get_stock_snapshot.return_value = {}
+        with patch("core.alpaca._dclient", MagicMock(return_value=client)):
             result = get_ticker_fundamentals("AAPL")
         assert "prev_day_error" in result
 
-    def test_partial_result_on_info_failure(self):
-        mock_t = MagicMock()
-        mock_t.info    = MagicMock(side_effect=Exception("rate limited"))
-        df             = pd.DataFrame(self._rows(), columns=["Open", "High", "Low", "Close", "Volume"])
-        mock_t.history = MagicMock(return_value=df)
-
-        with patch("yfinance.Ticker", return_value=mock_t):
+    def test_prev_day_error_when_no_previous_bar(self):
+        snap = MagicMock()
+        snap.previous_daily_bar = None
+        client = MagicMock()
+        client.get_stock_snapshot.return_value = {"AAPL": snap}
+        with patch("core.alpaca._dclient", MagicMock(return_value=client)):
             result = get_ticker_fundamentals("AAPL")
+        assert "prev_day_error" in result
 
-        assert "float_error" in result
-        assert "prev_day_high" in result  # history still worked
-
-    def test_returns_error_on_complete_failure(self):
-        with patch("yfinance.Ticker", side_effect=Exception("crash")):
+    def test_prev_day_error_on_alpaca_exception(self):
+        with patch("core.alpaca._dclient", MagicMock(side_effect=Exception("timeout"))):
             result = get_ticker_fundamentals("AAPL")
-        assert "error" in result
+        assert "prev_day_error" in result
 
 
 # ── get_ticker_market_data tests ──────────────────────────────────────────────
