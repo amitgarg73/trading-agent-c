@@ -25,12 +25,13 @@ WORKFLOW_ID  = os.environ.get("WORKFLOW_ID", "")
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def already_has_evals(session_id: str) -> bool:
+def has_layer_evals(session_id: str, layer: int) -> bool:
     r = (
         sb.table("ag_evals")
         .select("id", count="exact")
         .eq("tenant_id", TENANT_ID)
         .eq("session_id", session_id)
+        .eq("layer", layer)
         .limit(1)
         .execute()
     )
@@ -72,38 +73,40 @@ def main() -> None:
     sessions = q.execute().data or []
     print(f"Found {len(sessions)} sessions\n")
 
-    skipped = 0
-    l4_ok = l4_err = l5_ok = l5_err = 0
+    l4_ok = l4_err = l4_skip = l5_ok = l5_err = l5_skip = 0
 
     for i, sess in enumerate(sessions):
         sid  = sess["id"]
         meta = sess.get("metadata") or {}
         print(f"[{i+1}/{len(sessions)}] {sid[:8]}  started={sess['started_at'][:10]}  status={sess['status']}")
 
-        if already_has_evals(sid):
-            print("  skipped (evals already exist)")
-            skipped += 1
-            continue
+        # L5 — skip only if L5 already exists
+        if has_layer_evals(sid, 5):
+            print("  L5 skipped (already exists)")
+            l5_skip += 1
+        else:
+            try:
+                backfill_l5(sid, meta)
+                print("  L5 written")
+                l5_ok += 1
+            except Exception as e:
+                print(f"  L5 failed: {e}")
+                l5_err += 1
 
-        # L5
-        try:
-            backfill_l5(sid, meta)
-            print("  L5 written")
-            l5_ok += 1
-        except Exception as e:
-            print(f"  L5 failed: {e}")
-            l5_err += 1
+        # L4 — skip only if L4 already exists
+        if has_layer_evals(sid, 4):
+            print("  L4 skipped (already exists)")
+            l4_skip += 1
+        else:
+            try:
+                backfill_l4(sid)
+                print("  L4 written")
+                l4_ok += 1
+            except Exception as e:
+                print(f"  L4 failed: {e}")
+                l4_err += 1
 
-        # L4
-        try:
-            backfill_l4(sid)
-            print("  L4 written")
-            l4_ok += 1
-        except Exception as e:
-            print(f"  L4 failed: {e}")
-            l4_err += 1
-
-    print(f"\nDone. skipped={skipped}  L4 ok={l4_ok} err={l4_err}  L5 ok={l5_ok} err={l5_err}")
+    print(f"\nDone.  L4 ok={l4_ok} skip={l4_skip} err={l4_err}  |  L5 ok={l5_ok} skip={l5_skip} err={l5_err}")
 
 
 if __name__ == "__main__":
