@@ -262,7 +262,8 @@ def evaluate_session_outputs(
 
 def evaluate_session_from_traces(session_id: str) -> None:
     """
-    Read agent outputs from ag_traces and run LLM judge for the session.
+    Read agent reasoning from ag_traces (agent_message rows) and run LLM judge.
+    Uses payload->agent_reasoning as judge input — not the outcome label.
     Call after close_session(). Non-blocking — logs failures, does not raise.
     """
     if not _TENANT_ID:
@@ -272,9 +273,10 @@ def evaluate_session_from_traces(session_id: str) -> None:
         q = (
             get_client()
             .table("ag_traces")
-            .select("agent, outcome")
+            .select("agent, step_type, payload")
             .eq("tenant_id", _TENANT_ID)
             .eq("session_id", session_id)
+            .eq("step_type", "agent_message")
             .limit(200)
         )
         if _WORKFLOW_ID:
@@ -283,7 +285,6 @@ def evaluate_session_from_traces(session_id: str) -> None:
         if not rows:
             return
 
-        SKIP_OUTCOMES = {"error", "timeout", "failed", ""}
         TICKER_SUFFIX = __import__("re").compile(r"^[A-Z]{1,5}$")
 
         def _base(name: str) -> str:
@@ -294,10 +295,11 @@ def evaluate_session_from_traces(session_id: str) -> None:
 
         agent_outputs: dict[str, list[str]] = {}
         for row in rows:
-            agent  = _base((row.get("agent") or "").strip())
-            outcome = str(row.get("outcome") or "").strip()
-            if agent and outcome and outcome not in SKIP_OUTCOMES:
-                agent_outputs.setdefault(agent, []).append(outcome)
+            agent     = _base((row.get("agent") or "").strip())
+            payload   = row.get("payload") or {}
+            reasoning = str(payload.get("agent_reasoning") or "").strip()
+            if agent and reasoning:
+                agent_outputs.setdefault(agent, []).append(reasoning)
 
         combined = {
             agent: " | ".join(outputs[:5])
