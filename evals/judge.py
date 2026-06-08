@@ -16,7 +16,8 @@ from uuid import uuid4
 
 import anthropic
 
-_TENANT_ID = os.environ.get("TENANT_ID", "")
+_TENANT_ID   = os.environ.get("TENANT_ID",   "")
+_WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")
 _JUDGE_MODEL = "claude-haiku-4-5-20251001"
 
 _JUDGE_SYSTEM = (
@@ -55,15 +56,17 @@ def _fetch_criteria(agent_names: list[str]) -> dict[str, list[dict]]:
         return {}
     try:
         from core.db import get_client
-        result = (
+        q = (
             get_client()
             .table("ag_eval_configs")
             .select("id, eval_name, agent, threshold, config")
             .eq("tenant_id", _TENANT_ID)
             .eq("eval_type", "semantic")
             .eq("enabled", True)
-            .execute()
         )
+        if _WORKFLOW_ID:
+            q = q.eq("workflow_id", _WORKFLOW_ID)
+        result = q.execute()
         rows = result.data or []
     except Exception:
         return {}
@@ -137,16 +140,17 @@ def _write_eval_results(session_id: str, agent: str, results: list[dict]) -> Non
     from core.db import get_client
     rows = [
         {
-            "id":         str(uuid4()),
-            "tenant_id":  _TENANT_ID,
-            "session_id": session_id,
-            "eval_name":  r["eval_name"],
-            "agent":      agent,
-            "layer":      4,
-            "score":      r["score"],
-            "passed":     r["passed"],
-            "threshold":  r["threshold"],
-            "detail":     {"reasoning": r["reasoning"]},
+            "id":          str(uuid4()),
+            "tenant_id":   _TENANT_ID,
+            "workflow_id": _WORKFLOW_ID,
+            "session_id":  session_id,
+            "eval_name":   r["eval_name"],
+            "agent":       agent,
+            "layer":       4,
+            "score":       r["score"],
+            "passed":      r["passed"],
+            "threshold":   r["threshold"],
+            "detail":      {"reasoning": r["reasoning"]},
         }
         for r in results
     ]
@@ -170,6 +174,7 @@ def _write_incident_if_failed(
     get_client().table("ag_incidents").insert({
         "id":           str(uuid4()),
         "tenant_id":    _TENANT_ID,
+        "workflow_id":  _WORKFLOW_ID,
         "session_id":   session_id,
         "pattern_name": "semantic_quality_failure",
         "severity":     severity,
@@ -253,3 +258,53 @@ def evaluate_session_outputs(
             all_results[agent] = agent_results
 
     return all_results
+
+
+def evaluate_session_from_traces(session_id: str) -> None:
+    """
+    Read agent outputs from ag_traces and run LLM judge for the session.
+    Call after close_session(). Non-blocking — logs failures, does not raise.
+    """
+    if not _TENANT_ID:
+        return
+    try:
+        from core.db import get_client
+        q = (
+            get_client()
+            .table("ag_traces")
+            .select("agent, outcome")
+            .eq("tenant_id", _TENANT_ID)
+            .eq("session_id", session_id)
+            .limit(200)
+        )
+        if _WORKFLOW_ID:
+            q = q.eq("workflow_id", _WORKFLOW_ID)
+        rows = q.execute().data or []
+        if not rows:
+            return
+
+        SKIP_OUTCOMES = {"error", "timeout", "failed", ""}
+        TICKER_SUFFIX = __import__("re").compile(r"^[A-Z]{1,5}$")
+
+        def _base(name: str) -> str:
+            parts = name.split("_")
+            if len(parts) > 1 and TICKER_SUFFIX.match(parts[-1]):
+                return "_".join(parts[:-1])
+            return name
+
+        agent_outputs: dict[str, list[str]] = {}
+        for row in rows:
+            agent  = _base((row.get("agent") or "").strip())
+            outcome = str(row.get("outcome") or "").strip()
+            if agent and outcome and outcome not in SKIP_OUTCOMES:
+                agent_outputs.setdefault(agent, []).append(outcome)
+
+        combined = {
+            agent: " | ".join(outputs[:5])
+            for agent, outputs in agent_outputs.items()
+            if outputs
+        }
+        if combined:
+            evaluate_session_outputs(session_id, combined)
+    except Exception as exc:
+        print(f"[judge] evaluate_session_from_traces failed: {exc}")

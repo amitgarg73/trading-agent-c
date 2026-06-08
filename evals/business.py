@@ -10,7 +10,8 @@ import os
 from uuid import uuid4
 
 
-_TENANT_ID = os.environ.get("TENANT_ID", "")
+_TENANT_ID   = os.environ.get("TENANT_ID",   "")
+_WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")
 
 
 def write_premarket_outcome_evals(
@@ -64,18 +65,20 @@ def write_premarket_outcome_evals(
 
     try:
         from core.db import get_client
+        workflow_id = _WORKFLOW_ID or os.environ.get("WORKFLOW_ID", "")
         rows = [
             {
-                "id":         str(uuid4()),
-                "tenant_id":  tenant_id,
-                "session_id": session_id,
-                "eval_name":  m["eval_name"],
-                "agent":      m["agent"],
-                "layer":      5,
-                "score":      m["score"],
-                "passed":     m["passed"],
-                "threshold":  m["threshold"],
-                "detail":     {"reasoning": m["reasoning"]},
+                "id":          str(uuid4()),
+                "tenant_id":   tenant_id,
+                "workflow_id": workflow_id,
+                "session_id":  session_id,
+                "eval_name":   m["eval_name"],
+                "agent":       m["agent"],
+                "layer":       5,
+                "score":       m["score"],
+                "passed":      m["passed"],
+                "threshold":   m["threshold"],
+                "detail":      {"reasoning": m["reasoning"]},
             }
             for m in metrics
         ]

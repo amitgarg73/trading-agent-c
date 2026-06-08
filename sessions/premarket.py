@@ -12,6 +12,7 @@ from core.alerts import send_alert
 from core.params import load_params
 from core.protection import check_protection_status
 from evals.business import write_premarket_outcome_evals
+from evals.judge import evaluate_session_from_traces
 from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
@@ -270,6 +271,10 @@ def main() -> None:
             retry_triggered=result["session_meta"].get("retry_triggered", False),
             result_summary=summary,
         )
+        try:
+            evaluate_session_from_traces(session_id)
+        except Exception as e:
+            print(f"[premarket] L4 judge eval failed (non-fatal): {e}")
         subject, body = _build_premarket_alert(result, session_id, now_et)
         send_alert(subject, body)
 
