@@ -59,18 +59,33 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          TENANT_ID: ${{ secrets.TENANT_ID_C }}
+          WORKFLOW_ID: ${{ secrets.WORKFLOW_ID_C }}
         run: |
           python - <<'PY'
           import os, sys
           from datetime import date
           from supabase import create_client
           sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-          today = date.today().isoformat()
-          rows = sb.table("c_sessions").select("id").eq("date", today).neq("is_simulated", True).execute().data
+          tenant_id   = os.environ["TENANT_ID"]
+          workflow_id = os.environ["WORKFLOW_ID"]
+          today_start = date.today().isoformat() + "T00:00:00"
+          rows = (
+              sb.table("ag_sessions")
+              .select("id,status,terminal_reason")
+              .eq("tenant_id", tenant_id)
+              .eq("workflow_id", workflow_id)
+              .gte("started_at", today_start)
+              .neq("terminal_reason", "simulated")
+              .execute()
+              .data
+          )
           if not rows:
-              print(f"ASSERTION FAILED: no real premarket session in c_sessions for {today}")
+              print(f"ASSERTION FAILED: no real premarket session in ag_sessions for {date.today().isoformat()}")
               sys.exit(1)
-          print(f"Assertion passed: premarket session found for {today}")
+          print(f"Assertion passed: {len(rows)} session(s) found for {date.today().isoformat()}")
+          for r in rows:
+              print(f"  id={r['id']} status={r['status']} reason={r['terminal_reason']}")
           PY
 
       - name: Notify on failure
