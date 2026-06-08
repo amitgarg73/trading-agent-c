@@ -363,6 +363,7 @@ class TraceLogger:
 
         row: dict[str, Any] = {
             "tenant_id":    _TENANT_ID,
+            "workflow_id":  self._workflow_id,
             "session_id":   self.session_id,
             "agent":        agent,
             "step_type":    fields.get("step_type"),
