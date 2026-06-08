@@ -65,8 +65,13 @@ class TraceLogger:
         self._agent_spans: dict[str, str] = {}   # agent -> current span_id
         self._session_span_id = str(uuid4())
         self._tokens: dict[str, dict[str, int]] = {}   # agent -> {input, output}
+        self._pending_trades: list = []
         self._started_at = datetime.utcnow()
         self._insert_session_stub()
+
+    def set_pending_trades(self, trades: list) -> None:
+        """Store deferred pre-open trades so close_session persists them in ag_sessions metadata."""
+        self._pending_trades = trades
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
@@ -261,6 +266,8 @@ class TraceLogger:
             "retry_triggered":  retry_triggered,
             "total_latency_ms": latency_ms,
         }
+        if self._pending_trades:
+            metadata["pending_trades"] = self._pending_trades
 
         row: dict[str, Any] = {
             "terminal_reason": terminal_reason,

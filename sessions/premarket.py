@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from datetime import date, datetime, time
 from uuid import uuid4
 
@@ -127,16 +128,19 @@ def _window_time(config: dict, key: str, default: time) -> time:
 def _existing_session_guard(today: str) -> tuple[bool, str]:
     """
     Returns (should_skip, reason_msg).
-    Skip if today already has a completed session or an in_progress one started < 60 min ago.
+    Skip if today already has a completed premarket session or one in_progress started < 60 min ago.
     Prevents concurrent runs when the cron fires twice or intraday triggers premarket.
+    Reads ag_sessions (TraceLogger migrated from c_sessions in commit a93d5bf).
     """
     from core.db import get_client
+    workflow_id = os.environ.get("WORKFLOW_ID", "")
     rows = (
         get_client()
-        .table("c_sessions")
-        .select("id,terminal_reason,started_at")
-        .eq("date", today)
-        .neq("is_simulated", True)
+        .table("ag_sessions")
+        .select("id,terminal_reason,started_at,status")
+        .eq("workflow_id", workflow_id)
+        .eq("session_type", "premarket")
+        .gte("started_at", today)
         .order("started_at", desc=True)
         .limit(1)
         .execute()
@@ -144,16 +148,17 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     )
     if not rows:
         return False, ""
-    sess = rows[0]
-    term = sess.get("terminal_reason") or ""
-    sid  = sess["id"]
+    sess   = rows[0]
+    term   = sess.get("terminal_reason") or ""
+    status = sess.get("status") or ""
+    sid    = sess["id"]
     _COMPLETE = {
         "no_opportunity", "converged", "error", "eod_complete", "no_candidates",
         "risk_rejected", "manual_stop", "watchdog_timeout", "circuit_breaker",
     }
-    if term in _COMPLETE:
+    if term in _COMPLETE or status == "completed":
         return True, f"Session {sid[:8]} already completed ({term}). Skipping."
-    if term in ("in_progress", ""):
+    if status == "in_progress" or term in ("in_progress", ""):
         try:
             started = sess.get("started_at") or ""
             if started:
@@ -234,10 +239,7 @@ def main() -> None:
         elif trades:
             print(f"[premarket] Market not yet open ({now_et.strftime('%H:%M ET')}) "
                   f"— storing {len(trades)} pending trade(s) for 9:30 AM execution")
-            from core.db import get_client
-            get_client().table("c_sessions").update(
-                {"pending_trades": trades}
-            ).eq("id", session_id).execute()
+            tracer.set_pending_trades(trades)
 
         # V1 shadow eval — non-blocking, does not affect trades
         try:

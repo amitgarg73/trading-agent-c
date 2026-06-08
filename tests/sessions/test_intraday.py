@@ -612,7 +612,7 @@ class TestIntradayMain:
         mock_place.assert_called_once()
 
     def test_executes_pending_trades_at_market_open(self, mock_supabase, capsys):
-        """Deferred premarket trades stored in c_sessions.pending_trades are executed at 9:45+."""
+        """Deferred premarket trades stored in ag_sessions.metadata.pending_trades are executed at 9:45+."""
         import pytz
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 9, 45, tzinfo=_ET)
@@ -620,7 +620,7 @@ class TestIntradayMain:
             {"ticker": "AAPL", "entry_price": 185.0, "target_price": 192.0,
              "stop_loss": 183.0, "position_size": 3500, "shares": 18, "confidence": "HIGH"}
         ]
-        mock_supabase.table.return_value = make_query([{"pending_trades": _pending}])
+        mock_supabase.table.return_value = make_query([{"metadata": {"pending_trades": _pending}}])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
              patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \

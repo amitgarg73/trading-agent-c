@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time as _time
 from datetime import date, datetime, time
 from typing import Optional
@@ -21,14 +22,16 @@ _SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected", "intraday_e
 
 
 def get_today_session_id() -> Optional[str]:
-    """Return today's premarket session_id from c_sessions, or None."""
+    """Return today's premarket session_id from ag_sessions, or None."""
     from core.db import get_client
+    workflow_id = os.environ.get("WORKFLOW_ID", "")
     rows = (
         get_client()
-        .table("c_sessions")
+        .table("ag_sessions")
         .select("id")
-        .eq("date", date.today().isoformat())
-        .neq("is_simulated", True)
+        .eq("workflow_id", workflow_id)
+        .eq("session_type", "premarket")
+        .gte("started_at", date.today().isoformat())
         .order("started_at", desc=True)
         .limit(1)
         .execute()
@@ -321,15 +324,17 @@ def main() -> None:
     # first 15 minutes of open volatility settle before we enter.
     if now_t >= time(9, 45):
         from core.db import get_client as _get_client
-        _rows = _get_client().table("c_sessions").select("pending_trades") \
+        _rows = _get_client().table("ag_sessions").select("metadata") \
             .eq("id", session_id).limit(1).execute().data or []
-        _pending = (_rows[0].get("pending_trades") if _rows else None) or []
+        _meta    = (_rows[0].get("metadata") or {}) if _rows else {}
+        _pending = _meta.get("pending_trades") or []
         if _pending:
             print(f"[intraday] Executing {len(_pending)} deferred premarket trade(s)...")
             from sessions.premarket import _execute_trades
             _execute_trades(_pending, session_id, params.trail_pct)
-            _get_client().table("c_sessions").update(
-                {"pending_trades": None}
+            _meta.pop("pending_trades", None)
+            _get_client().table("ag_sessions").update(
+                {"metadata": _meta}
             ).eq("id", session_id).execute()
 
     _sync_positions(session_id, params.trail_pct)
