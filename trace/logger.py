@@ -7,19 +7,19 @@ from uuid import uuid4
 
 import pytz
 
-def _get_tenant_id() -> str:
-    tid = os.environ.get("TENANT_ID", "")
-    if not tid:
-        # Try loading .env lazily (local runs where load_dotenv wasn't called first)
+def _load_env_var(key: str) -> str:
+    val = os.environ.get(key, "")
+    if not val:
         try:
             from dotenv import load_dotenv as _ld
             _ld()
-            tid = os.environ.get("TENANT_ID", "")
+            val = os.environ.get(key, "")
         except ImportError:
             pass
-    return tid
+    return val
 
-_TENANT_ID = _get_tenant_id()
+_TENANT_ID   = _load_env_var("TENANT_ID")
+_WORKFLOW_ID  = _load_env_var("WORKFLOW_ID")
 
 # Token cost per million tokens (Anthropic pricing, mid-2026)
 # cache_read = prompt cache hit; cache_write = cache creation (first write)
@@ -59,7 +59,7 @@ class TraceLogger:
 
     def __init__(self, session_id: str, workflow_id: Optional[str] = None, session_type: Optional[str] = None):
         self.session_id = session_id
-        self._workflow_id = workflow_id
+        self._workflow_id = workflow_id or _WORKFLOW_ID or None
         self._session_type = session_type
         self._sequence = 0
         self._agent_spans: dict[str, str] = {}   # agent -> current span_id
