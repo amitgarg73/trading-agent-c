@@ -65,8 +65,18 @@ jobs:
         run: |
           python - <<'PY'
           import os, sys
-          from datetime import date
+          from datetime import date, datetime
+          import pytz
           from supabase import create_client
+
+          et = pytz.timezone("America/New_York")
+          now_et  = datetime.now(et)
+          weekday = now_et.weekday()  # 0=Mon … 6=Sun
+
+          if weekday >= 5:
+              print(f"Non-trading day ({now_et.strftime('%A')}) — skipping session assertion.")
+              sys.exit(0)
+
           sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
           tenant_id   = os.environ["TENANT_ID"]
           workflow_id = os.environ["WORKFLOW_ID"]
