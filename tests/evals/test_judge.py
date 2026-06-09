@@ -138,3 +138,32 @@ class TestEvaluateSessionFromTraces:
         with patch("evals.judge._TENANT_ID", "tenant-1"):
             from evals.judge import evaluate_session_from_traces
             evaluate_session_from_traces("sess-1")   # must not raise
+
+
+# ── _patch_session_quality_score ──────────────────────────────────────────────
+
+class TestPatchSessionQualityScore:
+    def test_writes_avg_score_to_ag_sessions(self, mock_supabase):
+        from evals.judge import _patch_session_quality_score
+        with patch("evals.judge._TENANT_ID", "tenant-1"):
+            _patch_session_quality_score("sess-1", {
+                "research": [{"score": 0.8}, {"score": 0.6}],
+                "risk":     [{"score": 1.0}],
+            })
+        expected = round((0.8 + 0.6 + 1.0) / 3, 4)
+        mock_supabase.table.assert_called_with("ag_sessions")
+        mock_supabase.table.return_value.update.assert_called_once_with(
+            {"quality_score": expected}
+        )
+
+    def test_skips_when_no_scores(self, mock_supabase):
+        from evals.judge import _patch_session_quality_score
+        _patch_session_quality_score("sess-1", {})
+        mock_supabase.table.assert_not_called()
+
+    def test_does_not_raise_on_db_error(self, mock_supabase, capsys):
+        mock_supabase.table.return_value.update.return_value.eq.return_value.execute.side_effect = RuntimeError("db down")
+        from evals.judge import _patch_session_quality_score
+        _patch_session_quality_score("sess-1", {"research": [{"score": 0.7}]})  # must not raise
+        out = capsys.readouterr().out
+        assert "quality_score patch failed" in out

@@ -158,6 +158,26 @@ def _write_eval_results(session_id: str, agent: str, results: list[dict]) -> Non
         get_client().table("ag_evals").insert(rows).execute()
 
 
+def _patch_session_quality_score(session_id: str, all_results: dict[str, list[dict]]) -> None:
+    """Write avg L4 quality score back to ag_sessions so the dashboard can read it directly."""
+    scores = [
+        r["score"]
+        for results in all_results.values()
+        for r in results
+        if r.get("score") is not None
+    ]
+    if not scores:
+        return
+    avg_score = round(sum(scores) / len(scores), 4)
+    try:
+        from core.db import get_client
+        get_client().table("ag_sessions").update(
+            {"quality_score": avg_score}
+        ).eq("id", session_id).execute()
+    except Exception as exc:
+        print(f"[judge] quality_score patch failed for {session_id}: {exc}")
+
+
 def _write_incident_if_failed(
     session_id: str,
     agent: str,
@@ -274,6 +294,12 @@ def evaluate_session_outputs(
             except Exception as exc:
                 print(f"[judge] DB write failed for {agent}: {exc}")
             all_results[agent] = agent_results
+
+    if all_results:
+        try:
+            _patch_session_quality_score(session_id, all_results)
+        except Exception as exc:
+            print(f"[judge] quality_score patch failed: {exc}")
 
     return all_results
 
