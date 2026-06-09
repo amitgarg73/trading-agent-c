@@ -168,10 +168,28 @@ def _write_incident_if_failed(
         return
 
     from core.db import get_client
+    db = get_client()
+
+    # Dedup: skip if an incident already exists for this session + agent + pattern.
+    # Two eval paths (agent outputs + trace reasoning) both call this function,
+    # which would otherwise produce duplicate rows for the same failure.
+    existing = (
+        db.table("ag_incidents")
+        .select("id")
+        .eq("tenant_id", _TENANT_ID)
+        .eq("session_id", session_id)
+        .eq("pattern_name", "semantic_quality_failure")
+        .ilike("root_cause", f"{agent} output%")
+        .limit(1)
+        .execute()
+    )
+    if existing.data:
+        return
+
     avg_shortfall = sum(r["threshold"] - r["score"] for r in failed) / len(failed)
     severity = "high" if avg_shortfall > 0.3 else "medium"
 
-    get_client().table("ag_incidents").insert({
+    db.table("ag_incidents").insert({
         "id":           str(uuid4()),
         "tenant_id":    _TENANT_ID,
         "workflow_id":  _WORKFLOW_ID,
