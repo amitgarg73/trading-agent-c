@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from agents.orchestrator import _build_synthesis_message, _empty_session_output, run_premarket_pipeline
+from agents.orchestrator import _build_synthesis_message, _empty_session_output, run_premarket_pipeline, _prepare_scanner_for_judge, _prepare_risk_for_judge
 from core.params import StrategyParams
 from tests.conftest import make_api_response, text_block
 
@@ -345,3 +345,85 @@ class TestRunPremarketPipeline:
         call_args = mock_scanner.call_args
         assert call_args[0][1] == _MARKET_REPORT
         assert call_args[0][2] == params
+
+
+class TestPrepareScannerForJudge:
+    def test_summary_fields_present(self):
+        r = {
+            "regime": "low_vix",
+            "scan_rationale": "Momentum leaders selected.",
+            "dropped_count": 14,
+            "n_returned": 5,
+            "candidates": [{"ticker": f"T{i}", "score": i} for i in range(20)],
+        }
+        out = _prepare_scanner_for_judge(r)
+        assert out["regime"] == "low_vix"
+        assert out["scan_rationale"] == "Momentum leaders selected."
+        assert out["dropped_count"] == 14
+        assert out["n_returned"] == 5
+
+    def test_candidates_capped_at_5(self):
+        r = {
+            "regime": "elevated_vix",
+            "scan_rationale": "Selected 20 candidates.",
+            "dropped_count": 30,
+            "n_returned": 20,
+            "candidates": [{"ticker": f"T{i}"} for i in range(20)],
+        }
+        out = _prepare_scanner_for_judge(r)
+        assert len(out["top_candidates"]) == 5
+
+    def test_summary_fields_first_in_json(self):
+        r = {
+            "candidates": [{"ticker": f"T{i}", "score": i, "data": "x" * 200} for i in range(20)],
+            "regime": "high_vix",
+            "scan_rationale": "Defensive filter applied.",
+            "dropped_count": 40,
+            "n_returned": 3,
+        }
+        serialized = json.dumps(_prepare_scanner_for_judge(r), indent=2)
+        regime_pos = serialized.index('"regime"')
+        candidates_pos = serialized.index('"top_candidates"')
+        assert regime_pos < candidates_pos
+
+    def test_empty_candidates(self):
+        r = {"regime": "caution", "scan_rationale": "Halt.", "dropped_count": 50, "n_returned": 0}
+        out = _prepare_scanner_for_judge(r)
+        assert out["top_candidates"] == []
+        assert out["n_returned"] == 0
+
+
+class TestPrepareRiskForJudge:
+    def test_portfolio_state_present(self):
+        r = {
+            "portfolio_state": {"buying_power": 10000, "positions_open": 2, "today_pnl": 150.0, "limit_hit": False},
+            "verdicts": [{"ticker": "AAPL", "verdict": "APPROVED", "reason": "Within position limits."}],
+        }
+        out = _prepare_risk_for_judge(r)
+        assert out["portfolio_state"]["buying_power"] == 10000
+        assert out["verdict_count"] == 1
+
+    def test_verdicts_capped_at_8(self):
+        r = {
+            "portfolio_state": {},
+            "verdicts": [{"ticker": f"T{i}", "verdict": "APPROVED", "reason": "ok"} for i in range(15)],
+        }
+        out = _prepare_risk_for_judge(r)
+        assert len(out["verdicts"]) == 8
+        assert out["verdict_count"] == 15
+
+    def test_portfolio_state_first_in_json(self):
+        r = {
+            "verdicts": [{"ticker": f"T{i}", "verdict": "REJECTED", "reason": "Over limit."} for i in range(10)],
+            "portfolio_state": {"buying_power": 5000},
+        }
+        serialized = json.dumps(_prepare_risk_for_judge(r), indent=2)
+        ps_pos = serialized.index('"portfolio_state"')
+        verdicts_pos = serialized.index('"verdicts"')
+        assert ps_pos < verdicts_pos
+
+    def test_empty_verdicts(self):
+        r = {"portfolio_state": {"buying_power": 0, "positions_open": 0, "today_pnl": 0, "limit_hit": True}}
+        out = _prepare_risk_for_judge(r)
+        assert out["verdicts"] == []
+        assert out["verdict_count"] == 0

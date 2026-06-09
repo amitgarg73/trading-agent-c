@@ -313,6 +313,32 @@ def run_premarket_pipeline(
     return result
 
 
+def _prepare_scanner_for_judge(r: dict) -> dict:
+    """Put summary fields first so they survive the 3000-char judge window.
+
+    Full candidates JSON pushes regime/scan_rationale/dropped_count past 3000 chars.
+    Judge only needs the summary + top 5 candidates to evaluate criterion quality.
+    """
+    candidates = r.get("candidates") or []
+    return {
+        "regime":         r.get("regime"),
+        "scan_rationale": r.get("scan_rationale"),
+        "dropped_count":  r.get("dropped_count", 0),
+        "n_returned":     r.get("n_returned", len(candidates)),
+        "top_candidates": candidates[:5],
+    }
+
+
+def _prepare_risk_for_judge(r: dict) -> dict:
+    """Put portfolio_state first; cap verdicts at 8 to avoid truncation."""
+    verdicts = r.get("verdicts") or []
+    return {
+        "portfolio_state": r.get("portfolio_state"),
+        "verdict_count":   len(verdicts),
+        "verdicts":        verdicts[:8],
+    }
+
+
 def _run_semantic_evals(
     session_id: str,
     market_report: dict,
@@ -326,24 +352,22 @@ def _run_semantic_evals(
     Non-blocking on failure — exceptions are logged, session is not affected.
     Agent names must match ag_eval_configs.agent values configured in Argus.
     """
-    # Only evaluate agents that actually ran and produced non-trivial output
+    orch_clean = (
+        {k: v for k, v in orchestrator_result.items() if not k.startswith("_")}
+        if orchestrator_result.get("trades")
+        else {}
+    )
     candidates = {
         "market":       market_report,
-        "scanner":      scanner_result,
+        "scanner":      _prepare_scanner_for_judge(scanner_result) if scanner_result else {},
         "research":     trade_proposals,
-        "risk":         risk_verdicts,
-        # Only evaluate orchestrator when it produced trades — empty sessions have no
-        # synthesis reasoning to score and consistently produce misleading 0.1 scores.
-        "orchestrator": (
-            {k: v for k, v in orchestrator_result.items() if not k.startswith("_")}
-            if orchestrator_result.get("trades")
-            else {}
-        ),
+        "risk":         _prepare_risk_for_judge(risk_verdicts) if risk_verdicts else {},
+        "orchestrator": orch_clean,
     }
     agent_outputs = {
         name: json.dumps(output, indent=2)
         for name, output in candidates.items()
-        if output and len(output) > 1
+        if output
     }
     def _run() -> None:
         try:
