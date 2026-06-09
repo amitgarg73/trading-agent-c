@@ -419,6 +419,7 @@ def main() -> None:
     }
 
     try:
+        from agents.orchestrator import _run_semantic_evals
         proposals = run_research_agent(tracer, synthetic_report, params)
         if not proposals.get("proposals"):
             tracer.log_decision("orchestrator", "no_intraday_candidates")
@@ -426,6 +427,8 @@ def main() -> None:
             return
 
         verdicts = run_risk_agent(tracer, proposals, params)
+        _run_semantic_evals(session_id, {}, {}, proposals, verdicts, {})
+
         approved = [v for v in verdicts.get("verdicts", []) if v.get("verdict") == "APPROVED"]
         if not approved:
             tracer.log_decision("orchestrator", "intraday_all_rejected")

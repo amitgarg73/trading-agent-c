@@ -864,3 +864,78 @@ class TestIntradayMain:
             from sessions.intraday import main
             main()
         mock_exec.assert_not_called()
+
+
+
+class TestIntradayJudge:
+    """_run_semantic_evals fires after research + risk complete in intraday entry scan."""
+
+    _PROPOSALS = {"proposals": [{"ticker": "AAPL", "entry_price": 185.0,
+                                  "target_price": 192.0, "stop_loss": 183.0,
+                                  "position_size": 3500, "shares": 18,
+                                  "confidence": "HIGH", "evidence": ["above VWAP"]}]}
+    _VERDICTS_APPROVED = {"verdicts": [{"ticker": "AAPL", "verdict": "APPROVED",
+                                        "reason": "within limits"}]}
+    _VERDICTS_REJECTED = {"verdicts": [{"ticker": "AAPL", "verdict": "REJECTED",
+                                        "reason": "position limit"}]}
+
+    def _run_main(self, mock_supabase, proposals, verdicts=None):
+        import contextlib
+        import pytz
+        from tests.conftest import make_query
+        mock_supabase.table.return_value = make_query([])
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
+        mock_judge = MagicMock()
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("sessions.intraday.is_trading_day", return_value=True))
+            mock_dt = stack.enter_context(patch("sessions.intraday.datetime"))
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            stack.enter_context(patch("sessions.intraday.get_today_session_id", return_value="sess-judge-01"))
+            stack.enter_context(patch("sessions.intraday.check_protection_status",
+                                      return_value=MagicMock(suspended=False)))
+            stack.enter_context(patch("sessions.intraday.load_agent_config",
+                                      return_value={"enable_intraday_entries": True,
+                                                    "intraday_min_score_bonus": 1,
+                                                    "intraday_max_new_positions": 2}))
+            stack.enter_context(patch("sessions.intraday.load_params",
+                                      return_value=MagicMock(max_positions=3, trail_pct=0.05,
+                                                              strategy_min_score=5)))
+            stack.enter_context(patch("sessions.intraday.get_daily_pnl", return_value=0.0))
+            stack.enter_context(patch("sessions.intraday.evaluate_goals",
+                                      return_value=MagicMock(lock_in_mode=False, pnl_floor_hit=False)))
+            stack.enter_context(patch("sessions.intraday.count_open_positions", return_value=0))
+            stack.enter_context(patch("sessions.intraday.get_today_tickers", return_value=set()))
+            stack.enter_context(patch("sessions.intraday.get_last_entry_scan_time", return_value=None))
+            stack.enter_context(patch("agents.research_agent.run_research_agent", return_value=proposals))
+            stack.enter_context(patch("sessions.intraday.TraceLogger", return_value=MagicMock()))
+            stack.enter_context(patch("agents.orchestrator._run_semantic_evals", mock_judge))
+            if verdicts is not None:
+                stack.enter_context(patch("agents.risk_agent.run_risk_agent", return_value=verdicts))
+                stack.enter_context(patch("sessions.intraday._place_intraday_trades", return_value=1))
+            from sessions.intraday import main
+            main()
+
+        return mock_judge
+
+    def test_judge_called_when_proposals_and_verdicts_available(self, mock_supabase):
+        mock_judge = self._run_main(mock_supabase, self._PROPOSALS, self._VERDICTS_APPROVED)
+        mock_judge.assert_called_once()
+        args = mock_judge.call_args[0]
+        assert args[0] == "sess-judge-01"
+        assert args[1] == {}                   # market_report — empty for intraday
+        assert args[2] == {}                   # scanner_result — empty for intraday
+        assert args[3] == self._PROPOSALS
+        assert args[4] == self._VERDICTS_APPROVED
+        assert args[5] == {}                   # orchestrator_result — empty for intraday
+
+    def test_judge_not_called_when_no_proposals(self, mock_supabase):
+        empty = {"proposals": [], "skipped": [], "summary": "Nothing qualified."}
+        mock_judge = self._run_main(mock_supabase, empty)  # no verdicts — risk never called
+        mock_judge.assert_not_called()
+
+    def test_judge_called_even_when_all_rejected(self, mock_supabase):
+        mock_judge = self._run_main(mock_supabase, self._PROPOSALS, self._VERDICTS_REJECTED)
+        mock_judge.assert_called_once()
