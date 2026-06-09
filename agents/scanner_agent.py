@@ -60,6 +60,12 @@ Return JSON only — no prose before or after:
   "regime": "low_vix" | "elevated_vix" | "high_vix" | "caution",
   "dropped_count": int
 }
+
+ALL SIX TOP-LEVEL FIELDS ARE REQUIRED. Never omit any:
+- regime: set from vix_level in session_params ("low_vix", "elevated_vix", "high_vix", or "caution" if caution_mode)
+- scan_rationale: 1-2 sentences explaining what signals drove selection (e.g. "High premarket momentum stocks in leading sectors; dropped 14 low-score tickers.")
+- dropped_count: total candidates removed by filter_and_rank (the tool returns this value directly)
+Omitting these fields fails downstream quality checks and breaks the audit trail.
 """.strip()
 
 
