@@ -305,17 +305,6 @@ def batch_fetch_news(tickers: list[str], max_workers: int = 4) -> dict[str, dict
     return results
 
 
-def get_live_price(ticker: str) -> dict[str, Any]:
-    """Fetch latest ask/bid price from Alpaca quote stream."""
-    try:
-        from core.alpaca import get_live_price as _alpaca_price
-        price = _alpaca_price(ticker)
-        if price is None:
-            return {"error": "no price data"}
-        return {"price": price, "source": "alpaca", "stale_minutes": 0}
-    except Exception as e:
-        return {"error": str(e)}
-
 
 def get_intraday_signals(ticker: str) -> dict[str, Any]:
     """

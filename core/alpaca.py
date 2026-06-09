@@ -90,8 +90,8 @@ def get_live_price(ticker: str) -> Optional[float]:
                 return round(float(ask), 4)
             if bid and float(bid) > 0:
                 return round(float(bid), 4)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"  [alpaca] get_live_price({ticker}): {e}")
     return None
 
 

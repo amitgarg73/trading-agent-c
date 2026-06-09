@@ -11,7 +11,6 @@ from agents.tools.research_tools import (
     get_candidates,
     get_float_short_interest,
     get_intraday_signals,
-    get_live_price,
     get_news,
     get_position_history,
     get_premarket_snapshot,
@@ -138,26 +137,6 @@ class TestGetNews:
             result = get_news("AAPL")
         assert "error" in result
 
-
-# ── get_live_price ─────────────────────────────────────────────────────────────
-
-class TestGetLivePrice:
-    def test_returns_price_from_alpaca(self):
-        with patch("core.alpaca.get_live_price", return_value=186.00):
-            result = get_live_price("AAPL")
-        assert result["price"] == pytest.approx(186.00)
-        assert result["source"] == "alpaca"
-        assert result["stale_minutes"] == 0
-
-    def test_returns_error_when_alpaca_returns_none(self):
-        with patch("core.alpaca.get_live_price", return_value=None):
-            result = get_live_price("AAPL")
-        assert "error" in result
-
-    def test_returns_error_on_exception(self):
-        with patch("core.alpaca.get_live_price", side_effect=Exception("network")):
-            result = get_live_price("AAPL")
-        assert "error" in result
 
 
 # ── get_intraday_signals ───────────────────────────────────────────────────────

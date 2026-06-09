@@ -160,7 +160,6 @@ stop(dot, 'ra_drop', 'drop ticker\npick next')
 box(dot, 'ra_deep',
     'Optional tools  (agent decides which to call per ticker)',
     'get_intraday_signals  →  above_vwap · rs_vs_spy · today_pct_change<BR/>'
-    'get_live_price        →  price · source · stale_minutes<BR/>'
     'get_atr               →  atr_pct · orb_pct<BR/>'
     'get_position_history  →  win_rate · avg_pnl · last_exit (30 days)',
     C_TOOL)
