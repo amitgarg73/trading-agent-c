@@ -440,3 +440,17 @@ class TestCandidatesPath:
         result = _run_with_candidates(tracer, candidates=[])
         assert result["proposals"] == []
         assert result["skipped"] == []
+
+    def test_caps_investigation_at_max_candidates(self, tracer):
+        many = [
+            {"ticker": f"T{i}", "technical_score": 8 - i, "premarket_change_pct": 1.0, "price": 100.0}
+            for i in range(_MAX_CANDIDATES + 4)
+        ]
+        investigated = []
+
+        def side_effect(ticker, *args, **kwargs):
+            investigated.append(ticker)
+            return _PROPOSE_AAPL
+
+        _run_with_candidates(tracer, candidates=many, investigate_side_effect=side_effect)
+        assert len(investigated) <= _MAX_CANDIDATES

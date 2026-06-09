@@ -304,7 +304,7 @@ def run_research_agent(
             }
             for c in candidates
             if c.get("ticker") not in rejected_tickers
-        ]
+        ][:_MAX_CANDIDATES]
         if not selected:
             tracer.log_decision("research", "no_candidates_after_screen")
             return {"proposals": [], "skipped": [], "summary": "No candidates after rejected-ticker filter."}
