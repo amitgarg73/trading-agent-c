@@ -1,10 +1,6 @@
 name: Strategy C — Premarket
 
 on:
-  schedule:
-    # 7:15 AM EDT (UTC-4). In EST (UTC-5, Nov–Mar) this fires at 6:15 AM ET —
-    # early but within premarket window; Python guards handle trading_day check.
-    - cron: "15 11 * * 1-5"
   workflow_dispatch:
 
 concurrency:

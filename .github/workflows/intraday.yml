@@ -1,13 +1,6 @@
 name: Strategy C — Intraday
 
 on:
-  schedule:
-    # Every 15 minutes, 9:15 AM to 3:50 PM EDT (13:15–19:50 UTC).
-    # The Python session guards (is_trading_day, time window) provide the
-    # authoritative check — the cron windows are approximate.
-    - cron: "15,30,45 13 * * 1-5"      # 9:15–9:45 AM EDT
-    - cron: "0,15,30,45 14-19 * * 1-5" # 10:00 AM–3:45 PM EDT
-    - cron: "50 19 * * 1-5"             # 3:50 PM EDT
   workflow_dispatch:
 
 concurrency:

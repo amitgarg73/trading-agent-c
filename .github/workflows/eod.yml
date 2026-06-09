@@ -1,10 +1,6 @@
 name: Strategy C — EOD
 
 on:
-  schedule:
-    # 3:55 PM EDT (UTC-4). In EST (UTC-5, Nov–Mar) this fires at 2:55 PM ET —
-    # one hour early but harmless; Python guards check trading_day and session_id.
-    - cron: "55 19 * * 1-5"
   workflow_dispatch:
 
 concurrency:
