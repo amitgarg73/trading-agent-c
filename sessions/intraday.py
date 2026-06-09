@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import time as _time
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone, timedelta
 from typing import Optional
 
 import pytz
@@ -137,7 +137,7 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
 
     rows = (
         db.table("c_positions")
-        .select("id,ticker,alpaca_order_id,trail_order_id,entry_price,shares")
+        .select("id,ticker,alpaca_order_id,trail_order_id,entry_price,shares,entry_time")
         .eq("session_id", session_id)
         .eq("status", "open")
         .eq("open_date", date.today().isoformat())
@@ -193,6 +193,20 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                     from core.alpaca import cancel_order
                     bracket = get_bracket_status(order_id)
                     if not bracket.get("entry_filled"):
+                        # Allow 30 minutes before cancelling — the next 15-min cycle would
+                        # otherwise cancel a freshly-submitted order before it has a chance to fill.
+                        entry_time_str = pos.get("entry_time")
+                        if entry_time_str:
+                            try:
+                                entry_dt = datetime.fromisoformat(
+                                    entry_time_str.replace("Z", "+00:00")
+                                ).replace(tzinfo=timezone.utc)
+                                age_mins = (datetime.now(timezone.utc) - entry_dt).total_seconds() / 60
+                                if age_mins < 30:
+                                    print(f"  [intraday] {ticker} order pending {age_mins:.0f}m — waiting (cancel at 30m)")
+                                    continue
+                            except Exception:
+                                pass
                         cancel_order(order_id)
                         db.table("c_positions").update({
                             "status":       "closed",

@@ -132,7 +132,11 @@ def submit_bracket_order(
         if q:
             raw_bid = getattr(q, "bid_price", None)
             if raw_bid and float(raw_bid) > 0:
-                bid        = round(float(raw_bid), 4)
+                bid = round(float(raw_bid), 4)
+                if bid > entry_price * 1.015:
+                    print(f"  [alpaca] {ticker} stale: bid ${bid:.2f} is "
+                          f"{(bid-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skip")
+                    return None, None
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
                 limit_px   = round(bid, 2)

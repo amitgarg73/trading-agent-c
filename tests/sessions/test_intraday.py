@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -205,6 +205,16 @@ class TestPlaceIntradayTrades:
         assert count == 0
 
 
+def _old_entry_time() -> str:
+    """Return an entry_time 35 minutes ago — old enough to trigger the cancel gate."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=35)).isoformat()
+
+
+def _fresh_entry_time() -> str:
+    """Return an entry_time 10 minutes ago — within the 30-minute hold window."""
+    return (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+
+
 class TestSyncPositions:
     """Tests for _sync_positions: trail submission and exit detection."""
 
@@ -215,6 +225,7 @@ class TestSyncPositions:
         "trail_order_id": None,
         "entry_price": 185.0,
         "shares": 10,
+        "entry_time": None,  # None → gate falls through, cancel proceeds immediately
     }
 
     def test_submits_trailing_stop_when_missing(self, mock_supabase):
@@ -418,6 +429,67 @@ class TestSyncPositions:
             from sessions.intraday import _sync_positions
             _sync_positions(_SESSION_ID, 0.008)
         mock_tickers.assert_not_called()
+
+    def test_fresh_unfilled_order_not_cancelled(self, mock_supabase):
+        """Order submitted <30m ago must not be cancelled — it hasn't had a chance to fill."""
+        pos = {**self._OPEN_POS, "entry_time": _fresh_entry_time()}
+        mock_supabase.table.return_value = make_query([pos])
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": False}), \
+             patch("core.alpaca.cancel_order") as mock_cancel:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_cancel.assert_not_called()
+
+    def test_old_unfilled_order_cancelled_after_30m(self, mock_supabase):
+        """Order pending >30m with no fill should be cancelled and marked unfilled."""
+        pos = {**self._OPEN_POS, "entry_time": _old_entry_time()}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": False}), \
+             patch("core.alpaca.cancel_order") as mock_cancel:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_cancel.assert_called_once_with("ord-001")
+        assert updated.get("exit_reason") == "unfilled"
+
+    def test_missing_entry_time_cancels_immediately(self, mock_supabase):
+        """Positions without entry_time (old rows) cancel on the next cycle as before."""
+        pos = {**self._OPEN_POS, "entry_time": None}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            q = make_query([])
+            q.eq = lambda *a, **k: q
+            return q
+
+        q = make_query([pos])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value=set()), \
+             patch("core.alpaca.get_order_fill", return_value=(None, None)), \
+             patch("core.alpaca.get_bracket_status", return_value={"entry_filled": False}), \
+             patch("core.alpaca.cancel_order") as mock_cancel:
+            from sessions.intraday import _sync_positions
+            _sync_positions(_SESSION_ID, 0.008)
+        mock_cancel.assert_called_once()
+        assert updated.get("exit_reason") == "unfilled"
 
 
 class TestIntradayMain:

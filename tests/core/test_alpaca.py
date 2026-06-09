@@ -234,6 +234,46 @@ class TestSubmitBracketOrder:
         req = mc.return_value.submit_order.call_args[0][0]
         assert req.limit_price == pytest.approx(184.90, rel=1e-3)
 
+    def test_staleness_gate_skips_when_bid_1_5pct_above_proposal(self):
+        """If bid is >1.5% above proposal entry, the stock ran since the research call — skip."""
+        # entry_price=185.0, bid=188.0 → 1.62% above → stale → (None, None)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 188.0):
+            mt.sleep = MagicMock()
+            from core.alpaca import submit_bracket_order
+            oid, fill = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        assert oid is None
+        assert fill is None
+        mc.return_value.submit_order.assert_not_called()
+
+    def test_staleness_gate_allows_bid_within_threshold(self):
+        """Bid 1.3% above entry is within the 1.5% threshold — should still submit."""
+        # bid = 187.4 → (187.4 - 185.0) / 185.0 = 1.3% < 1.5% → not stale
+        order = _mock_order(status="filled", filled_avg_price=187.4)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 187.4):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            oid, _ = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        assert oid == "ord-001"
+        mc.return_value.submit_order.assert_called_once()
+
+    def test_staleness_gate_does_not_trigger_on_downside(self):
+        """Bid below proposal (stock dropped) is not stale — passive limit is still valid."""
+        order = _mock_order(status="filled", filled_avg_price=182.0)
+        # entry=185.0, bid=182.0 → 1.62% BELOW → not stale, proceed with bid
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 182.0):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            oid, _ = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        assert oid == "ord-001"
+        mc.return_value.submit_order.assert_called_once()
+
 
 # ── get_bracket_status ────────────────────────────────────────────────────────
 
