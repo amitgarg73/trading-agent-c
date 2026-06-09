@@ -126,6 +126,7 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
         "atr_pct":         atr_pct,
         "above_sma20":     above_sma20,
         "above_sma50":     above_sma50,
+        "macd_rising":     macd > 0 and macd > prev_macd,
     }
 
 
@@ -183,7 +184,10 @@ def run_scanner(
         print(f"[scanner] yfinance download failed: {e}")
         return 0
 
-    rows_written = 0
+    rows_written  = 0
+    filtered_trend = 0  # below SMA20 — downtrend
+    filtered_macd  = 0  # MACD histogram declining — fading momentum
+
     for ticker in symbols:
         try:
             # Extract per-ticker DataFrame from multi-level columns
@@ -200,6 +204,16 @@ def run_scanner(
             if fields["technical_score"] < min_score:
                 continue
 
+            # Hard filter 1: must be above SMA20 — no buying downtrends for momentum
+            if not fields["above_sma20"]:
+                filtered_trend += 1
+                continue
+
+            # Hard filter 2: MACD histogram must be rising — momentum accelerating, not fading
+            if not fields["macd_rising"]:
+                filtered_macd += 1
+                continue
+
             db.table("c_scan_results").insert({
                 "date":    today_iso,
                 "ticker":  ticker,
@@ -214,6 +228,9 @@ def run_scanner(
         except Exception as e:
             print(f"[scanner] {ticker}: {e}")
 
-    print(f"[scanner] {rows_written} tickers written for {today_iso} "
-          f"(skipped {len(symbols) - rows_written} below threshold or errored)")
+    print(
+        f"[scanner] {rows_written} tickers written for {today_iso} "
+        f"(below_sma20={filtered_trend}, macd_fading={filtered_macd}, "
+        f"other={len(symbols) - rows_written - filtered_trend - filtered_macd})"
+    )
     return rows_written + len(already_scored)
