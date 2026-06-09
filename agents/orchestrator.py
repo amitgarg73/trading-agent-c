@@ -305,7 +305,13 @@ def _run_semantic_evals(
         "scanner":      scanner_result,
         "research":     trade_proposals,
         "risk":         risk_verdicts,
-        "orchestrator": {k: v for k, v in orchestrator_result.items() if not k.startswith("_")},
+        # Only evaluate orchestrator when it produced trades — empty sessions have no
+        # synthesis reasoning to score and consistently produce misleading 0.1 scores.
+        "orchestrator": (
+            {k: v for k, v in orchestrator_result.items() if not k.startswith("_")}
+            if orchestrator_result.get("trades")
+            else {}
+        ),
     }
     agent_outputs = {
         name: json.dumps(output, indent=2)
