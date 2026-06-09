@@ -9,8 +9,8 @@ import anthropic
 from agents.base import parse_json_response, run_tool_loop
 from agents.tools.market_tools import get_sector_rotation
 from agents.tools.research_tools import (
+    batch_fetch_news,
     get_candidates,
-    get_news,
     get_position_history,
     get_premarket_snapshot,
     get_ticker_fundamentals,
@@ -33,16 +33,16 @@ _MAX_CANDIDATES    = 6
 
 _INVESTIGATE_SYSTEM = """
 You are investigating a single stock for an intraday trading setup.
-Call ALL FOUR tools in this order, then output your decision.
+News context is provided in the initial message — do NOT call any news tool.
+Call ALL THREE tools in this order, then output your decision.
 
 TOOL ORDER (mandatory):
-1. get_news           — if blackout: true, return SKIP immediately.
-2. get_ticker_fundamentals — PDH/PDL levels (float/short unavailable via Alpaca).
-3. get_ticker_market_data  — ATR, volume conviction, VWAP, RS, ORB, live price.
-4. get_position_history    — recent win rate on this ticker.
+1. get_ticker_fundamentals — PDH/PDL levels (float/short unavailable via Alpaca).
+2. get_ticker_market_data  — ATR, volume conviction, VWAP, RS, ORB, live price.
+3. get_position_history    — recent win rate on this ticker.
 
 SKIP RULES (return SKIP if ANY apply):
-- get_news: blackout is true
+- News context: blackout is true
 - get_ticker_market_data: atr_pct > 5 (stop too noisy)
 - get_ticker_market_data: today_pct_change > 4 (already extended; 8% target unreachable)
 - get_ticker_market_data: live_price is null and not pre-market (data issue)
@@ -90,15 +90,6 @@ Return JSON only — no prose:
 
 INVESTIGATE_TOOL_SCHEMAS: list[dict] = [
     {
-        "name": "get_news",
-        "description": "Check earnings blackout and recent headlines. Call first — skip immediately if blackout.",
-        "input_schema": {
-            "type": "object",
-            "properties": {"ticker": {"type": "string"}},
-            "required": ["ticker"],
-        },
-    },
-    {
         "name": "get_ticker_fundamentals",
         "description": (
             "Fetch previous-day high/low/close from Alpaca snapshot. "
@@ -139,7 +130,6 @@ INVESTIGATE_TOOL_SCHEMAS: list[dict] = [
 
 
 def _investigate_dispatch(name: str, inp: dict) -> dict | list:
-    if name == "get_news":                return get_news(inp["ticker"])
     if name == "get_ticker_fundamentals": return get_ticker_fundamentals(inp["ticker"])
     if name == "get_ticker_market_data":  return get_ticker_market_data(inp["ticker"])
     if name == "get_position_history":    return get_position_history(inp["ticker"], inp.get("days", 30))
@@ -151,28 +141,34 @@ def _investigate_ticker(
     context: dict,
     market_report: dict,
     tracer: TraceLogger,
+    news_context: dict | None = None,
 ) -> dict:
     """Run a per-ticker mini-agent. Called from a thread pool."""
     client = anthropic.Anthropic()
     is_caution = market_report.get("decision") == "CAUTION"
 
-    def _dispatch_with_breaker(name: str, inp: dict) -> dict | list:
-        result = _investigate_dispatch(name, inp)
-        if isinstance(result, dict) and "error" in result:
-            raise RuntimeError(
-                f"circuit breaker: {name} error for {ticker} — {result['error']}"
-            )
-        return result
+    news_summary = ""
+    if news_context:
+        headlines = news_context.get("headlines", [])
+        blackout  = news_context.get("blackout", False)
+        reason    = news_context.get("reason", "")
+        news_summary = (
+            f"News context (pre-fetched): blackout={blackout}"
+            + (f", reason={reason}" if reason else "")
+            + (f", headlines={headlines[:3]}" if headlines else ", no headlines")
+            + "\n"
+        )
 
     msg = (
         f"Investigate {ticker} for an intraday setup.\n"
-        f"Scanner: score={context['score']}, "
+        + news_summary
+        + f"Scanner: score={context['score']}, "
         f"premarket_change={context['premarket_change_pct']:+.2f}%, "
         f"scanner_price=${context.get('scanner_price', '?')}\n"
         f"Market: {'CAUTION' if is_caution else 'GO'} day, "
         f"bias={market_report.get('bias', 'NEUTRAL')}, "
         f"max_positions={market_report.get('max_positions', 2)}\n"
-        "Call all 4 tools in order, then return the JSON decision."
+        "Call all 3 tools in order, then return the JSON decision."
     )
 
     text = run_tool_loop(
@@ -181,10 +177,10 @@ def _investigate_ticker(
         system=_INVESTIGATE_SYSTEM,
         tools=INVESTIGATE_TOOL_SCHEMAS,
         initial_message=msg,
-        dispatch=_dispatch_with_breaker,
+        dispatch=_investigate_dispatch,
         tracer=tracer,
         agent_name=f"research_{ticker}",
-        max_turns=12,
+        max_turns=10,
         wall_clock_timeout_s=_TICKER_TIMEOUT_S,
     )
     return parse_json_response(text) or {}
@@ -329,14 +325,35 @@ def run_research_agent(
             tracer.log_decision("research", "no_candidates_after_screen")
             return {"proposals": [], "skipped": [], "summary": "No candidates passed screening."}
 
+    # Pre-fetch news for all selected tickers (4 workers, done before investigation pool)
+    news_batch = batch_fetch_news([s["ticker"] for s in selected])
+
+    # Filter blackout tickers before spawning any LLM calls
+    clean: list[dict] = []
+    prefilter_skipped: list[dict] = []
+    for s in selected:
+        nc = news_batch.get(s["ticker"], {})
+        if nc.get("blackout"):
+            prefilter_skipped.append({"ticker": s["ticker"], "reason": nc.get("reason") or "earnings blackout"})
+        else:
+            clean.append(s)
+
+    if not clean:
+        tracer.log_decision("research", "all_tickers_in_blackout")
+        return {
+            "proposals": [],
+            "skipped": prefilter_skipped,
+            "summary": "All candidates in earnings blackout.",
+        }
+
     # Phase 2: parallel per-ticker investigation
     proposals: list[dict] = []
-    skipped:   list[dict] = []
+    skipped: list[dict] = list(prefilter_skipped)
 
-    with ThreadPoolExecutor(max_workers=len(selected)) as pool:
+    with ThreadPoolExecutor(max_workers=len(clean)) as pool:
         futures = {
-            pool.submit(_investigate_ticker, s["ticker"], s, market_report, tracer): s["ticker"]
-            for s in selected
+            pool.submit(_investigate_ticker, s["ticker"], s, market_report, tracer, news_batch.get(s["ticker"])): s["ticker"]
+            for s in clean
         }
         try:
             for fut in as_completed(futures, timeout=_TOTAL_TIMEOUT_S - 30):
@@ -372,7 +389,8 @@ def run_research_agent(
     proposals = proposals[:max_pos]
 
     summary = (
-        f"Investigated {len(selected)} ticker(s) in parallel. "
+        f"Investigated {len(clean)} ticker(s) in parallel "
+        f"({len(prefilter_skipped)} blackout-filtered). "
         f"{len(proposals)} proposal(s), {len(skipped)} skipped."
     )
     return {"proposals": proposals, "skipped": skipped, "summary": summary}

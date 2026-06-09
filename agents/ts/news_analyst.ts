@@ -1,5 +1,4 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { execSync } from "child_process";
 import { randomBytes } from "crypto";
 
 // ── Types ──────────────────────────────────────────────────────────────────
@@ -123,14 +122,39 @@ export function generateSpanId(): string {
 }
 
 export async function fetchTickerNews(ticker: string): Promise<NewsResult> {
+  const apiKey    = process.env.APCA_API_KEY_ID ?? "";
+  const apiSecret = process.env.APCA_API_SECRET_KEY ?? "";
+
+  if (!apiKey || !apiSecret) {
+    return { ticker, headlines: [], count: 0, error: "missing_alpaca_credentials" };
+  }
+
   try {
-    const raw = execSync(
-      `python3 agents/tools/news_tools_helper.py ${ticker}`,
-      { encoding: "utf-8", timeout: 5000 }
-    );
-    return JSON.parse(raw.trim()) as NewsResult;
-  } catch {
-    return { ticker, headlines: [], count: 0, error: "fetch_failed" };
+    const start = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const url   = `https://data.alpaca.markets/v1beta1/news?symbols=${encodeURIComponent(ticker)}&limit=5&start=${encodeURIComponent(start)}`;
+
+    const res = await fetch(url, {
+      headers: {
+        "APCA-API-KEY-ID":     apiKey,
+        "APCA-API-SECRET-KEY": apiSecret,
+      },
+    });
+
+    if (!res.ok) {
+      return { ticker, headlines: [], count: 0, error: `alpaca_http_${res.status}` };
+    }
+
+    const data = (await res.json()) as { news?: Array<{ headline: string; created_at: string; source: string }> };
+    const items = data.news ?? [];
+    const headlines: NewsHeadline[] = items.map((item) => ({
+      title:     item.headline,
+      published: item.created_at,
+      publisher: item.source,
+    }));
+
+    return { ticker, headlines, count: headlines.length, error: null };
+  } catch (err) {
+    return { ticker, headlines: [], count: 0, error: String(err) };
   }
 }
 

@@ -290,6 +290,21 @@ def get_news(ticker: str) -> dict[str, Any]:
         return {"error": str(e)}
 
 
+def batch_fetch_news(tickers: list[str], max_workers: int = 4) -> dict[str, dict]:
+    """Pre-fetch news for all tickers in parallel before the investigation thread pool."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed as _as_completed
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(get_news, t): t for t in tickers}
+        for fut in _as_completed(futures):
+            ticker = futures[fut]
+            try:
+                results[ticker] = fut.result()
+            except Exception as exc:
+                results[ticker] = {"blackout": False, "reason": None, "headlines": [], "error": str(exc)}
+    return results
+
+
 def get_live_price(ticker: str) -> dict[str, Any]:
     """Fetch latest ask/bid price from Alpaca quote stream."""
     try:

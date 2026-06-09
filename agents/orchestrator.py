@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import threading
 import time
 from datetime import date
+from subprocess import DEVNULL
 from typing import Optional
 
 import anthropic
@@ -134,10 +137,29 @@ def _empty_session_output(market_report: dict, terminal_reason: str) -> dict:
     }
 
 
+def _fire_news_analyst(tickers: list[str], session_id: str) -> None:
+    """Start the TypeScript news analyst as a fire-and-forget subprocess for Argus OTel observability."""
+    try:
+        ts_dir = os.path.join(os.path.dirname(__file__), "ts")
+        payload = json.dumps({
+            "tickers": tickers,
+            "date": date.today().isoformat(),
+            "session_id": session_id,
+        })
+        subprocess.Popen(
+            ["node", "dist/news_analyst.js", payload],
+            cwd=ts_dir,
+            stdout=DEVNULL,
+            stderr=DEVNULL,
+            env=os.environ.copy(),
+        )
+    except Exception:
+        pass  # observability demo — never block the pipeline
+
+
 def run_premarket_pipeline(
     tracer: TraceLogger,
     params: StrategyParams,
-    news_signals: Optional[list[dict]] = None,
 ) -> dict:
     """
     Full premarket agent pipeline.
@@ -168,6 +190,11 @@ def run_premarket_pipeline(
     scanner_result = run_scanner_agent(tracer, market_report, params)
     tracer.flush_cost_breakdown()
     scanner_candidates = scanner_result.get("candidates") or []
+
+    # Fire TypeScript news analyst for Argus OTel multi-language observability demo
+    if scanner_candidates:
+        _fire_news_analyst([c["ticker"] for c in scanner_candidates], tracer.session_id)
+
     if not scanner_candidates:
         tracer.log_decision(
             "orchestrator", "no_viable_candidates",
