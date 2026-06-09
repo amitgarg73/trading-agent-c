@@ -5,6 +5,10 @@ Fetches semantic eval criteria from ag_eval_configs (Argus UI-managed, tenant-sc
 Scores each agent's output against its criteria using claude-haiku (fast, cheap).
 Writes results to ag_evals. Creates ag_incidents rows when criteria fail.
 
+Called from _run_semantic_evals (agents/orchestrator.py) for both premarket and intraday
+entry scans. Callers pre-process outputs before passing here so summary fields survive
+the 3000-char judge window (see _prepare_scanner_for_judge, _prepare_risk_for_judge).
+
 No domain-specific logic — works for any pipeline using the Argus observability schema.
 """
 from __future__ import annotations
@@ -28,7 +32,7 @@ _JUDGE_SYSTEM = (
 
 _JUDGE_PROMPT = """\
 Agent: {agent}
-Agent output (truncated to 3000 chars):
+Agent output:
 {output}
 
 Criterion: {criterion_name}
@@ -253,7 +257,8 @@ def evaluate_session_outputs(
 
     agent_outputs: {agent_base_name: output_text_or_json_string}
       Agent names must match ag_eval_configs.agent (e.g. "research", not "research_ABBV").
-      Output values are truncated to 3000 chars before scoring.
+      Callers are responsible for pre-processing outputs so key fields are within the first
+      3000 chars (see _prepare_scanner_for_judge, _prepare_risk_for_judge in orchestrator.py).
 
     Returns: {agent_name: [{eval_name, score, passed, threshold, reasoning}]}
     Empty dict if no criteria are configured or TENANT_ID is unset.
