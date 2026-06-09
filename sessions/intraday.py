@@ -72,20 +72,19 @@ def count_open_positions(session_id: str) -> int:
     return len(rows)
 
 
-def get_investigated_tickers(session_id: str) -> list[str]:
-    """Return tickers already investigated in this session's research tool calls."""
+def get_today_tickers(session_id: str) -> set[str]:
+    """Return all tickers entered today (any status) — prevents same-day re-entry."""
     from core.db import get_client
     rows = (
         get_client()
-        .table("c_traces")
-        .select("entity_id")
+        .table("c_positions")
+        .select("ticker")
         .eq("session_id", session_id)
-        .eq("agent", "research")
-        .eq("step_type", "tool_call")
+        .eq("open_date", date.today().isoformat())
         .execute()
         .data
     ) or []
-    return list({r["entity_id"] for r in rows if r.get("entity_id")})
+    return {r["ticker"] for r in rows if r.get("ticker")}
 
 
 def get_last_entry_scan_time(session_id: str) -> Optional[datetime]:
@@ -248,16 +247,23 @@ def _place_intraday_trades(
     approved_tickers: set[str],
     session_id: str,
     trail_pct: float,
+    today_tickers: set[str] | None = None,
 ) -> int:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
     from core.alpaca import submit_bracket_order, submit_trailing_stop
     from core.db import get_client
     today = date.today().isoformat()
     now_  = datetime.utcnow().isoformat()
+    already_entered = today_tickers or set()
     count = 0
     for p in proposals.get("proposals", []):
-        if p["ticker"] not in approved_tickers:
+        ticker = p["ticker"]
+        if ticker not in approved_tickers:
             continue
+        if ticker in already_entered:
+            print(f"  [intraday] {ticker} already entered today — skipping (hard gate)")
+            continue
+        already_entered.add(ticker)
         shares   = p.get("shares") or int(p["position_size"] / p["entry_price"])
         order_id, fill_price = submit_bracket_order(
             ticker=p["ticker"],
@@ -397,7 +403,7 @@ def main() -> None:
         return
 
     min_score_bonus = config.get("intraday_min_score_bonus", 1)
-    exclude         = get_investigated_tickers(session_id)
+    today_tickers   = get_today_tickers(session_id)
     max_new         = min(2, available, config.get("intraday_max_new_positions", 2))
 
     synthetic_report = {
@@ -408,7 +414,7 @@ def main() -> None:
         "summary": (
             f"Intraday scan {now_et.strftime('%H:%M')} ET. "
             f"Score >={params.strategy_min_score + min_score_bonus}. "
-            f"Avoid: {exclude}."
+            f"Avoid (already entered today): {sorted(today_tickers)}."
         ),
     }
 
@@ -426,7 +432,10 @@ def main() -> None:
             print("[intraday] All proposals rejected.")
             return
 
-        count = _place_intraday_trades(proposals, {v["ticker"] for v in approved}, session_id, params.trail_pct)
+        count = _place_intraday_trades(
+            proposals, {v["ticker"] for v in approved}, session_id, params.trail_pct,
+            today_tickers=today_tickers,
+        )
         tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
         print(f"[intraday] {count} trade(s) placed: "
               f"{', '.join(v['ticker'] for v in approved)}")

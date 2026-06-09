@@ -9,9 +9,9 @@ from sessions.intraday import (
     classify_exit,
     count_open_positions,
     get_daily_pnl,
-    get_investigated_tickers,
     get_last_entry_scan_time,
     get_today_session_id,
+    get_today_tickers,
 )
 from tests.conftest import make_query
 
@@ -53,22 +53,29 @@ class TestCountOpenPositions:
         assert count_open_positions(_SESSION_ID) == 0
 
 
-class TestGetInvestigatedTickers:
-    def test_returns_unique_tickers(self, mock_supabase):
-        rows = [
-            {"entity_id": "AAPL"},
-            {"entity_id": "MSFT"},
-            {"entity_id": "AAPL"},
-        ]
+class TestGetTodayTickers:
+    def test_returns_set_of_tickers(self, mock_supabase):
+        rows = [{"ticker": "AAPL"}, {"ticker": "MSFT"}, {"ticker": "JPM"}]
         mock_supabase.table.return_value = make_query(rows)
-        result = get_investigated_tickers(_SESSION_ID)
-        assert set(result) == {"AAPL", "MSFT"}
+        result = get_today_tickers(_SESSION_ID)
+        assert result == {"AAPL", "MSFT", "JPM"}
 
-    def test_ignores_none_entity_id(self, mock_supabase):
-        rows = [{"entity_id": "AAPL"}, {"entity_id": None}]
+    def test_deduplicates_same_ticker(self, mock_supabase):
+        rows = [{"ticker": "PG"}, {"ticker": "PG"}]
         mock_supabase.table.return_value = make_query(rows)
-        result = get_investigated_tickers(_SESSION_ID)
+        result = get_today_tickers(_SESSION_ID)
+        assert result == {"PG"}
+
+    def test_ignores_none_ticker(self, mock_supabase):
+        rows = [{"ticker": "AAPL"}, {"ticker": None}]
+        mock_supabase.table.return_value = make_query(rows)
+        result = get_today_tickers(_SESSION_ID)
         assert None not in result
+
+    def test_returns_empty_set_when_no_positions(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        result = get_today_tickers(_SESSION_ID)
+        assert result == set()
 
 
 class TestGetLastEntryScanTime:
@@ -203,6 +210,97 @@ class TestPlaceIntradayTrades:
         with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
+
+    def test_hard_gate_blocks_ticker_already_entered_today(self, mock_supabase):
+        """If AAPL was already entered today (open or closed), hard gate must skip it."""
+        mock_supabase.table.return_value = make_query([])
+        from sessions.intraday import _place_intraday_trades
+        with _BRACKET_PATCH as mock_bracket, _TRAIL_PATCH:
+            count = _place_intraday_trades(
+                _INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008,
+                today_tickers={"AAPL"},
+            )
+        assert count == 0
+        mock_bracket.assert_not_called()
+
+    def test_hard_gate_allows_different_ticker(self, mock_supabase):
+        """Hard gate only blocks the already-entered ticker; other approved tickers proceed."""
+        inserted = {}
+
+        def capture(data):
+            inserted.update(data)
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        proposals = {
+            "proposals": [
+                {
+                    "ticker": "MSFT",
+                    "entry_price": 300.0,
+                    "target_price": 315.0,
+                    "stop_loss": 294.0,
+                    "position_size": 3000,
+                    "shares": 10,
+                    "confidence": "HIGH",
+                },
+            ]
+        }
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", return_value=("ord-msft-001", 300.0)), \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-msft-001"):
+            count = _place_intraday_trades(
+                proposals, {"MSFT"}, _SESSION_ID, 0.008,
+                today_tickers={"AAPL"},  # AAPL blocked, MSFT not
+            )
+        assert count == 1
+        assert inserted.get("ticker") == "MSFT"
+
+    def test_hard_gate_blocks_duplicate_within_same_batch(self, mock_supabase):
+        """If two proposals for the same ticker arrive in one batch, only the first goes through."""
+        inserted_tickers = []
+
+        def capture(data):
+            inserted_tickers.append(data.get("ticker"))
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        proposals = {
+            "proposals": [
+                {
+                    "ticker": "PG",
+                    "entry_price": 145.0,
+                    "target_price": 152.0,
+                    "stop_loss": 143.0,
+                    "position_size": 2900,
+                    "shares": 20,
+                    "confidence": "MEDIUM",
+                },
+                {
+                    "ticker": "PG",
+                    "entry_price": 146.0,
+                    "target_price": 153.0,
+                    "stop_loss": 144.0,
+                    "position_size": 2920,
+                    "shares": 20,
+                    "confidence": "LOW",
+                },
+            ]
+        }
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", return_value=("ord-pg-001", 145.0)), \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-pg-001"):
+            count = _place_intraday_trades(
+                proposals, {"PG"}, _SESSION_ID, 0.008,
+                today_tickers=set(),
+            )
+        assert count == 1
+        assert inserted_tickers == ["PG"]
 
 
 def _old_entry_time() -> str:
@@ -670,7 +768,7 @@ class TestIntradayMain:
              patch("sessions.intraday.get_daily_pnl", return_value=0.0), \
              patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
              patch("sessions.intraday.count_open_positions", return_value=0), \
-             patch("sessions.intraday.get_investigated_tickers", return_value=[]), \
+             patch("sessions.intraday.get_today_tickers", return_value=set()), \
              patch("sessions.intraday.get_last_entry_scan_time", return_value=None), \
              patch("agents.research_agent.run_research_agent", return_value=proposals), \
              patch("agents.risk_agent.run_risk_agent", return_value=verdicts), \
