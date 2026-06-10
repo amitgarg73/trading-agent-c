@@ -373,6 +373,32 @@ class TestSessionType:
         assert upsert_payload["session_type"] == "eod"
 
 
+# ── parent_session_id ─────────────────────────────────────────────────────────
+
+class TestParentSessionId:
+    def test_parent_session_id_written_to_stub(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("intra-001", session_type="intraday", parent_session_id="pre-001")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert upsert_payload["parent_session_id"] == "pre-001"
+
+    def test_parent_session_id_omitted_when_none(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("pre-001", session_type="premarket")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert "parent_session_id" not in upsert_payload
+
+    def test_session_type_and_parent_written_together(self, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        TraceLogger("intra-002", session_type="intraday", parent_session_id="pre-002")
+        upsert_payload = query.upsert.call_args[0][0]
+        assert upsert_payload["session_type"] == "intraday"
+        assert upsert_payload["parent_session_id"] == "pre-002"
+
+
 # ── flush_cost_breakdown ──────────────────────────────────────────────────────
 
 class TestFlushCostBreakdown:

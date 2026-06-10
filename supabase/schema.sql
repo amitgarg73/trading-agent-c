@@ -24,6 +24,7 @@ CREATE TABLE ag_sessions (
   outcome_score        FLOAT,
   metadata             JSONB,   -- trades_executed, cost_breakdown, total_steps, etc.
   session_type         TEXT,    -- premarket | intraday | eod
+  parent_session_id    UUID REFERENCES ag_sessions(id),  -- intraday polls link back to premarket
   result_summary       TEXT,
   is_simulated         BOOL NOT NULL DEFAULT false,
   created_at           TIMESTAMPTZ DEFAULT now()

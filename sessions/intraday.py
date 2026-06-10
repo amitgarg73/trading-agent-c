@@ -4,6 +4,7 @@ import os
 import time as _time
 from datetime import date, datetime, time, timezone, timedelta
 from typing import Optional
+from uuid import uuid4
 
 import pytz
 
@@ -21,7 +22,7 @@ _ENTRY_CLOSE = time(13, 0)
 _SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected", "intraday_entries_placed"}
 
 
-def get_today_session_id() -> Optional[str]:
+def get_premarket_session_id() -> Optional[str]:
     """Return today's premarket session_id from ag_sessions, or None."""
     from core.db import get_client
     workflow_id = os.environ.get("WORKFLOW_ID", "")
@@ -38,6 +39,10 @@ def get_today_session_id() -> Optional[str]:
         .data
     )
     return rows[0]["id"] if rows else None
+
+
+# Backwards-compatible alias — remove after all callers updated
+get_today_session_id = get_premarket_session_id
 
 
 def get_daily_pnl(session_id: str) -> float:
@@ -87,14 +92,31 @@ def get_today_tickers(session_id: str) -> set[str]:
     return {r["ticker"] for r in rows if r.get("ticker")}
 
 
-def get_last_entry_scan_time(session_id: str) -> Optional[datetime]:
-    """Return UTC datetime of the last intraday Research Agent scan, or None."""
+def get_last_entry_scan_time(premarket_session_id: str) -> Optional[datetime]:
+    """Return UTC datetime of the last intraday scan decision, or None.
+
+    Queries ag_sessions for all intraday sessions that are children of the
+    premarket session, then finds the most recent scan-outcome decision in
+    ag_traces across those sessions. This handles multiple intraday polls
+    per day, each with its own session_id.
+    """
     from core.db import get_client
+    db = get_client()
+    intraday_rows = (
+        db.table("ag_sessions")
+        .select("id")
+        .eq("parent_session_id", premarket_session_id)
+        .eq("session_type", "intraday")
+        .execute()
+        .data
+    ) or []
+    if not intraday_rows:
+        return None
+    intraday_ids = [r["id"] for r in intraday_rows]
     rows = (
-        get_client()
-        .table("c_traces")
+        db.table("ag_traces")
         .select("created_at, outcome")
-        .eq("session_id", session_id)
+        .in_("session_id", intraday_ids)
         .eq("step_type", "decision")
         .order("created_at", desc=True)
         .execute()
@@ -317,17 +339,18 @@ def main() -> None:
         print(f"[intraday] Outside poll window ({now_t}). Exiting.")
         return
 
-    session_id = get_today_session_id()
-    if not session_id:
-        # In the premarket window (before 9:45 AM) — run the premarket pipeline now.
-        # After premarket creates a c_sessions row, subsequent intraday polls will find it.
+    # premarket_session_id is the day-level data key: used for all c_positions
+    # reads/writes, PnL, capacity, and deferred trade metadata. It never changes
+    # within a trading day. Each intraday poll gets its own session_id for traces.
+    premarket_session_id = get_premarket_session_id()
+    if not premarket_session_id:
         _PREMARKET_DISPATCH_END = time(10, 30)
         if now_t <= _PREMARKET_DISPATCH_END:
             print(f"[intraday] No session yet at {now_et.strftime('%H:%M ET')} — running premarket pipeline")
             from sessions.premarket import main as _premarket_main
             _premarket_main()
-            session_id = get_today_session_id()
-        if not session_id:
+            premarket_session_id = get_premarket_session_id()
+        if not premarket_session_id:
             print("[intraday] No premarket session today. Exiting.")
             return
 
@@ -338,72 +361,88 @@ def main() -> None:
 
     config = load_agent_config()
     params = load_params()
-    tracer = TraceLogger(session_id, session_type="intraday")
+
+    # Each poll is its own trace session, linked to premarket via parent_session_id.
+    intraday_session_id = str(uuid4())
+    tracer = TraceLogger(
+        intraday_session_id,
+        session_type="intraday",
+        parent_session_id=premarket_session_id,
+    )
 
     # Execute any premarket trades that were deferred — wait for 9:45 AM so the
     # first 15 minutes of open volatility settle before we enter.
     if now_t >= time(9, 45):
         from core.db import get_client as _get_client
         _rows = _get_client().table("ag_sessions").select("metadata") \
-            .eq("id", session_id).limit(1).execute().data or []
+            .eq("id", premarket_session_id).limit(1).execute().data or []
         _meta    = (_rows[0].get("metadata") or {}) if _rows else {}
         _pending = _meta.get("pending_trades") or []
         if _pending:
             print(f"[intraday] Executing {len(_pending)} deferred premarket trade(s)...")
             from sessions.premarket import _execute_trades
-            _execute_trades(_pending, session_id, params.trail_pct)
+            _execute_trades(_pending, premarket_session_id, params.trail_pct)
             _meta.pop("pending_trades", None)
             _get_client().table("ag_sessions").update(
                 {"metadata": _meta}
-            ).eq("id", session_id).execute()
+            ).eq("id", premarket_session_id).execute()
 
-    _sync_positions(session_id, params.trail_pct)
+    _sync_positions(premarket_session_id, params.trail_pct)
 
-    daily_pnl   = get_daily_pnl(session_id)
+    daily_pnl   = get_daily_pnl(premarket_session_id)
     goal_status = evaluate_goals(daily_pnl)
 
     if goal_status.lock_in_mode:
         tracer.log_decision("orchestrator", "lock_in_mode",
                             detail={"daily_pnl": daily_pnl, "target": goal_status.daily_target})
+        tracer.close_session("lock_in_mode", result_summary=f"P&L {daily_pnl:.2f} — lock-in active")
         print(f"[intraday] Lock-in mode active. P&L {daily_pnl:.2f}.")
         return
 
     if goal_status.pnl_floor_hit:
         tracer.log_decision("orchestrator", "pnl_floor_hit", detail={"daily_pnl": daily_pnl})
+        tracer.close_session("pnl_floor_hit", result_summary=f"P&L floor hit ({daily_pnl:.2f})")
         print(f"[intraday] P&L floor hit ({daily_pnl:.2f}). No new entries.")
         return
 
     if not config.get("enable_intraday_entries", True):
         tracer.log_decision("orchestrator", "normal_no_new_entries",
                             detail={"daily_pnl": daily_pnl})
+        tracer.close_session("entries_disabled", result_summary="Intraday entries disabled in config")
         print(f"[intraday] Poll complete. P&L {daily_pnl:.2f}. Entries disabled.")
         return
 
     min_interval = config.get("intraday_entry_min_interval_mins", 55)
-    last_scan = get_last_entry_scan_time(session_id)
+    last_scan = get_last_entry_scan_time(premarket_session_id)
     if last_scan is not None:
         elapsed_mins = (datetime.utcnow() - last_scan).total_seconds() / 60
         if elapsed_mins < min_interval:
             tracer.log_decision("orchestrator", "entry_scan_too_recent",
                                 detail={"elapsed_mins": round(elapsed_mins, 1), "min_interval": min_interval})
+            tracer.close_session(
+                "scan_too_recent",
+                result_summary=f"Last scan {elapsed_mins:.0f}m ago (min {min_interval}m)",
+            )
             print(f"[intraday] Entry scan too recent ({elapsed_mins:.0f}m ago, min {min_interval}m). Skipping.")
             return
 
     if now_t >= _ENTRY_CLOSE:
         tracer.log_decision("orchestrator", "past_entry_window", detail={"time": str(now_t)})
+        tracer.close_session("past_entry_window", result_summary="Past entry window cutoff")
         print(f"[intraday] Past entry window. No new entries.")
         return
 
-    open_count = count_open_positions(session_id)
+    open_count = count_open_positions(premarket_session_id)
     available  = params.max_positions - open_count
     if available <= 0:
         tracer.log_decision("orchestrator", "no_capacity",
                             detail={"open": open_count, "max": params.max_positions})
+        tracer.close_session("no_capacity", result_summary=f"Full ({open_count}/{params.max_positions})")
         print(f"[intraday] No capacity ({open_count}/{params.max_positions}).")
         return
 
     min_score_bonus = config.get("intraday_min_score_bonus", 1)
-    today_tickers   = get_today_tickers(session_id)
+    today_tickers   = get_today_tickers(premarket_session_id)
     max_new         = min(2, available, config.get("intraday_max_new_positions", 2))
 
     synthetic_report = {
@@ -423,28 +462,39 @@ def main() -> None:
         proposals = run_research_agent(tracer, synthetic_report, params)
         if not proposals.get("proposals"):
             tracer.log_decision("orchestrator", "no_intraday_candidates")
+            tracer.close_session("no_intraday_candidates", result_summary="No candidates from research agent")
             print("[intraday] No candidates found.")
             return
 
         verdicts = run_risk_agent(tracer, proposals, params)
-        _run_semantic_evals(session_id, {}, {}, proposals, verdicts, {})
+        # Evals belong to this intraday session, not the premarket session.
+        _run_semantic_evals(intraday_session_id, {}, {}, proposals, verdicts, {})
 
         approved = [v for v in verdicts.get("verdicts", []) if v.get("verdict") == "APPROVED"]
         if not approved:
             tracer.log_decision("orchestrator", "intraday_all_rejected")
+            tracer.close_session("intraday_all_rejected", result_summary="All proposals rejected by risk")
             print("[intraday] All proposals rejected.")
             return
 
+        # Positions are written under premarket_session_id — the day-level data key.
         count = _place_intraday_trades(
-            proposals, {v["ticker"] for v in approved}, session_id, params.trail_pct,
+            proposals, {v["ticker"] for v in approved}, premarket_session_id, params.trail_pct,
             today_tickers=today_tickers,
         )
         tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
+        tracer.close_session(
+            "intraday_entries_placed",
+            trades_proposed=len(proposals.get("proposals", [])),
+            trades_executed=count,
+            result_summary=f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}",
+        )
         print(f"[intraday] {count} trade(s) placed: "
               f"{', '.join(v['ticker'] for v in approved)}")
 
     except Exception as e:
         tracer.log_error("orchestrator", f"intraday error: {e}")
+        tracer.close_session("error", result_summary=f"Error: {e}")
         print(f"[intraday] Error: {e}")
         raise
 

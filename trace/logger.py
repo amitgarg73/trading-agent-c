@@ -57,10 +57,17 @@ class TraceLogger:
         tracer.close_session("converged", trades_proposed=3, trades_approved=2, trades_executed=2)
     """
 
-    def __init__(self, session_id: str, workflow_id: Optional[str] = None, session_type: Optional[str] = None):
+    def __init__(
+        self,
+        session_id: str,
+        workflow_id: Optional[str] = None,
+        session_type: Optional[str] = None,
+        parent_session_id: Optional[str] = None,
+    ):
         self.session_id = session_id
         self._workflow_id = workflow_id or _WORKFLOW_ID or None
         self._session_type = session_type
+        self._parent_session_id = parent_session_id
         self._sequence = 0
         self._agent_spans: dict[str, str] = {}   # agent -> current span_id
         self._session_span_id = str(uuid4())
@@ -358,6 +365,8 @@ class TraceLogger:
         }
         if self._session_type:
             stub["session_type"] = self._session_type
+        if self._parent_session_id:
+            stub["parent_session_id"] = self._parent_session_id
         get_client().table("ag_sessions").upsert(stub, on_conflict="id", ignore_duplicates=True).execute()
 
     def _write(self, fields: dict) -> str:

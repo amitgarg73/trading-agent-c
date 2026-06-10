@@ -10,26 +10,32 @@ from sessions.intraday import (
     count_open_positions,
     get_daily_pnl,
     get_last_entry_scan_time,
-    get_today_session_id,
+    get_premarket_session_id,
+    get_today_session_id,  # backwards-compatible alias
     get_today_tickers,
 )
 from tests.conftest import make_query
 
-_SESSION_ID = "sess-intra-0001"
+_SESSION_ID    = "sess-pre-0001"
+_INTRA_ID_1    = "sess-intra-0001"
+_INTRA_ID_2    = "sess-intra-0002"
 
 
-class TestGetTodaySessionId:
+class TestGetPremarketSessionId:
     def test_returns_id_when_row_exists(self, mock_supabase):
         mock_supabase.table.return_value = make_query([{"id": _SESSION_ID}])
-        from sessions.intraday import get_today_session_id
-        result = get_today_session_id()
+        result = get_premarket_session_id()
         assert result == _SESSION_ID
 
     def test_returns_none_when_no_rows(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
-        from sessions.intraday import get_today_session_id
-        result = get_today_session_id()
+        result = get_premarket_session_id()
         assert result is None
+
+    def test_alias_matches(self, mock_supabase):
+        """get_today_session_id is a backwards-compatible alias for get_premarket_session_id."""
+        mock_supabase.table.return_value = make_query([{"id": _SESSION_ID}])
+        assert get_today_session_id() == get_premarket_session_id()
 
 
 class TestGetDailyPnl:
@@ -79,31 +85,47 @@ class TestGetTodayTickers:
 
 
 class TestGetLastEntryScanTime:
+    """get_last_entry_scan_time takes the premarket_session_id, queries ag_sessions
+    for child intraday sessions, then queries ag_traces for scan-outcome decisions."""
+
+    def _setup_two_queries(self, mock_supabase, intraday_ids: list[str], trace_rows: list[dict]):
+        """Return different query results for the two DB calls:
+        first call → ag_sessions (intraday children), second call → ag_traces."""
+        calls = iter([
+            make_query([{"id": sid} for sid in intraday_ids]),
+            make_query(trace_rows),
+        ])
+        mock_supabase.table.side_effect = lambda _: next(calls)
+
+    def test_returns_none_when_no_intraday_sessions(self, mock_supabase):
+        self._setup_two_queries(mock_supabase, [], [])
+        assert get_last_entry_scan_time(_SESSION_ID) is None
+
     def test_returns_none_when_no_scan_decisions(self, mock_supabase):
-        rows = [{"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"}]
-        mock_supabase.table.return_value = make_query(rows)
+        trace_rows = [{"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"}]
+        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], trace_rows)
         assert get_last_entry_scan_time(_SESSION_ID) is None
 
     def test_returns_datetime_for_scan_outcome(self, mock_supabase):
-        rows = [
+        trace_rows = [
             {"created_at": "2026-05-27T14:30:00", "outcome": "intraday_entries_placed"},
             {"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"},
         ]
-        mock_supabase.table.return_value = make_query(rows)
+        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], trace_rows)
         result = get_last_entry_scan_time(_SESSION_ID)
         assert result == datetime(2026, 5, 27, 14, 30, 0)
 
-    def test_returns_most_recent_scan_outcome(self, mock_supabase):
-        rows = [
+    def test_returns_most_recent_scan_outcome_across_sessions(self, mock_supabase):
+        trace_rows = [
             {"created_at": "2026-05-27T15:00:00", "outcome": "no_intraday_candidates"},
             {"created_at": "2026-05-27T14:00:00", "outcome": "intraday_all_rejected"},
         ]
-        mock_supabase.table.return_value = make_query(rows)
+        self._setup_two_queries(mock_supabase, [_INTRA_ID_1, _INTRA_ID_2], trace_rows)
         result = get_last_entry_scan_time(_SESSION_ID)
         assert result == datetime(2026, 5, 27, 15, 0, 0)
 
-    def test_returns_none_when_no_rows(self, mock_supabase):
-        mock_supabase.table.return_value = make_query([])
+    def test_returns_none_when_no_trace_rows(self, mock_supabase):
+        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], [])
         assert get_last_entry_scan_time(_SESSION_ID) is None
 
 
@@ -634,7 +656,7 @@ class TestIntradayMain:
         fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=None):
+             patch("sessions.intraday.get_premarket_session_id", return_value=None):
             mock_dt.now.return_value = fake_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             from sessions.intraday import main
@@ -648,7 +670,7 @@ class TestIntradayMain:
         fake_now = datetime(2026, 5, 27, 9, 30, tzinfo=_ET)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=None), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=None), \
              patch("sessions.premarket.main") as mock_pm:
             mock_dt.now.return_value = fake_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
@@ -663,7 +685,7 @@ class TestIntradayMain:
         fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection(suspended=True)):
             mock_dt.now.return_value = fake_now
@@ -678,7 +700,7 @@ class TestIntradayMain:
         fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config", return_value={}), \
@@ -702,7 +724,7 @@ class TestIntradayMain:
         recent_scan = datetime.utcnow() - timedelta(minutes=20)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -727,7 +749,7 @@ class TestIntradayMain:
         fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -758,7 +780,7 @@ class TestIntradayMain:
         mock_supabase.table.return_value = make_query([])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -793,7 +815,7 @@ class TestIntradayMain:
         mock_supabase.table.return_value = make_query([{"metadata": {"pending_trades": _pending}}])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -821,7 +843,7 @@ class TestIntradayMain:
         mock_supabase.table.return_value = make_query([{"pending_trades": [{"ticker": "X"}]}])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -847,7 +869,7 @@ class TestIntradayMain:
         mock_supabase.table.return_value = make_query([{"pending_trades": [{"ticker": "X"}]}])
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
              patch("sessions.intraday.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.intraday.load_agent_config",
@@ -879,6 +901,8 @@ class TestIntradayJudge:
     _VERDICTS_REJECTED = {"verdicts": [{"ticker": "AAPL", "verdict": "REJECTED",
                                         "reason": "position limit"}]}
 
+    _INTRADAY_SESSION_ID = "intra-judge-uuid-0001"
+
     def _run_main(self, mock_supabase, proposals, verdicts=None):
         import contextlib
         import pytz
@@ -893,7 +917,9 @@ class TestIntradayJudge:
             mock_dt = stack.enter_context(patch("sessions.intraday.datetime"))
             mock_dt.now.return_value = fake_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
-            stack.enter_context(patch("sessions.intraday.get_today_session_id", return_value="sess-judge-01"))
+            stack.enter_context(patch("sessions.intraday.get_premarket_session_id", return_value="sess-judge-01"))
+            # Pin the intraday uuid4 so assertions can reference it by name.
+            stack.enter_context(patch("sessions.intraday.uuid4", return_value=self._INTRADAY_SESSION_ID))
             stack.enter_context(patch("sessions.intraday.check_protection_status",
                                       return_value=MagicMock(suspended=False)))
             stack.enter_context(patch("sessions.intraday.load_agent_config",
@@ -924,7 +950,8 @@ class TestIntradayJudge:
         mock_judge = self._run_main(mock_supabase, self._PROPOSALS, self._VERDICTS_APPROVED)
         mock_judge.assert_called_once()
         args = mock_judge.call_args[0]
-        assert args[0] == "sess-judge-01"
+        # Evals are filed against the intraday session_id, not the premarket session_id.
+        assert args[0] == self._INTRADAY_SESSION_ID
         assert args[1] == {}                   # market_report — empty for intraday
         assert args[2] == {}                   # scanner_result — empty for intraday
         assert args[3] == self._PROPOSALS
