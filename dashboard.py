@@ -240,26 +240,45 @@ with st.sidebar:
 
 today = date.today().isoformat()
 
-perf_rows  = q("c_daily_performance", order="-date", limit=1)
-open_pos   = q("c_positions", filters={"status": "open"})
+# Strategy C
+c_open     = q("c_positions", filters={"status": "open"})
+c_closed_t = q("c_positions", filters={"status": "closed", "close_date": today})
 protection = q("c_protection_events", order="-created_at", limit=1)
 config_row = q("c_agent_config", filters={"config_key": "phase"})
 
-perf       = perf_rows[0] if perf_rows else {}
-tier       = protection[0]["tier"] if protection else 0
-phase_raw  = config_row[0]["config_value"] if config_row else '"simulation"'
-phase      = phase_raw.strip('"')
+# Strategy A + B (may be unavailable)
+a_open_kpi   = q_ab("positions",   "ticker", filters={"status": "OPEN"})
+a_closed_kpi = q_ab("positions",   "realized_pnl", filters={"status": "CLOSED"}, gte={"opened_at": today})
+b_open_kpi   = q_ab("b_positions", "ticker", filters={"status": "OPEN"})
+b_closed_kpi = q_ab("b_positions", "realized_pnl", filters={"status": "CLOSED"}, gte={"opened_at": today})
 
-today_pnl  = perf.get("realized_pnl", 0.0) if perf.get("date") == today else 0.0
-win_rate   = perf.get("win_rate", 0.0) if perf.get("date") == today else None
-n_open     = len(open_pos)
+tier      = protection[0]["tier"] if protection else 0
+phase_raw = config_row[0]["config_value"] if config_row else '"simulation"'
+phase     = phase_raw.strip('"')
+
+# Aggregate across all three strategies
+n_open    = len(a_open_kpi) + len(b_open_kpi) + len(c_open)
+
+a_pnl     = sum(r.get("realized_pnl") or 0 for r in a_closed_kpi)
+b_pnl     = sum(r.get("realized_pnl") or 0 for r in b_closed_kpi)
+c_pnl     = sum(r.get("realized_pnl") or 0 for r in c_closed_t)
+today_pnl = round(a_pnl + b_pnl + c_pnl, 2)
+
+all_closed_today = (
+    [(r.get("realized_pnl") or 0) for r in a_closed_kpi] +
+    [(r.get("realized_pnl") or 0) for r in b_closed_kpi] +
+    [(r.get("realized_pnl") or 0) for r in c_closed_t]
+)
+wins      = sum(1 for p in all_closed_today if p > 0)
+total_t   = len(all_closed_today)
+win_rate  = wins / total_t if total_t else None
 
 k1, k2, k3, k4, k5 = st.columns(5)
-k1.metric("Today P&L", fmt_pnl(today_pnl), delta_color="normal")
-k2.metric("Open Positions", n_open)
-k3.metric("Win Rate", f"{win_rate:.0%}" if win_rate is not None else "—")
-k4.metric("Protection Tier", tier, delta_color="inverse")
-k5.metric("Phase", phase.upper())
+k1.metric("Today P&L (A+B+C)", fmt_pnl(today_pnl), delta_color="normal")
+k2.metric("Open Positions (A+B+C)", n_open)
+k3.metric("Win Rate (A+B+C)", f"{win_rate:.0%}" if win_rate is not None else "—")
+k4.metric("Protection Tier (C)", tier, delta_color="inverse")
+k5.metric("Phase (C)", phase.upper())
 
 st.markdown("---")
 
