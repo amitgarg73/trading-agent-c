@@ -347,8 +347,9 @@ class TraceLogger:
             except Exception as e:
                 print(f"  [tracer] embedding trigger failed (non-fatal): {e}")
 
-        t = threading.Thread(target=_post, daemon=True)
+        t = threading.Thread(target=_post, daemon=False)
         t.start()
+        t.join(timeout=35)  # wait up to 35s so the POST completes before the process exits
 
     # ── Private ────────────────────────────────────────────────────────────────
 
