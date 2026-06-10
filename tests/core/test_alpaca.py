@@ -88,10 +88,11 @@ _MARKET_OPEN   = patch("core.alpaca._is_market_open", return_value=True)
 _MARKET_CLOSED = patch("core.alpaca._is_market_open", return_value=False)
 
 
-def _mock_dclient(ticker: str, bid: float):
-    """Return a patched _dclient that reports the given bid price."""
+def _mock_dclient(ticker: str, ask: float):
+    """Return a patched _dclient that reports the given ask price."""
     quote = MagicMock()
-    quote.bid_price = str(bid)
+    quote.ask_price = str(ask)
+    quote.bid_price = "0"
     mc = MagicMock()
     mc.return_value.get_stock_latest_quote.return_value = {ticker: quote}
     return patch("core.alpaca._dclient", mc)
@@ -135,8 +136,8 @@ class TestSubmitBracketOrder:
         assert oid == "ord-001"
         assert fill is None
 
-    def test_uses_bid_as_limit_price(self):
-        """Limit price must be current bid, not the stale proposal price."""
+    def test_uses_ask_as_limit_price(self):
+        """Limit price must be current ask, not the stale proposal price."""
         order = _mock_order(status="filled", filled_avg_price=184.90)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
@@ -148,10 +149,10 @@ class TestSubmitBracketOrder:
         call_args = mc.return_value.submit_order.call_args[0][0]
         assert call_args.limit_price == pytest.approx(184.90, rel=1e-3)
 
-    def test_stop_and_target_reprojected_to_bid(self):
-        """Stop/target must maintain the same % distance from bid, not from proposal price."""
+    def test_stop_and_target_reprojected_to_ask(self):
+        """Stop/target must maintain the same % distance from ask, not from proposal price."""
         # proposal: entry=185, target=192 (+3.78%), stop=183 (-1.08%)
-        # bid=184.90 → target should be 184.90*1.0378, stop=184.90*0.9892
+        # ask=184.90 → target should be 184.90*1.0378, stop=184.90*0.9892
         order = _mock_order(status="filled", filled_avg_price=184.90)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
@@ -166,8 +167,8 @@ class TestSubmitBracketOrder:
         assert req.take_profit.limit_price == pytest.approx(expected_target, rel=1e-3)
         assert req.stop_loss.stop_price    == pytest.approx(expected_stop,   rel=1e-3)
 
-    def test_falls_back_to_proposal_price_when_bid_unavailable(self):
-        """If bid fetch fails, use proposal price as-is (no buffer)."""
+    def test_falls_back_to_proposal_price_when_ask_unavailable(self):
+        """If ask fetch fails, use proposal price as-is (no buffer)."""
         order = _mock_order(status="filled", filled_avg_price=185.0)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, patch("core.alpaca._dclient", side_effect=Exception("no creds")):
@@ -201,10 +202,10 @@ class TestSubmitBracketOrder:
             submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
         mc.return_value.get_order_by_id.assert_not_called()
 
-    def test_large_market_gap_uses_bid_passive_entry(self):
-        """Large gap between bid and proposal is a real market move — still use bid (passive entry)."""
+    def test_large_market_gap_uses_ask_limit(self):
+        """Large gap between ask and proposal is a real market move — still use ask as limit."""
         order = _mock_order(status="filled", filled_avg_price=457.90)
-        # entry=514.50, bid=457.90 → 11% gap → real market drop, passive limit at bid
+        # entry=514.50, ask=457.90 → 11% gap → real market drop, limit at ask
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("TMO", 457.90):
             mt.sleep = MagicMock()
@@ -214,16 +215,16 @@ class TestSubmitBracketOrder:
             submit_bracket_order("TMO", 5, 514.50, 555.66, 511.05)
         req = mc.return_value.submit_order.call_args[0][0]
         assert req.limit_price == pytest.approx(457.90, rel=1e-3)
-        # stop/target reprojected at same percentages from bid
+        # stop/target reprojected at same percentages from ask
         stop_pct   = (514.50 - 511.05) / 514.50
         target_pct = (555.66 - 514.50) / 514.50
         assert req.stop_loss.stop_price    == pytest.approx(round(457.90 * (1 - stop_pct),   2), rel=1e-3)
         assert req.take_profit.limit_price == pytest.approx(round(457.90 * (1 + target_pct), 2), rel=1e-3)
 
-    def test_tight_bid_uses_bid_not_proposal(self):
-        """If bid is within 5% of entry_price, use bid as limit (normal passive entry)."""
+    def test_tight_ask_uses_ask_not_proposal(self):
+        """If ask is within 5% of entry_price, use ask as limit (normal market entry)."""
         order = _mock_order(status="filled", filled_avg_price=184.90)
-        # entry=185.0, bid=184.90 → 0.05% gap → use bid
+        # entry=185.0, ask=184.90 → 0.05% gap → use ask
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
             mt.sleep = MagicMock()
@@ -234,9 +235,9 @@ class TestSubmitBracketOrder:
         req = mc.return_value.submit_order.call_args[0][0]
         assert req.limit_price == pytest.approx(184.90, rel=1e-3)
 
-    def test_staleness_gate_skips_when_bid_1_5pct_above_proposal(self):
-        """If bid is >1.5% above proposal entry, the stock ran since the research call — skip."""
-        # entry_price=185.0, bid=188.0 → 1.62% above → stale → (None, None)
+    def test_staleness_gate_skips_when_ask_1_5pct_above_proposal(self):
+        """If ask is >1.5% above proposal entry, the stock ran since the research call — skip."""
+        # entry_price=185.0, ask=188.0 → 1.62% above → stale → (None, None)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 188.0):
             mt.sleep = MagicMock()
@@ -246,9 +247,9 @@ class TestSubmitBracketOrder:
         assert fill is None
         mc.return_value.submit_order.assert_not_called()
 
-    def test_staleness_gate_allows_bid_within_threshold(self):
-        """Bid 1.3% above entry is within the 1.5% threshold — should still submit."""
-        # bid = 187.4 → (187.4 - 185.0) / 185.0 = 1.3% < 1.5% → not stale
+    def test_staleness_gate_allows_ask_within_threshold(self):
+        """Ask 1.3% above entry is within the 1.5% threshold — should still submit."""
+        # ask = 187.4 → (187.4 - 185.0) / 185.0 = 1.3% < 1.5% → not stale
         order = _mock_order(status="filled", filled_avg_price=187.4)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 187.4):
@@ -261,9 +262,9 @@ class TestSubmitBracketOrder:
         mc.return_value.submit_order.assert_called_once()
 
     def test_staleness_gate_does_not_trigger_on_downside(self):
-        """Bid below proposal (stock dropped) is not stale — passive limit is still valid."""
+        """Ask below proposal (stock dropped) is not stale — limit at ask is still valid."""
         order = _mock_order(status="filled", filled_avg_price=182.0)
-        # entry=185.0, bid=182.0 → 1.62% BELOW → not stale, proceed with bid
+        # entry=185.0, ask=182.0 → 1.62% BELOW → not stale, proceed with ask
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
              _MARKET_OPEN, _mock_dclient("AAPL", 182.0):
             mt.sleep = MagicMock()

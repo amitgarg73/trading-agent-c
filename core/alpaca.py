@@ -115,53 +115,54 @@ def submit_bracket_order(
     from alpaca.trading.requests import LimitOrderRequest, TakeProfitRequest, StopLossRequest
     from alpaca.trading.enums import OrderSide, TimeInForce, OrderClass
 
-    # Fetch current bid at submission time for passive limit entry.
-    # The Research Agent's entry_price is the ask captured minutes earlier — using
-    # bid lets the stock come to us instead of chasing a stale price upward.
-    # Stop/target are reprojected at the same % distances from bid.
-    # If bid is unavailable (premarket ask/bid=0 on IEX), fall back to get_live_prices()
-    # and reproject from there so stop/target stay valid relative to actual fill.
+    # Fetch current ask at submission time and use it as the limit price.
+    # Using ask guarantees fill on momentum entries — a limit at bid sits below
+    # the ask and never fills in a trending market (today's observed root cause).
+    # Stop/target are reprojected at the same % distances from ask.
+    # Staleness gate: if ask is >1.5% above the research proposal, the stock has
+    # already run — skip without submitting.
+    # Fallback: get_live_prices() if ask is unavailable (premarket IEX feed).
     limit_px   = round(entry_price, 2)   # fallback: proposal price
     eff_stop   = round(stop_price, 2)
     eff_target = round(target_price, 2)
-    _bid_found = False
+    _quote_found = False
     try:
         from alpaca.data.requests import StockLatestQuoteRequest
         req_q = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
         q = _dclient().get_stock_latest_quote(req_q).get(ticker)
         if q:
-            raw_bid = getattr(q, "bid_price", None)
-            if raw_bid and float(raw_bid) > 0:
-                bid = round(float(raw_bid), 4)
-                if bid > entry_price * 1.015:
-                    print(f"  [alpaca] {ticker} stale: bid ${bid:.2f} is "
-                          f"{(bid-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skip")
+            raw_ask = getattr(q, "ask_price", None)
+            if raw_ask and float(raw_ask) > 0:
+                ask = round(float(raw_ask), 4)
+                if ask > entry_price * 1.015:
+                    print(f"  [alpaca] {ticker} stale: ask ${ask:.2f} is "
+                          f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skip")
                     return None, None
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
-                limit_px   = round(bid, 2)
-                eff_stop   = round(bid * (1 - stop_pct),   2)
-                eff_target = round(bid * (1 + target_pct), 2)
-                _bid_found = True
-                if bid < entry_price * 0.95:
-                    print(f"  [alpaca] {ticker} market moved: bid ${bid:.2f} vs proposal ${entry_price:.2f} "
-                          f"({(entry_price-bid)/entry_price:.1%} gap) — passive limit at bid")
+                limit_px   = round(ask, 2)
+                eff_stop   = round(ask * (1 - stop_pct),   2)
+                eff_target = round(ask * (1 + target_pct), 2)
+                _quote_found = True
+                if ask < entry_price * 0.95:
+                    print(f"  [alpaca] {ticker} market moved down: ask ${ask:.2f} vs proposal ${entry_price:.2f} "
+                          f"({(entry_price-ask)/entry_price:.1%} gap) — limit at ask")
     except Exception:
         pass  # keep fallback prices
 
-    if not _bid_found:
-        # No bid available (premarket bid=0 on IEX feed).
-        # Fall back to get_live_prices() which accepts ask-only or bid-only quotes.
+    if not _quote_found:
+        # No ask available (premarket ask=0 on IEX feed).
+        # Fall back to get_live_price() which accepts ask-only or bid-only quotes.
         # Re-anchor stop/target to live price so they stay valid relative to fill.
         try:
-            live_px = get_live_prices([ticker]).get(ticker)
+            live_px = get_live_price(ticker)
             if live_px and entry_price > 0 and abs(live_px - entry_price) / entry_price > 0.005:
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
                 limit_px   = round(live_px, 2)
                 eff_stop   = round(live_px * (1 - stop_pct),   2)
                 eff_target = round(live_px * (1 + target_pct), 2)
-                print(f"  [alpaca] {ticker} no bid/ask pair — live ${live_px:.2f} used (proposal ${entry_price:.2f})")
+                print(f"  [alpaca] {ticker} no ask available — live ${live_px:.2f} used (proposal ${entry_price:.2f})")
         except Exception:
             pass  # keep fallback prices
 
