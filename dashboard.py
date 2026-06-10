@@ -303,7 +303,7 @@ if page == "Today":
                     filters={"status": "OPEN"})
     b_closed = q_ab("b_positions", "ticker,pool,entry_price,close_price,fill_price,shares,realized_pnl,opened_at,closed_at,close_reason",
                     filters={"status": "CLOSED"}, gte={"opened_at": today})
-    c_open   = [p for p in open_pos if p.get("open_date") == today]
+    c_open   = [p for p in c_open if p.get("open_date") == today]
     c_closed = q("c_positions", "ticker,entry_price,exit_price,shares,realized_pnl,entry_time,close_time,exit_reason",
                  filters={"status": "closed", "close_date": today})
 
@@ -582,10 +582,10 @@ if page == "Overview":
 
     with col_l:
         st.subheader("Open Positions")
-        if not open_pos:
+        if not c_open:
             st.info("No open positions")
         else:
-            for p in open_pos:
+            for p in c_open:
                 pnl = p.get("realized_pnl")
                 with st.container(border=True):
                     c1, c2, c3 = st.columns([2, 2, 1])
