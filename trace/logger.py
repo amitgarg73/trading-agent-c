@@ -320,36 +320,8 @@ class TraceLogger:
             })
 
         get_client().table("ag_sessions").update(row).eq("id", self.session_id).execute()
-        self._trigger_embeddings()
-
-    def _trigger_embeddings(self) -> None:
-        """Fire-and-forget POST to Argus embedding compute route at session close.
-        Runs in a daemon thread — never blocks session close or trade execution."""
-        import threading, urllib.request, json as _json
-        argus_url = os.getenv("ARGUS_URL", "")
-        if not argus_url:
-            return
-
-        def _post() -> None:
-            try:
-                payload = _json.dumps({
-                    "session_id":  self.session_id,
-                    "tenant_id":   _TENANT_ID,
-                    "workflow_id": self._workflow_id,
-                }).encode()
-                req = urllib.request.Request(
-                    f"{argus_url.rstrip('/')}/api/compute/embeddings",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=30)
-            except Exception as e:
-                print(f"  [tracer] embedding trigger failed (non-fatal): {e}")
-
-        t = threading.Thread(target=_post, daemon=False)
-        t.start()
-        t.join(timeout=35)  # wait up to 35s so the POST completes before the process exits
+        # Embeddings are computed by the Argus cron (POST /api/compute/embeddings every 5 min).
+        # No pipeline-side trigger needed — cron covers direct Supabase writers.
 
     # ── Private ────────────────────────────────────────────────────────────────
 
