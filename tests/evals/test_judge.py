@@ -139,6 +139,64 @@ class TestEvaluateSessionFromTraces:
             from evals.judge import evaluate_session_from_traces
             evaluate_session_from_traces("sess-1")   # must not raise
 
+    def test_scanner_summary_fields_reordered_before_candidates(self, mock_supabase, monkeypatch):
+        """regime/scan_rationale/dropped_count must appear first in the judge input.
+
+        The scanner's full JSON is ~3,600 chars; the judge window is 3,000 chars.
+        Without reordering, the summary fields get truncated and the judge marks
+        them as missing — producing a false-positive incident (root cause: June 9 backfill).
+        """
+        import json
+        mock_ev = _mock_evaluate(monkeypatch)
+
+        # Build a scanner output that mimics the real one: 20 candidates + summary fields at end
+        # Use indent=2 + code fences to match how the scanner LLM formats its output.
+        # Short synthetic tickers produce ~2400 chars compact; indented with fences hits ~3600.
+        candidates = [
+            {"ticker": f"T{i}", "technical_score": 6, "premarket_change_pct": 1.0 + i,
+             "price": 100.0 + i, "sector": "Consumer Discretionary"}
+            for i in range(20)
+        ]
+        scanner_json = "```json\n" + json.dumps({
+            "candidates":    candidates,
+            "n_returned":    20,
+            "scan_rationale": "ELEVATED vix regime applied min_score=5.",
+            "signals_used":  ["technical_score>=5", "premarket_change_pct"],
+            "regime":        "elevated_vix",
+            "dropped_count": 3,
+        }, indent=2) + "\n```"
+        assert len(scanner_json) > 3000, "fixture must exceed 3000 chars to be a valid regression test"
+
+        self._db(mock_supabase, [_trace_row("scanner", scanner_json)])
+        with patch("evals.judge._TENANT_ID", "tenant-1"):
+            from evals.judge import evaluate_session_from_traces
+            evaluate_session_from_traces("sess-1")
+
+        agent_outputs = mock_ev.call_args[0][1]
+        assert "scanner" in agent_outputs
+        condensed = json.loads(agent_outputs["scanner"])
+
+        # Summary fields present and correct
+        assert condensed["regime"] == "elevated_vix"
+        assert condensed["scan_rationale"] == "ELEVATED vix regime applied min_score=5."
+        assert condensed["dropped_count"] == 3
+        assert condensed["n_returned"] == 20
+        # Full candidates list replaced by top 5
+        assert len(condensed["top_candidates"]) == 5
+        # Result must fit within the judge window
+        assert len(agent_outputs["scanner"]) < 3000
+
+    def test_scanner_reorder_skipped_when_not_valid_json(self, mock_supabase, monkeypatch):
+        """If scanner reasoning is not JSON, leave it unchanged rather than raising."""
+        mock_ev = _mock_evaluate(monkeypatch)
+        self._db(mock_supabase, [_trace_row("scanner", "not json at all")])
+        with patch("evals.judge._TENANT_ID", "tenant-1"):
+            from evals.judge import evaluate_session_from_traces
+            evaluate_session_from_traces("sess-1")
+
+        agent_outputs = mock_ev.call_args[0][1]
+        assert agent_outputs["scanner"] == "not json at all"
+
 
 # ── _patch_session_quality_score ──────────────────────────────────────────────
 

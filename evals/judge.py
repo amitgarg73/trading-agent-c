@@ -355,6 +355,30 @@ def evaluate_session_from_traces(session_id: str) -> None:
             for agent, outputs in agent_outputs.items()
             if outputs
         }
+
+        # Scanner output is typically 3,500+ chars due to the full candidates list.
+        # The judge window is 3,000 chars, so regime/scan_rationale/dropped_count
+        # (which appear after the candidates array) get truncated and the judge
+        # incorrectly reports them as missing. Re-order to put summary fields first,
+        # matching what _prepare_scanner_for_judge does in the live orchestrator path.
+        if "scanner" in combined:
+            try:
+                raw = combined["scanner"].strip()
+                # Strip markdown code fences if present (LLM often wraps JSON in ```json ... ```)
+                if raw.startswith("```"):
+                    raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+                scanner_data = json.loads(raw)
+                candidates = scanner_data.get("candidates") or []
+                combined["scanner"] = json.dumps({
+                    "regime":         scanner_data.get("regime"),
+                    "scan_rationale": scanner_data.get("scan_rationale"),
+                    "dropped_count":  scanner_data.get("dropped_count", 0),
+                    "n_returned":     scanner_data.get("n_returned", len(candidates)),
+                    "top_candidates": candidates[:5],
+                }, indent=2)
+            except (json.JSONDecodeError, TypeError):
+                pass  # leave raw if not valid JSON
+
         if combined:
             evaluate_session_outputs(session_id, combined)
     except Exception as exc:
