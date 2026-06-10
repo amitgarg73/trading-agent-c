@@ -362,14 +362,6 @@ def main() -> None:
     config = load_agent_config()
     params = load_params()
 
-    # Each poll is its own trace session, linked to premarket via parent_session_id.
-    intraday_session_id = str(uuid4())
-    tracer = TraceLogger(
-        intraday_session_id,
-        session_type="intraday",
-        parent_session_id=premarket_session_id,
-    )
-
     # Execute any premarket trades that were deferred — wait for 9:45 AM so the
     # first 15 minutes of open volatility settle before we enter.
     if now_t >= time(9, 45):
@@ -393,22 +385,14 @@ def main() -> None:
     goal_status = evaluate_goals(daily_pnl)
 
     if goal_status.lock_in_mode:
-        tracer.log_decision("orchestrator", "lock_in_mode",
-                            detail={"daily_pnl": daily_pnl, "target": goal_status.daily_target})
-        tracer.close_session("lock_in_mode", result_summary=f"P&L {daily_pnl:.2f} — lock-in active")
         print(f"[intraday] Lock-in mode active. P&L {daily_pnl:.2f}.")
         return
 
     if goal_status.pnl_floor_hit:
-        tracer.log_decision("orchestrator", "pnl_floor_hit", detail={"daily_pnl": daily_pnl})
-        tracer.close_session("pnl_floor_hit", result_summary=f"P&L floor hit ({daily_pnl:.2f})")
         print(f"[intraday] P&L floor hit ({daily_pnl:.2f}). No new entries.")
         return
 
     if not config.get("enable_intraday_entries", True):
-        tracer.log_decision("orchestrator", "normal_no_new_entries",
-                            detail={"daily_pnl": daily_pnl})
-        tracer.close_session("entries_disabled", result_summary="Intraday entries disabled in config")
         print(f"[intraday] Poll complete. P&L {daily_pnl:.2f}. Entries disabled.")
         return
 
@@ -417,29 +401,28 @@ def main() -> None:
     if last_scan is not None:
         elapsed_mins = (datetime.utcnow() - last_scan).total_seconds() / 60
         if elapsed_mins < min_interval:
-            tracer.log_decision("orchestrator", "entry_scan_too_recent",
-                                detail={"elapsed_mins": round(elapsed_mins, 1), "min_interval": min_interval})
-            tracer.close_session(
-                "scan_too_recent",
-                result_summary=f"Last scan {elapsed_mins:.0f}m ago (min {min_interval}m)",
-            )
             print(f"[intraday] Entry scan too recent ({elapsed_mins:.0f}m ago, min {min_interval}m). Skipping.")
             return
 
     if now_t >= _ENTRY_CLOSE:
-        tracer.log_decision("orchestrator", "past_entry_window", detail={"time": str(now_t)})
-        tracer.close_session("past_entry_window", result_summary="Past entry window cutoff")
         print(f"[intraday] Past entry window. No new entries.")
         return
 
     open_count = count_open_positions(premarket_session_id)
     available  = params.max_positions - open_count
     if available <= 0:
-        tracer.log_decision("orchestrator", "no_capacity",
-                            detail={"open": open_count, "max": params.max_positions})
-        tracer.close_session("no_capacity", result_summary=f"Full ({open_count}/{params.max_positions})")
         print(f"[intraday] No capacity ({open_count}/{params.max_positions}).")
         return
+
+    # Only open an Argus session when agents will actually run.
+    # Pass-through exits (past entry window, scan too recent, no capacity, etc.)
+    # produce no agent output and pollute quality metrics if traced.
+    intraday_session_id = str(uuid4())
+    tracer = TraceLogger(
+        intraday_session_id,
+        session_type="intraday",
+        parent_session_id=premarket_session_id,
+    )
 
     min_score_bonus = config.get("intraday_min_score_bonus", 1)
     today_tickers   = get_today_tickers(premarket_session_id)
