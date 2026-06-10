@@ -77,6 +77,94 @@ def q_ab(table: str, cols: str = "*", filters: dict | None = None,
         return []
 
 
+# ── ag_sessions / ag_traces helpers ───────────────────────────────────────────
+
+def _workflow_id() -> str:
+    return os.environ.get("WORKFLOW_ID") or st.secrets.get("WORKFLOW_ID", "")
+
+
+def q_sessions(
+    session_types: list[str] | None = None,
+    since: str | None = None,
+    order: str = "-started_at",
+    limit: int | None = None,
+    parent_id: str | None = None,
+) -> list[dict]:
+    """Query ag_sessions filtered by workflow_id and is_simulated."""
+    try:
+        db  = get_client()
+        req = db.table("ag_sessions").select("*").eq("is_simulated", False)
+        wid = _workflow_id()
+        if wid:
+            req = req.eq("workflow_id", wid)
+        if session_types:
+            req = req.in_("session_type", session_types)
+        if since:
+            req = req.gte("started_at", since)
+        if parent_id:
+            req = req.eq("parent_session_id", parent_id)
+        desc = order.startswith("-")
+        req  = req.order(order.lstrip("-"), desc=desc)
+        if limit:
+            req = req.limit(limit)
+        return req.execute().data or []
+    except Exception as e:
+        st.warning(f"ag_sessions: {e}")
+        return []
+
+
+def _smeta(s: dict, key: str, default=0):
+    """Extract a value from ag_sessions.metadata."""
+    return (s.get("metadata") or {}).get(key, default)
+
+
+def _sdate(s: dict) -> str:
+    """Derive a date string from an ag_sessions row."""
+    d = _smeta(s, "date", "")
+    if d:
+        return d
+    ts = s.get("started_at") or ""
+    return ts[:10] if ts else "—"
+
+
+def _normalize_trace(t: dict) -> dict:
+    """Flatten an ag_traces row so callers can use the same field names as c_traces."""
+    p = t.get("payload") or {}
+    return {
+        "agent":           t.get("agent") or "",
+        "step_type":       t.get("step_type") or "",
+        "tool_name":       t.get("tool_name") or p.get("tool_name") or "",
+        "outcome":         t.get("outcome") or "",
+        "latency_ms":      t.get("latency_ms") or 0,
+        "tokens_input":    t.get("tokens_input") or 0,
+        "tokens_output":   t.get("tokens_output") or 0,
+        "created_at":      t.get("created_at") or "",
+        "sequence":        p.get("sequence") or 0,
+        "span_id":         p.get("span_id") or str(t.get("id") or ""),
+        "agent_reasoning": p.get("agent_reasoning") or "",
+        "tool_input":      p.get("tool_input") or {},
+        "tool_output":     p.get("tool_output") or {},
+    }
+
+
+def q_traces(session_id: str) -> list[dict]:
+    """Fetch ag_traces for a session, normalized for display."""
+    try:
+        rows = (
+            get_client()
+            .table("ag_traces")
+            .select("*")
+            .eq("session_id", session_id)
+            .order("created_at")
+            .execute()
+            .data or []
+        )
+        return [_normalize_trace(t) for t in rows]
+    except Exception as e:
+        st.warning(f"ag_traces: {e}")
+        return []
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def pnl_color(val: float | None) -> str:
@@ -448,15 +536,19 @@ if page == "Today":
     st.markdown("---")
 
     # ── Strategy C session strip ─────────────────────────────────────────────
-    c_session = q("c_sessions", filters={"date": today}, order="-started_at", limit=1)
-    if c_session:
-        s = c_session[0]
+    pm_sessions   = q_sessions(session_types=["premarket"], since=today, limit=1)
+    intra_sessions = q_sessions(session_types=["intraday"],  since=today)
+    if pm_sessions:
+        s = pm_sessions[0]
+        intra_count = len(intra_sessions)
+        intra_str   = f" · {intra_count} intraday poll(s)" if intra_count else ""
         st.markdown(
-            f"**Strategy C session** · "
-            f"{s.get('terminal_reason','—')} · "
-            f"{s.get('trades_executed',0)} executed · "
+            f"**Strategy C** · "
+            f"Premarket: {s.get('terminal_reason','—')} · "
+            f"{_smeta(s, 'trades_executed', 0)} executed · "
             f"Cost ${s.get('total_cost_usd') or 0:.3f} · "
-            f"Started {fmt_ts(s.get('started_at'))}",
+            f"Started {fmt_ts(s.get('started_at'))}"
+            f"{intra_str}",
         )
 
 
@@ -500,20 +592,22 @@ if page == "Overview":
                     c3.markdown(f"<span style='color:{color}'>{fmt_pnl(rpnl)}</span>", unsafe_allow_html=True)
 
     st.subheader("Recent Sessions (7 days)")
-    sessions = q("c_sessions", order="-date", limit=14)
+    since_7d = (date.today() - timedelta(days=7)).isoformat()
+    sessions = q_sessions(since=since_7d, limit=30)
     if sessions:
         rows = []
         for s in sessions:
             rows.append({
-                "Date":       s.get("date"),
-                "Terminal":   s.get("terminal_reason"),
-                "Proposed":   s.get("trades_proposed", 0),
-                "Approved":   s.get("trades_approved", 0),
-                "Executed":   s.get("trades_executed", 0),
-                "Cost $":     round(s.get("total_cost_usd", 0), 4),
+                "Date":       _sdate(s),
+                "Type":       s.get("session_type", "—"),
+                "Terminal":   s.get("terminal_reason", "—"),
+                "Proposed":   _smeta(s, "trades_proposed", 0),
+                "Executed":   _smeta(s, "trades_executed", 0),
+                "Cost $":     round(s.get("total_cost_usd") or 0, 4),
                 "Tokens In":  s.get("total_tokens_input", 0),
                 "Tokens Out": s.get("total_tokens_output", 0),
-                "Latency s":  round(s.get("total_latency_ms", 0) / 1000, 1),
+                "Latency s":  round(_smeta(s, "total_latency_ms", 0) / 1000, 1),
+                "Started":    fmt_ts(s.get("started_at")),
             })
         st.dataframe(rows, width="stretch", hide_index=True)
     else:
@@ -660,17 +754,18 @@ elif page == "Costs":
 
     st.header("Claude API Cost Tracking")
 
-    sessions = q("c_sessions", order="-date", limit=60)
+    since_60d = (date.today() - timedelta(days=60)).isoformat()
+    sessions = q_sessions(since=since_60d, limit=200)
 
     if not sessions:
         st.info("No sessions yet — costs will appear after the first premarket run")
     else:
         # ── KPIs ──────────────────────────────────────────────────────────────
-        total_cost   = sum(s.get("total_cost_usd") or 0 for s in sessions)
+        total_cost    = sum(s.get("total_cost_usd") or 0 for s in sessions)
         session_count = len(sessions)
-        avg_cost     = total_cost / session_count if session_count else 0
-        days         = len({s["date"] for s in sessions})
-        daily_avg    = total_cost / days if days else 0
+        avg_cost      = total_cost / session_count if session_count else 0
+        days          = len({_sdate(s) for s in sessions})
+        daily_avg     = total_cost / days if days else 0
 
         k1, k2, k3, k4 = st.columns(4)
         k1.metric("Total Spent",      f"${total_cost:.4f}")
@@ -684,7 +779,7 @@ elif page == "Costs":
         st.subheader("Daily Cost (last 30 days)")
         daily_map: dict[str, float] = {}
         for s in sessions:
-            d = s.get("date", "")
+            d = _sdate(s)
             daily_map[d] = daily_map.get(d, 0) + (s.get("total_cost_usd") or 0)
 
         df_daily = pd.DataFrame(
@@ -733,13 +828,15 @@ elif page == "Costs":
         st.subheader("Session History")
         session_rows = [
             {
-                "Date":       s.get("date", ""),
-                "Session":    str(s.get("id", ""))[:8] + "…",
-                "Terminal":   s.get("terminal_reason", ""),
-                "Tokens in":  f"{s.get('total_tokens_input', 0):,}",
-                "Tokens out": f"{s.get('total_tokens_output', 0):,}",
+                "Date":       _sdate(s),
+                "Type":       s.get("session_type", "—"),
+                "Session":    str(s.get("id") or "")[:8] + "…",
+                "Terminal":   s.get("terminal_reason", "—"),
+                "Tokens in":  f"{s.get('total_tokens_input') or 0:,}",
+                "Tokens out": f"{s.get('total_tokens_output') or 0:,}",
                 "Cost ($)":   f"${s.get('total_cost_usd') or 0:.4f}",
-                "Trades":     s.get("trades_executed", 0),
+                "Trades":     _smeta(s, "trades_executed", 0),
+                "Started":    fmt_ts(s.get("started_at")),
             }
             for s in sessions
         ]
@@ -797,13 +894,18 @@ elif page == "Positions":
 elif page == "Observability":
     st.header("Observability — Trace Explorer")
 
-    sessions = q("c_sessions", order="-date", limit=30)
+    obs_since = (date.today() - timedelta(days=30)).isoformat()
+    sessions  = q_sessions(since=obs_since, limit=60)
     if not sessions:
         st.info("No sessions yet")
         st.stop()
 
     session_labels = {
-        s["id"]: f"{s['date']} · {s.get('terminal_reason','?')} · {s.get('agents_invoked', [])}"
+        s["id"]: (
+            f"{_sdate(s)} · {s.get('session_type','?')} · "
+            f"{s.get('terminal_reason','?')} · "
+            f"{str(s['id'])[:8]}"
+        )
         for s in sessions
     }
     selected_id = st.selectbox(
@@ -817,19 +919,20 @@ elif page == "Observability":
     # Session summary
     with st.expander("Session summary", expanded=True):
         c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Steps",       selected_session.get("total_steps", 0))
-        c2.metric("Tool Calls",  selected_session.get("total_tool_calls", 0))
-        c3.metric("Tokens In",   f"{selected_session.get('total_tokens_input', 0):,}")
-        c4.metric("Tokens Out",  f"{selected_session.get('total_tokens_output', 0):,}")
-        c5.metric("Cost",        f"${selected_session.get('total_cost_usd', 0):.4f}")
-        d1, d2, d3 = st.columns(3)
-        d1.metric("Latency",     f"{selected_session.get('total_latency_ms', 0)/1000:.1f}s")
-        d2.metric("Proposed",    selected_session.get("trades_proposed", 0))
-        d3.metric("Executed",    selected_session.get("trades_executed", 0))
-        agents = selected_session.get("agents_invoked") or []
-        st.markdown("**Agents invoked:** " + " · ".join(agents) if agents else "—")
+        c1.metric("Steps",      _smeta(selected_session, "total_steps", 0))
+        c2.metric("Type",       selected_session.get("session_type", "—"))
+        c3.metric("Tokens In",  f"{selected_session.get('total_tokens_input') or 0:,}")
+        c4.metric("Tokens Out", f"{selected_session.get('total_tokens_output') or 0:,}")
+        c5.metric("Cost",       f"${selected_session.get('total_cost_usd') or 0:.4f}")
+        d1, d2, d3, d4 = st.columns(4)
+        d1.metric("Latency",   f"{_smeta(selected_session, 'total_latency_ms', 0)/1000:.1f}s")
+        d2.metric("Proposed",  _smeta(selected_session, "trades_proposed", 0))
+        d3.metric("Executed",  _smeta(selected_session, "trades_executed", 0))
+        d4.metric("Result",    selected_session.get("result_summary") or "—")
+        if selected_session.get("parent_session_id"):
+            st.caption(f"Parent session: {selected_session['parent_session_id'][:8]}…")
 
-    traces = q("c_traces", filters={"session_id": selected_id}, order="sequence")
+    traces = q_traces(selected_id)
 
     STEP_COLORS = {
         "tool_call":     "#388bfd",
@@ -1056,34 +1159,76 @@ elif page == "Observability":
 elif page == "Sessions":
     st.header("Session History")
 
-    days = st.slider("Days back", 1, 60, 30)
+    days  = st.slider("Days back", 1, 60, 30)
     since = (date.today() - timedelta(days=days)).isoformat()
 
-    db = get_client()
-    sessions = db.table("c_sessions").select("*").gte("date", since).eq("is_simulated", False).order("date", desc=True).execute().data or []
+    # Fetch premarket sessions; expand each to show child intraday sessions below it.
+    pm_list    = q_sessions(session_types=["premarket"], since=since)
+    all_intra  = q_sessions(session_types=["intraday"],  since=since, order="-started_at")
+    eod_list   = q_sessions(session_types=["eod"],       since=since)
 
-    if not sessions:
+    # Index intraday sessions by parent_session_id for fast lookup
+    intra_by_parent: dict[str, list[dict]] = {}
+    for s in all_intra:
+        pid = s.get("parent_session_id") or ""
+        intra_by_parent.setdefault(pid, []).append(s)
+
+    eod_by_date: dict[str, dict] = {_sdate(s): s for s in eod_list}
+
+    if not pm_list and not all_intra:
         st.info("No sessions in range")
     else:
         rows = []
-        for s in sessions:
+        for pm in pm_list:
+            pid  = pm["id"]
             rows.append({
-                "Date":        s.get("date"),
-                "Terminal":    s.get("terminal_reason"),
-                "Agents":      ", ".join(s.get("agents_invoked") or []),
-                "Steps":       s.get("total_steps", 0),
-                "Tool Calls":  s.get("total_tool_calls", 0),
-                "Proposed":    s.get("trades_proposed", 0),
-                "Approved":    s.get("trades_approved", 0),
-                "Executed":    s.get("trades_executed", 0),
-                "Risk Rej":    s.get("risk_rejections", 0),
-                "Tokens In":   s.get("total_tokens_input", 0),
-                "Tokens Out":  s.get("total_tokens_output", 0),
-                "Cost $":      round(s.get("total_cost_usd", 0), 5),
-                "Latency s":   round(s.get("total_latency_ms", 0) / 1000, 1),
-                "Started":     fmt_ts(s.get("started_at")),
+                "Date":      _sdate(pm),
+                "Type":      "premarket",
+                "ID":        pid[:8] + "…",
+                "Terminal":  pm.get("terminal_reason", "—"),
+                "Steps":     _smeta(pm, "total_steps", 0),
+                "Proposed":  _smeta(pm, "trades_proposed", 0),
+                "Executed":  _smeta(pm, "trades_executed", 0),
+                "Tokens In": pm.get("total_tokens_input") or 0,
+                "Cost $":    round(pm.get("total_cost_usd") or 0, 5),
+                "Latency s": round(_smeta(pm, "total_latency_ms", 0) / 1000, 1),
+                "Started":   fmt_ts(pm.get("started_at")),
+                "Summary":   pm.get("result_summary") or "—",
             })
+            for intra in intra_by_parent.get(pid, []):
+                rows.append({
+                    "Date":      _sdate(intra),
+                    "Type":      "  intraday",
+                    "ID":        intra["id"][:8] + "…",
+                    "Terminal":  intra.get("terminal_reason", "—"),
+                    "Steps":     _smeta(intra, "total_steps", 0),
+                    "Proposed":  _smeta(intra, "trades_proposed", 0),
+                    "Executed":  _smeta(intra, "trades_executed", 0),
+                    "Tokens In": intra.get("total_tokens_input") or 0,
+                    "Cost $":    round(intra.get("total_cost_usd") or 0, 5),
+                    "Latency s": round(_smeta(intra, "total_latency_ms", 0) / 1000, 1),
+                    "Started":   fmt_ts(intra.get("started_at")),
+                    "Summary":   intra.get("result_summary") or "—",
+                })
+            d = _sdate(pm)
+            if d in eod_by_date:
+                e = eod_by_date[d]
+                rows.append({
+                    "Date":      d,
+                    "Type":      "  eod",
+                    "ID":        e["id"][:8] + "…",
+                    "Terminal":  e.get("terminal_reason", "—"),
+                    "Steps":     _smeta(e, "total_steps", 0),
+                    "Proposed":  0,
+                    "Executed":  _smeta(e, "trades_executed", 0),
+                    "Tokens In": e.get("total_tokens_input") or 0,
+                    "Cost $":    round(e.get("total_cost_usd") or 0, 5),
+                    "Latency s": round(_smeta(e, "total_latency_ms", 0) / 1000, 1),
+                    "Started":   fmt_ts(e.get("started_at")),
+                    "Summary":   e.get("result_summary") or "—",
+                })
         st.dataframe(rows, width="stretch", hide_index=True)
+        st.caption(f"{len(pm_list)} premarket · {len(all_intra)} intraday polls · {len(eod_list)} EOD")
 
     # Protection events
     st.subheader("Protection Events")
