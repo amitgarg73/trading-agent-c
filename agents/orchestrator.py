@@ -178,6 +178,9 @@ def run_premarket_pipeline(
             "orchestrator", "skip_propagated",
             detail={"skip_reason": market_report.get("skip_reason")},
         )
+        # Market signaled skip — downstream agents never ran
+        for agent in ("scanner", "news", "research", "risk"):
+            tracer.log_skip(agent, reason="market_skip", skip_type="error")
         # Still evaluate market agent quality on skip sessions
         _run_semantic_evals(
             tracer.session_id, market_report, {}, {}, {}, {"terminal_reason": "skip_propagated"},
@@ -203,6 +206,9 @@ def run_premarket_pipeline(
                 "regime":            scanner_result.get("regime"),
             },
         )
+        # No candidates — news, research, risk all skipped by design (expected routing)
+        for agent in ("news", "research", "risk"):
+            tracer.log_skip(agent, reason="no_candidates", skip_type="design")
         out = _empty_session_output(market_report, "no_viable_candidates")
         out["_v2_market_report"] = market_report
         return out
@@ -218,6 +224,8 @@ def run_premarket_pipeline(
             "orchestrator", "no_viable_proposals",
             detail={"summary": trade_proposals.get("summary", "")},
         )
+        # Research found nothing viable — risk skipped by design
+        tracer.log_skip("risk", reason="no_viable_proposals", skip_type="design")
         out = _empty_session_output(market_report, "no_viable_proposals")
         out["_v2_market_report"] = market_report
         return out

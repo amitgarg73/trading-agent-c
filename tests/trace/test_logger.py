@@ -526,3 +526,46 @@ class TestCostHelpers:
     def test_agent_model_sonnet_agents(self):
         assert _agent_model("orchestrator") == "claude-sonnet-4-6"
         assert _agent_model("learning")     == "claude-sonnet-4-6"
+
+
+# ── log_skip ───────────────────────────────────────────────────────────────────
+
+class TestLogSkip:
+    def test_design_skip_writes_correct_row(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_skip("news", reason="no_candidates", skip_type="design")
+
+        assert query.insert.called
+        row = query.insert.call_args[0][0]
+        assert row["step_type"] == "skip"
+        assert row["agent"]     == "news"
+        assert row["outcome"]   == "skipped"
+        assert row["payload"]["reason"]    == "no_candidates"
+        assert row["payload"]["skip_type"] == "design"
+
+    def test_error_skip_sets_amber_signal(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_skip("risk", reason="market_skip", skip_type="error")
+
+        row = query.insert.call_args[0][0]
+        assert row["payload"]["skip_type"] == "error"
+        assert row["payload"]["reason"]    == "market_skip"
+
+    def test_default_skip_type_is_design(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+
+        tracer.log_skip("research", reason="no_candidates")
+
+        row = query.insert.call_args[0][0]
+        assert row["payload"]["skip_type"] == "design"
+
+    def test_returns_span_id(self, tracer, mock_supabase):
+        query = make_query([])
+        mock_supabase.table.return_value = query
+        result = tracer.log_skip("news", reason="no_candidates")
+        assert isinstance(result, str) and len(result) == 36
