@@ -134,13 +134,13 @@ def submit_bracket_order(
             raw_ask = getattr(q, "ask_price", None)
             if raw_ask and float(raw_ask) > 0:
                 ask = round(float(raw_ask), 4)
-                if ask > entry_price * 1.015:
+                if ask > entry_price * 1.025:
                     print(f"  [alpaca] {ticker} stale: ask ${ask:.2f} is "
                           f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skip")
                     return None, None
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
-                limit_px   = round(ask, 2)
+                limit_px   = round(ask * 1.001, 2)   # 0.1% buffer ensures fill even on minor ask movement
                 eff_stop   = round(ask * (1 - stop_pct),   2)
                 eff_target = round(ask * (1 + target_pct), 2)
                 _quote_found = True
@@ -184,24 +184,25 @@ def submit_bracket_order(
         print(f"  [alpaca] {ticker} queued for market open — skipping fill poll")
         return str(order.id), None
 
-    for _ in range(15):
+    for _ in range(60):   # 120s total (was 30s — premarket bracket orders need up to 2 min)
         time.sleep(2)
         try:
             o      = _client().get_order_by_id(str(order.id))
             status = str(o.status).lower()
             if status in ("filled", "partially_filled"):
                 fill_price = float(o.filled_avg_price) if o.filled_avg_price else None
-                # Cancel fixed stop-loss leg so trailing stop can be submitted without conflict
+                # Cancel both stop-loss AND take-profit legs so trailing stop can be submitted.
+                # Alpaca counts all bracket child legs against available qty — leaving either
+                # open blocks the trailing stop submission.
                 for leg in (o.legs or []):
                     lt = str(leg.order_type).lower()
                     ls = str(leg.status).lower()
-                    if "stop" in lt and "trailing" not in lt and "cancel" not in ls and "fill" not in ls:
+                    if "trailing" not in lt and "cancel" not in ls and "fill" not in ls:
                         try:
                             _client().cancel_order_by_id(str(leg.id))
-                            print(f"  [alpaca] {ticker} stop leg cancelled — trail will be submitted")
+                            print(f"  [alpaca] {ticker} bracket leg cancelled ({lt}) — trail will be submitted")
                         except Exception:
                             pass
-                        break
                 return str(order.id), fill_price
             if status in ("cancelled", "rejected", "expired"):
                 print(f"  [alpaca] {ticker} order {status} — skipping DB write")
@@ -209,8 +210,8 @@ def submit_bracket_order(
         except Exception:
             pass
 
-    # Still pending after 30s — record for reconciliation
-    print(f"  [alpaca] {ticker} fill pending after 30s — recording for reconcile")
+    # Still pending after 120s — record for reconciliation
+    print(f"  [alpaca] {ticker} fill pending after 120s — recording for reconcile")
     return str(order.id), None
 
 

@@ -214,8 +214,9 @@ class TestSubmitBracketOrder:
             from core.alpaca import submit_bracket_order
             submit_bracket_order("TMO", 5, 514.50, 555.66, 511.05)
         req = mc.return_value.submit_order.call_args[0][0]
-        assert req.limit_price == pytest.approx(457.90, rel=1e-3)
-        # stop/target reprojected at same percentages from ask
+        expected_limit = round(457.90 * 1.001, 2)  # 0.1% buffer applied to ask
+        assert req.limit_price == pytest.approx(expected_limit, rel=1e-3)
+        # stop/target reprojected at same percentages from ask (before buffer)
         stop_pct   = (514.50 - 511.05) / 514.50
         target_pct = (555.66 - 514.50) / 514.50
         assert req.stop_loss.stop_price    == pytest.approx(round(457.90 * (1 - stop_pct),   2), rel=1e-3)
@@ -235,11 +236,11 @@ class TestSubmitBracketOrder:
         req = mc.return_value.submit_order.call_args[0][0]
         assert req.limit_price == pytest.approx(184.90, rel=1e-3)
 
-    def test_staleness_gate_skips_when_ask_1_5pct_above_proposal(self):
-        """If ask is >1.5% above proposal entry, the stock ran since the research call — skip."""
-        # entry_price=185.0, ask=188.0 → 1.62% above → stale → (None, None)
+    def test_staleness_gate_skips_when_ask_2_5pct_above_proposal(self):
+        """If ask is >2.5% above proposal entry, the stock ran since the research call — skip."""
+        # entry_price=185.0, ask=190.5 → 2.97% above → stale → (None, None)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
-             _MARKET_OPEN, _mock_dclient("AAPL", 188.0):
+             _MARKET_OPEN, _mock_dclient("AAPL", 190.5):
             mt.sleep = MagicMock()
             from core.alpaca import submit_bracket_order
             oid, fill = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
