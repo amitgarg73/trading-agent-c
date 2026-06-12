@@ -20,6 +20,7 @@ def _load_env_var(key: str) -> str:
 
 _TENANT_ID   = _load_env_var("TENANT_ID")
 _WORKFLOW_ID  = _load_env_var("WORKFLOW_ID")
+_ARGUS_URL   = _load_env_var("ARGUS_URL").rstrip("/")
 
 # Token cost per million tokens (Anthropic pricing, mid-2026)
 # cache_read = prompt cache hit; cache_write = cache creation (first write)
@@ -344,10 +345,40 @@ class TraceLogger:
             })
 
         get_client().table("ag_sessions").update(row).eq("id", self.session_id).execute()
-        # Embeddings are computed by the Argus cron (POST /api/compute/embeddings every 5 min).
-        # No pipeline-side trigger needed — cron covers direct Supabase writers.
+        self._trigger_argus_compute(terminal_reason)
 
     # ── Private ────────────────────────────────────────────────────────────────
+
+    def _trigger_argus_compute(self, terminal_reason: Optional[str]) -> None:
+        """Fire-and-forget: trigger diagnosis + embeddings on Argus immediately after close.
+        Falls back to the Argus cron if the call fails or ARGUS_URL is not set."""
+        import threading
+        import json
+        import urllib.request
+
+        if not _ARGUS_URL or not _TENANT_ID or not self._workflow_id:
+            return
+
+        payload = json.dumps({
+            "session_id":  self.session_id,
+            "tenant_id":   _TENANT_ID,
+            "workflow_id": self._workflow_id,
+        }).encode()
+
+        def _post(path: str) -> None:
+            try:
+                req = urllib.request.Request(
+                    f"{_ARGUS_URL}{path}",
+                    data=payload,
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                urllib.request.urlopen(req, timeout=30)
+            except Exception:
+                pass  # non-fatal; Argus cron is the safety net
+
+        threading.Thread(target=_post, args=("/api/compute/diagnoses",), daemon=True).start()
+        threading.Thread(target=_post, args=("/api/compute/embeddings",), daemon=True).start()
 
     def _insert_session_stub(self) -> None:
         """Upsert a minimal ag_sessions row so ag_traces FK is satisfied from the start."""
