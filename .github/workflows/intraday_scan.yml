@@ -1,17 +1,17 @@
-name: Strategy C — Position Watchdog
+name: Strategy C — Intraday Scan
 
 on:
   workflow_dispatch:
 
 concurrency:
-  group: intraday
+  group: intraday_scan
   cancel-in-progress: false
 
 jobs:
-  watchdog:
-    name: Position sync
+  scan:
+    name: Intraday entry scan
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -26,8 +26,8 @@ jobs:
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
-      - name: Sync positions
-        run: python sessions/position_watchdog.py
+      - name: Run intraday entry scan
+        run: python sessions/intraday.py
         env:
           PYTHONPATH: ${{ github.workspace }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
@@ -56,8 +56,8 @@ jobs:
           repo = "${{ github.repository }}"
           run  = "${{ github.run_id }}"
           url  = f"https://github.com/{repo}/actions/runs/{run}"
-          msg  = MIMEText(f"Strategy C position watchdog FAILED.\n\nLogs: {url}")
-          msg["Subject"] = f"[Strategy C] position watchdog FAILED"
+          msg  = MIMEText(f"Strategy C intraday scan FAILED.\n\nLogs: {url}")
+          msg["Subject"] = f"[Strategy C] intraday scan FAILED"
           msg["From"]    = os.environ["GMAIL_USER"]
           msg["To"]      = os.environ["ALERT_EMAIL"]
           with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:

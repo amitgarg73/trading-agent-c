@@ -159,9 +159,11 @@ def _investigate_ticker(
             + "\n"
         )
 
+    open_ctx = market_report.get("open_positions_context", "")
     msg = (
         f"Investigate {ticker} for an intraday setup.\n"
         + news_summary
+        + (f"{open_ctx}\n" if open_ctx else "")
         + f"Scanner: score={context['score']}, "
         f"premarket_change={context['premarket_change_pct']:+.2f}%, "
         f"scanner_price=${context.get('scanner_price', '?')}\n"

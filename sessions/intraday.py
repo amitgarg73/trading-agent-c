@@ -92,6 +92,22 @@ def get_today_tickers(session_id: str) -> set[str]:
     return {r["ticker"] for r in rows if r.get("ticker")}
 
 
+def get_open_positions(session_id: str) -> list[dict]:
+    """Return open positions for today with entry_price and unrealized_pnl."""
+    from core.db import get_client
+    rows = (
+        get_client()
+        .table("c_positions")
+        .select("ticker,entry_price,unrealized_pnl")
+        .eq("session_id", session_id)
+        .eq("status", "open")
+        .eq("open_date", date.today().isoformat())
+        .execute()
+        .data
+    ) or []
+    return [r for r in rows if r.get("ticker")]
+
+
 def get_last_entry_scan_time(premarket_session_id: str) -> Optional[datetime]:
     """Return UTC datetime of the last intraday scan decision, or None.
 
@@ -362,23 +378,8 @@ def main() -> None:
     config = load_agent_config()
     params = load_params()
 
-    # Execute any premarket trades that were deferred — wait for 9:45 AM so the
-    # first 15 minutes of open volatility settle before we enter.
-    if now_t >= time(9, 45):
-        from core.db import get_client as _get_client
-        _rows = _get_client().table("ag_sessions").select("metadata") \
-            .eq("id", premarket_session_id).limit(1).execute().data or []
-        _meta    = (_rows[0].get("metadata") or {}) if _rows else {}
-        _pending = _meta.get("pending_trades") or []
-        if _pending:
-            print(f"[intraday] Executing {len(_pending)} deferred premarket trade(s)...")
-            from sessions.premarket import _execute_trades
-            _execute_trades(_pending, premarket_session_id, params.trail_pct)
-            _meta.pop("pending_trades", None)
-            _get_client().table("ag_sessions").update(
-                {"metadata": _meta}
-            ).eq("id", premarket_session_id).execute()
-
+    # Deferred trade execution is handled by position_watchdog (runs every 15 min).
+    # Sync positions here so capacity and P&L checks reflect current Alpaca state.
     _sync_positions(premarket_session_id, params.trail_pct)
 
     daily_pnl   = get_daily_pnl(premarket_session_id)
@@ -428,15 +429,27 @@ def main() -> None:
     today_tickers   = get_today_tickers(premarket_session_id)
     max_new         = min(2, available, config.get("intraday_max_new_positions", 2))
 
+    open_pos_rows = get_open_positions(premarket_session_id)
+    open_pos_context = ""
+    if open_pos_rows:
+        lines = [
+            f"{p['ticker']} (entry ${float(p.get('entry_price') or 0):.2f}, "
+            f"${float(p.get('unrealized_pnl') or 0):+.0f} unrealized)"
+            for p in open_pos_rows
+        ]
+        open_pos_context = f"OPEN POSITIONS (do NOT propose these tickers): {', '.join(lines)}"
+
     synthetic_report = {
         "decision": "GO",
         "max_positions": max_new,
         "bias": "NEUTRAL",
         "skip_reason": None,
+        "open_positions_context": open_pos_context,
         "summary": (
             f"Intraday scan {now_et.strftime('%H:%M')} ET. "
             f"Score >={params.strategy_min_score + min_score_bonus}. "
             f"Avoid (already entered today): {sorted(today_tickers)}."
+            + (f" {open_pos_context}" if open_pos_context else "")
         ),
     }
 

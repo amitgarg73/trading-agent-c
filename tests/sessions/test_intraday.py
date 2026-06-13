@@ -10,6 +10,7 @@ from sessions.intraday import (
     count_open_positions,
     get_daily_pnl,
     get_last_entry_scan_time,
+    get_open_positions,
     get_premarket_session_id,
     get_today_session_id,  # backwards-compatible alias
     get_today_tickers,
@@ -82,6 +83,30 @@ class TestGetTodayTickers:
         mock_supabase.table.return_value = make_query([])
         result = get_today_tickers(_SESSION_ID)
         assert result == set()
+
+
+class TestGetOpenPositions:
+    def test_returns_open_position_rows(self, mock_supabase):
+        rows = [
+            {"ticker": "NVDA", "entry_price": 890.0, "unrealized_pnl": 142.0},
+            {"ticker": "MSFT", "entry_price": 420.0, "unrealized_pnl": -20.0},
+        ]
+        mock_supabase.table.return_value = make_query(rows)
+        result = get_open_positions(_SESSION_ID)
+        assert len(result) == 2
+        assert result[0]["ticker"] == "NVDA"
+
+    def test_filters_out_none_ticker(self, mock_supabase):
+        rows = [{"ticker": "AAPL", "entry_price": 200.0, "unrealized_pnl": 0.0},
+                {"ticker": None, "entry_price": 150.0, "unrealized_pnl": 0.0}]
+        mock_supabase.table.return_value = make_query(rows)
+        result = get_open_positions(_SESSION_ID)
+        assert all(r["ticker"] is not None for r in result)
+
+    def test_returns_empty_when_no_open_positions(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        result = get_open_positions(_SESSION_ID)
+        assert result == []
 
 
 class TestGetLastEntryScanTime:
@@ -804,7 +829,8 @@ class TestIntradayMain:
         mock_place.assert_called_once()
 
     def test_executes_pending_trades_at_market_open(self, mock_supabase, capsys):
-        """Deferred premarket trades stored in ag_sessions.metadata.pending_trades are executed at 9:45+."""
+        """Deferred premarket trade execution moved to position_watchdog.py.
+        sessions/intraday.py (entry scan) no longer calls _execute_trades — watchdog handles it."""
         import pytz
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 9, 45, tzinfo=_ET)
@@ -831,9 +857,7 @@ class TestIntradayMain:
             mock_tracer_cls.return_value = MagicMock()
             from sessions.intraday import main
             main()
-        mock_exec.assert_called_once_with(_pending, _SESSION_ID, mock_tracer_cls.return_value.trail_pct if False else self._mock_params().trail_pct)
-        out = capsys.readouterr().out
-        assert "deferred premarket" in out
+        mock_exec.assert_not_called()
 
     def test_no_pending_execution_before_945(self, mock_supabase):
         """Before 9:45 AM, pending_trades are not checked."""
