@@ -270,72 +270,64 @@ class TestCloseSession:
 # ── session open (daemon thread) ──────────────────────────────────────────────
 
 class TestSessionOpen:
-    def test_session_open_posts_session_id(self, mock_ingest_post, mock_supabase):
+    def test_session_open_posts_session_id(self, mock_ingest_post, mock_ingest_patch):
         t = TraceLogger("sess-open-001", session_type="premarket")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["session_id"] == "sess-open-001"
         assert p["session_type"] == "premarket"
 
-    def test_session_type_included(self, mock_ingest_post, mock_supabase):
+    def test_session_type_included(self, mock_ingest_post, mock_ingest_patch):
         t = TraceLogger("sess-open-002", session_type="intraday")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["session_type"] == "intraday"
 
-    def test_parent_session_id_included(self, mock_ingest_post, mock_supabase):
+    def test_parent_session_id_included(self, mock_ingest_post, mock_ingest_patch):
         t = TraceLogger("sess-open-003", session_type="intraday", parent_session_id="pre-001")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["parent_session_id"] == "pre-001"
 
-    def test_eod_session_type(self, mock_ingest_post, mock_supabase):
+    def test_eod_session_type(self, mock_ingest_post, mock_ingest_patch):
         t = TraceLogger("sess-open-004", session_type="eod")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["session_type"] == "eod"
 
 
-# ── flush_cost_breakdown (still direct Supabase) ─────────────────────────────
+# ── flush_cost_breakdown (via ingest PATCH) ───────────────────────────────────
 
 class TestFlushCostBreakdown:
-    def test_writes_cost_breakdown_mid_session(self, tracer, mock_supabase):
-        query = make_query([])
-        mock_supabase.table.return_value = query
+    def test_patches_session_with_cost_breakdown(self, tracer, mock_ingest_patch):
         tracer.log_tokens("market", _usage(3000, 900))
         tracer.flush_cost_breakdown()
-        assert query.update.called
-        payload = query.update.call_args[0][0]
-        assert "market" in payload["metadata"]["cost_breakdown"]
+        assert mock_ingest_patch.called
+        path, payload = mock_ingest_patch.call_args[0]
+        assert path == "/api/ingest/session"
+        assert payload["session_id"] == "test-session-id-1234"
+        assert "market" in payload["cost_breakdown"]
         assert payload["total_cost_usd"] > 0
 
-    def test_flush_is_cumulative_across_agents(self, tracer, mock_supabase):
-        query = make_query([])
-        mock_supabase.table.return_value = query
+    def test_flush_is_cumulative_across_agents(self, tracer, mock_ingest_patch):
         tracer.log_tokens("market", _usage(3000, 900))
         tracer.log_tokens("research_NVDA", _usage(10000, 2000))
         tracer.flush_cost_breakdown()
-        payload = query.update.call_args[0][0]
-        assert "market" in payload["metadata"]["cost_breakdown"]
-        assert "research_NVDA" in payload["metadata"]["cost_breakdown"]
+        _, payload = mock_ingest_patch.call_args[0]
+        assert "market" in payload["cost_breakdown"]
+        assert "research_NVDA" in payload["cost_breakdown"]
 
-    def test_flush_does_nothing_when_no_tokens(self, tracer, mock_supabase):
-        query = make_query([])
-        mock_supabase.table.return_value = query
+    def test_flush_does_nothing_when_no_tokens(self, tracer, mock_ingest_patch):
         tracer.flush_cost_breakdown()
-        query.update.assert_not_called()
+        mock_ingest_patch.assert_not_called()
 
-    def test_flush_uses_correct_model_rates(self, tracer, mock_supabase):
-        query = make_query([])
-        mock_supabase.table.return_value = query
+    def test_flush_uses_correct_model_rates(self, tracer, mock_ingest_patch):
         tracer.log_tokens("research_NVDA", _usage(1_000_000, 0))
         tracer.flush_cost_breakdown()
-        payload = query.update.call_args[0][0]
-        assert payload["metadata"]["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
+        _, payload = mock_ingest_patch.call_args[0]
+        assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
 
-    def test_close_session_includes_all_accumulated_agents(self, tracer, mock_ingest_post, mock_supabase):
-        query = make_query([])
-        mock_supabase.table.return_value = query
+    def test_close_session_includes_all_accumulated_agents(self, tracer, mock_ingest_post, mock_ingest_patch):
         tracer.log_tokens("market", _usage(3000, 900))
         tracer.flush_cost_breakdown()
         tracer.log_tokens("research_NVDA", _usage(10000, 2000))

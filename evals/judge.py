@@ -14,14 +14,11 @@ No domain-specific logic — works for any pipeline using the Argus observabilit
 from __future__ import annotations
 
 import json
-import os
 from typing import Optional
 from uuid import uuid4
 
 import anthropic
 
-_TENANT_ID   = os.environ.get("TENANT_ID",   "")
-_WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")
 _JUDGE_MODEL = "claude-haiku-4-5-20251001"
 
 _JUDGE_SYSTEM = (
@@ -53,32 +50,26 @@ Respond with JSON only:
 
 def _fetch_criteria(agent_names: list[str]) -> dict[str, list[dict]]:
     """
-    Fetch enabled semantic eval configs for the given agent base names.
-    Returns {agent_name: [config_row, ...]}
+    Fetch enabled semantic eval configs via Argus ingest API.
+    Returns {agent_name: [config_row, ...]}. Wildcard agent='*' applies to all agents.
     """
-    if not _TENANT_ID or not agent_names:
+    if not agent_names:
         return {}
     try:
-        from core.db import get_client
-        q = (
-            get_client()
-            .table("ag_eval_configs")
-            .select("id, eval_name, agent, threshold, config")
-            .eq("tenant_id", _TENANT_ID)
-            .eq("eval_type", "semantic")
-            .eq("enabled", True)
-        )
-        if _WORKFLOW_ID:
-            q = q.eq("workflow_id", _WORKFLOW_ID)
-        result = q.execute()
-        rows = result.data or []
+        from trace.logger import _ingest_get
+        data = _ingest_get("/api/ingest/eval/configs", {})
+        rows = data.get("configs", [])
     except Exception:
         return {}
 
+    agent_set = set(agent_names)
     by_agent: dict[str, list[dict]] = {}
     for row in rows:
         agent = row.get("agent")
-        if agent and agent in agent_names:
+        if agent == "*":
+            for name in agent_names:
+                by_agent.setdefault(name, []).append(row)
+        elif agent and agent in agent_set:
             by_agent.setdefault(agent, []).append(row)
     return by_agent
 
@@ -157,7 +148,7 @@ def _write_eval_results(session_id: str, agent: str, results: list[dict]) -> Non
 
 
 def _patch_session_quality_score(session_id: str, all_results: dict[str, list[dict]]) -> None:
-    """Write avg L4 quality score back to ag_sessions so the dashboard can read it directly."""
+    """Write avg L4 quality score back to the session via Argus ingest PATCH."""
     scores = [
         r["score"]
         for results in all_results.values()
@@ -168,10 +159,11 @@ def _patch_session_quality_score(session_id: str, all_results: dict[str, list[di
         return
     avg_score = round(sum(scores) / len(scores), 4)
     try:
-        from core.db import get_client
-        get_client().table("ag_sessions").update(
-            {"quality_score": avg_score}
-        ).eq("id", session_id).execute()
+        from trace.logger import _ingest_patch
+        _ingest_patch("/api/ingest/session", {
+            "session_id":   session_id,
+            "quality_score": avg_score,
+        })
     except Exception as exc:
         print(f"[judge] quality_score patch failed for {session_id}: {exc}")
 
@@ -196,7 +188,7 @@ def evaluate_session_outputs(
     Returns: {agent_name: [{eval_name, score, passed, threshold, reasoning}]}
     Empty dict if no criteria are configured or TENANT_ID is unset.
     """
-    if not _TENANT_ID or not agent_outputs:
+    if not agent_outputs:
         return {}
 
     criteria_by_agent = _fetch_criteria(list(agent_outputs.keys()))
@@ -244,26 +236,18 @@ def evaluate_session_outputs(
 
 def evaluate_session_from_traces(session_id: str) -> None:
     """
-    Read agent reasoning from ag_traces (agent_message rows) and run LLM judge.
-    Uses payload->agent_reasoning as judge input — not the outcome label.
-    Call after close_session(). Non-blocking — logs failures, does not raise.
+    Read agent reasoning from traces via Argus ingest API and run LLM judge.
+    Uses payload->agent_reasoning as judge input. Call after close_session().
+    Non-blocking — logs failures, does not raise.
     """
-    if not _TENANT_ID:
-        return
     try:
-        from core.db import get_client
-        q = (
-            get_client()
-            .table("ag_traces")
-            .select("agent, step_type, payload")
-            .eq("tenant_id", _TENANT_ID)
-            .eq("session_id", session_id)
-            .eq("step_type", "agent_message")
-            .limit(200)
-        )
-        if _WORKFLOW_ID:
-            q = q.eq("workflow_id", _WORKFLOW_ID)
-        rows = q.execute().data or []
+        from trace.logger import _ingest_get
+        data = _ingest_get("/api/ingest/trace", {
+            "session_id": session_id,
+            "step_type":  "agent_message",
+            "limit":      "200",
+        })
+        rows = data.get("traces", [])
         if not rows:
             return
 

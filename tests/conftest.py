@@ -53,18 +53,31 @@ def mock_supabase(monkeypatch):
 
 @pytest.fixture
 def mock_ingest_post():
-    """
-    Patches trace.logger._ingest_post — the single HTTP call surface for all
-    ingest API writes (session open/close, traces, evals).
-    """
+    """Patches trace.logger._ingest_post — POST writes (session open/close, traces, evals)."""
     with patch("trace.logger._ingest_post") as m:
         yield m
 
 
 @pytest.fixture
-def tracer(mock_ingest_post, mock_supabase):
+def mock_ingest_patch():
+    """Patches trace.logger._ingest_patch — PATCH writes (quality_score, cost_breakdown)."""
+    with patch("trace.logger._ingest_patch") as m:
+        yield m
+
+
+@pytest.fixture
+def mock_ingest_get():
+    """Patches trace.logger._ingest_get — GET reads (eval configs, traces)."""
+    with patch("trace.logger._ingest_get") as m:
+        m.return_value = {}
+        yield m
+
+
+@pytest.fixture
+def tracer(mock_ingest_post, mock_ingest_patch, mock_supabase):
     """
-    Shared TraceLogger backed by mocked ingest API + Supabase (for flush_cost_breakdown).
+    Shared TraceLogger backed by mocked ingest API.
+    mock_supabase still required for trading-specific table reads (c_ tables, scanner_tools, etc.).
     Waits for the open-session daemon thread to complete before returning.
     """
     from trace.logger import TraceLogger

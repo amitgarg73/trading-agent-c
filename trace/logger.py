@@ -50,10 +50,7 @@ def _estimate_cost(
 
 
 def _ingest_post(path: str, payload: dict) -> None:
-    """
-    Fire-and-forget POST to the Argus ingest API. Non-fatal on any error.
-    All ingest calls use this — centralises auth header and error suppression.
-    """
+    """Fire-and-forget POST to Argus ingest API. Non-fatal on any error."""
     if not _ARGUS_URL or not _ARGUS_API_KEY:
         return
     try:
@@ -61,15 +58,47 @@ def _ingest_post(path: str, payload: dict) -> None:
         req = urllib.request.Request(
             f"{_ARGUS_URL}{path}",
             data=data,
-            headers={
-                "Content-Type": "application/json",
-                "x-argus-key":  _ARGUS_API_KEY,
-            },
+            headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY},
             method="POST",
         )
         urllib.request.urlopen(req, timeout=10)
     except Exception:
-        pass  # non-fatal — direct Supabase writes are the data-of-record
+        pass
+
+
+def _ingest_patch(path: str, payload: dict) -> None:
+    """Fire-and-forget PATCH to Argus ingest API. Non-fatal on any error."""
+    if not _ARGUS_URL or not _ARGUS_API_KEY:
+        return
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{_ARGUS_URL}{path}",
+            data=data,
+            headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY},
+            method="PATCH",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
+
+
+def _ingest_get(path: str, params: dict) -> dict:
+    """GET from Argus ingest API. Returns parsed JSON or {} on any error."""
+    if not _ARGUS_URL or not _ARGUS_API_KEY:
+        return {}
+    try:
+        from urllib.parse import urlencode
+        url = f"{_ARGUS_URL}{path}?{urlencode(params)}" if params else f"{_ARGUS_URL}{path}"
+        req = urllib.request.Request(
+            url,
+            headers={"x-argus-key": _ARGUS_API_KEY},
+            method="GET",
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        return json.loads(resp.read().decode())
+    except Exception:
+        return {}
 
 
 class TraceLogger:
@@ -240,14 +269,9 @@ class TraceLogger:
             })
 
     def flush_cost_breakdown(self) -> None:
-        """
-        Persist accumulated cost breakdown mid-session without closing it.
-        Kept as a direct Supabase write — no ingest API equivalent for partial
-        session metadata updates. Ensures cost is captured if process is killed.
-        """
+        """Persist accumulated cost mid-session via ingest PATCH. Ensures cost is captured if process is killed."""
         if not self._tokens:
             return
-        from core.db import get_client
         agent_costs = {}
         for agent, v in self._tokens.items():
             model = _agent_model(agent)
@@ -267,10 +291,11 @@ class TraceLogger:
                 "cost_usd":    round(cost, 6),
             }
         total_cost = sum(a["cost_usd"] for a in agent_costs.values())
-        get_client().table("ag_sessions").update({
-            "metadata":       {"cost_breakdown": agent_costs},
+        _ingest_patch("/api/ingest/session", {
+            "session_id":    self.session_id,
             "total_cost_usd": round(total_cost, 6),
-        }).eq("id", self.session_id).execute()
+            "cost_breakdown": agent_costs,
+        })
 
     def close_session(
         self,
