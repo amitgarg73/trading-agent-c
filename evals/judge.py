@@ -141,25 +141,19 @@ def _score_criterion(
 # ── Persist results ────────────────────────────────────────────────────────────
 
 def _write_eval_results(session_id: str, agent: str, results: list[dict]) -> None:
-    from core.db import get_client
-    rows = [
-        {
-            "id":          str(uuid4()),
-            "tenant_id":   _TENANT_ID,
-            "workflow_id": _WORKFLOW_ID,
-            "session_id":  session_id,
-            "eval_name":   r["eval_name"],
-            "agent":       agent,
-            "layer":       4,
-            "score":       r["score"],
-            "passed":      r["passed"],
-            "threshold":   r["threshold"],
-            "detail":      {"reasoning": r["reasoning"]},
-        }
-        for r in results
-    ]
-    if rows:
-        get_client().table("ag_evals").insert(rows).execute()
+    """Write eval results via ingest API — auto-creates incidents for failed evals."""
+    from trace.logger import _ingest_post
+    for r in results:
+        _ingest_post("/api/ingest/eval", {
+            "session_id": session_id,
+            "eval_name":  r["eval_name"],
+            "agent":      agent,
+            "layer":      4,
+            "score":      r["score"],
+            "passed":     r["passed"],
+            "threshold":  r["threshold"],
+            "detail":     {"reasoning": r["reasoning"]},
+        })
 
 
 def _patch_session_quality_score(session_id: str, all_results: dict[str, list[dict]]) -> None:
@@ -180,67 +174,6 @@ def _patch_session_quality_score(session_id: str, all_results: dict[str, list[di
         ).eq("id", session_id).execute()
     except Exception as exc:
         print(f"[judge] quality_score patch failed for {session_id}: {exc}")
-
-
-def _write_incident_if_failed(
-    session_id: str,
-    agent: str,
-    all_results: list[dict],
-) -> None:
-    failed = [r for r in all_results if not r["passed"]]
-    if not failed:
-        return
-
-    from core.db import get_client
-    db = get_client()
-
-    # Dedup: skip if an incident already exists for this session + agent + pattern.
-    # Two eval paths (agent outputs + trace reasoning) both call this function,
-    # which would otherwise produce duplicate rows for the same failure.
-    existing = (
-        db.table("ag_incidents")
-        .select("id")
-        .eq("tenant_id", _TENANT_ID)
-        .eq("session_id", session_id)
-        .eq("pattern_name", "semantic_quality_failure")
-        .ilike("root_cause", f"{agent} output%")
-        .limit(1)
-        .execute()
-    )
-    if existing.data:
-        return
-
-    avg_shortfall = sum(r["threshold"] - r["score"] for r in failed) / len(failed)
-    severity = "high" if avg_shortfall > 0.3 else "medium"
-
-    db.table("ag_incidents").insert({
-        "id":           str(uuid4()),
-        "tenant_id":    _TENANT_ID,
-        "workflow_id":  _WORKFLOW_ID,
-        "session_id":   session_id,
-        "pattern_name": "semantic_quality_failure",
-        "severity":     severity,
-        "root_cause":   (
-            f"{agent} output failed {len(failed)} of {len(all_results)} "
-            f"quality criteria (semantic eval)"
-        ),
-        "failed_evals": [
-            {
-                "agent":      agent,
-                "eval_name":  r["eval_name"],
-                "score":      r["score"],
-                "threshold":  r["threshold"],
-                "reasoning":  r["reasoning"],
-            }
-            for r in failed
-        ],
-        "fix_suggestion": (
-            f"Review {agent} output quality. "
-            f"Failing: {', '.join(r['eval_name'] for r in failed)}. "
-            "Adjust criteria or agent prompt in Argus Eval Manager."
-        ),
-        "status": "open",
-    }).execute()
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -295,9 +228,9 @@ def evaluate_session_outputs(
         if agent_results:
             try:
                 _write_eval_results(session_id, agent, agent_results)
-                _write_incident_if_failed(session_id, agent, agent_results)
+                # Incidents created by ingest /eval route automatically when passed=False
             except Exception as exc:
-                print(f"[judge] DB write failed for {agent}: {exc}")
+                print(f"[judge] eval write failed for {agent}: {exc}")
             all_results[agent] = agent_results
 
     if all_results:
