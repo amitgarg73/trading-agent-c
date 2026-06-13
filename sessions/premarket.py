@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from datetime import date, datetime, time
 from uuid import uuid4
 
@@ -172,38 +173,41 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     return False, ""
 
 
-def main() -> None:
+def main(bypass_checks: bool = False) -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
 
-    if not is_trading_day(weekday):
-        print(f"[premarket] Not a trading day ({weekday}). Exiting.")
-        return
+    if not bypass_checks:
+        if not is_trading_day(weekday):
+            print(f"[premarket] Not a trading day ({weekday}). Exiting.")
+            return
 
-    config        = load_agent_config()
-    window_start  = _window_time(config, "premarket_window_start", _PREMARKET_START)
-    window_end    = _window_time(config, "premarket_window_end",   _PREMARKET_END)
+        config        = load_agent_config()
+        window_start  = _window_time(config, "premarket_window_start", _PREMARKET_START)
+        window_end    = _window_time(config, "premarket_window_end",   _PREMARKET_END)
 
-    now_t = now_et.time()
-    if not (window_start <= now_t <= window_end):
-        print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}, "
-              f"allowed {window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')} ET). Exiting.")
-        return
+        now_t = now_et.time()
+        if not (window_start <= now_t <= window_end):
+            print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}, "
+                  f"allowed {window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')} ET). Exiting.")
+            return
 
-    protection = check_protection_status()
-    if protection.suspended:
-        send_alert(
-            "Strategy C — Suspended",
-            f"Tier {protection.tier} protection active: {protection.reason}\n"
-            f"Resume: {protection.resume_at}",
-        )
-        print(f"[premarket] Protection tier {protection.tier} suspended.")
-        return
+        protection = check_protection_status()
+        if protection.suspended:
+            send_alert(
+                "Strategy C — Suspended",
+                f"Tier {protection.tier} protection active: {protection.reason}\n"
+                f"Resume: {protection.resume_at}",
+            )
+            print(f"[premarket] Protection tier {protection.tier} suspended.")
+            return
 
-    should_skip, skip_msg = _existing_session_guard(date.today().isoformat())
-    if should_skip:
-        print(f"[premarket] {skip_msg}")
-        return
+        should_skip, skip_msg = _existing_session_guard(date.today().isoformat())
+        if should_skip:
+            print(f"[premarket] {skip_msg}")
+            return
+    else:
+        print(f"[premarket] --bypass-checks active: skipping trading day, window, protection, and dedup guards.")
 
     params     = load_params()
     session_id = str(uuid4())
@@ -283,4 +287,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bypass-checks", action="store_true",
+                        help="Skip trading-day, window, protection, and dedup guards (for local E2E testing)")
+    args = parser.parse_args()
+    main(bypass_checks=args.bypass_checks)

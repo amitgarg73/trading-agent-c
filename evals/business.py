@@ -1,17 +1,13 @@
 """
-L5 business outcome evals for the premarket session funnel.
+L3 funnel throughput evals for the premarket session.
 
-Deterministic, rule-based metrics — no LLM required.
-Writes to ag_evals at layer=5 after session completion.
+Deterministic, rule-based metrics — no LLM required. Migrated from L5 to L3
+because these measure pipeline throughput, not decision validity (which is L5).
+Writes via Argus ingest /eval API — auto-creates incidents on failure.
 """
 from __future__ import annotations
 
 import os
-from uuid import uuid4
-
-
-_TENANT_ID   = os.environ.get("TENANT_ID",   "")
-_WORKFLOW_ID = os.environ.get("WORKFLOW_ID", "")
 
 
 def write_premarket_outcome_evals(
@@ -21,37 +17,31 @@ def write_premarket_outcome_evals(
     terminal_reason: str,
 ) -> None:
     """
-    Write L5 business outcome evals for a completed premarket session.
+    Write L3 funnel throughput evals for a completed premarket session.
 
     Call after close_session(), before the process exits.
-    Skip sessions and no-candidate sessions are excluded — funnel metrics
-    are not meaningful when the pipeline didn't run to the research/risk stages.
+    Skip and no-candidate sessions are excluded — funnel metrics are not
+    meaningful when the pipeline did not run to research/risk stages.
     """
-    tenant_id = _TENANT_ID or os.environ.get("TENANT_ID", "")
-    if not tenant_id:
+    if not os.environ.get("TENANT_ID"):
         return
-
     if terminal_reason in ("skip_propagated", "no_candidates", "no_viable_candidates"):
         return
 
-    metrics: list[dict] = []
-
-    # Did research produce any proposals?
-    research_score = 1.0 if trades_proposed > 0 else 0.0
-    metrics.append({
-        "eval_name": "research_yield",
-        "agent":     "research",
-        "score":     research_score,
-        "passed":    research_score >= 0.9,
-        "threshold": 0.9,
-        "reasoning": (
-            f"Research produced {trades_proposed} proposal(s)"
-            if trades_proposed > 0
-            else "Research produced no proposals"
-        ),
-    })
-
-    # What fraction of research proposals survived risk review?
+    metrics: list[dict] = [
+        {
+            "eval_name": "research_yield",
+            "agent":     "research",
+            "score":     1.0 if trades_proposed > 0 else 0.0,
+            "passed":    trades_proposed > 0,
+            "threshold": 0.9,
+            "reasoning": (
+                f"Research produced {trades_proposed} proposal(s)"
+                if trades_proposed > 0
+                else "Research produced no proposals"
+            ),
+        },
+    ]
     if trades_proposed > 0:
         approval_rate = round(trades_approved / trades_proposed, 3)
         metrics.append({
@@ -64,25 +54,18 @@ def write_premarket_outcome_evals(
         })
 
     try:
-        from core.db import get_client
-        workflow_id = _WORKFLOW_ID or os.environ.get("WORKFLOW_ID", "")
-        rows = [
-            {
-                "id":          str(uuid4()),
-                "tenant_id":   tenant_id,
-                "workflow_id": workflow_id,
-                "session_id":  session_id,
-                "eval_name":   m["eval_name"],
-                "agent":       m["agent"],
-                "layer":       5,
-                "score":       m["score"],
-                "passed":      m["passed"],
-                "threshold":   m["threshold"],
-                "detail":      {"reasoning": m["reasoning"]},
-            }
-            for m in metrics
-        ]
-        get_client().table("ag_evals").insert(rows).execute()
-        print(f"[business-eval] Wrote {len(rows)} L5 outcome eval(s) for session {session_id[:8]}")
+        from trace.logger import _ingest_post
+        for m in metrics:
+            _ingest_post("/api/ingest/eval", {
+                "session_id": session_id,
+                "eval_name":  m["eval_name"],
+                "agent":      m["agent"],
+                "layer":      3,
+                "score":      m["score"],
+                "passed":     m["passed"],
+                "threshold":  m["threshold"],
+                "detail":     {"reasoning": m["reasoning"]},
+            })
+        print(f"[business-eval] Wrote {len(metrics)} L3 funnel eval(s) for session {session_id[:8]}")
     except Exception as exc:
-        print(f"[business-eval] L5 write failed: {exc}")
+        print(f"[business-eval] eval write failed: {exc}")

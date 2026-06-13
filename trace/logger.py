@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
+import threading
+import urllib.request
 from datetime import date, datetime
 from typing import Any, Optional
 from uuid import uuid4
@@ -18,12 +21,12 @@ def _load_env_var(key: str) -> str:
             pass
     return val
 
-_TENANT_ID   = _load_env_var("TENANT_ID")
+_TENANT_ID    = _load_env_var("TENANT_ID")
 _WORKFLOW_ID  = _load_env_var("WORKFLOW_ID")
-_ARGUS_URL   = _load_env_var("ARGUS_URL").rstrip("/")
+_ARGUS_URL    = _load_env_var("ARGUS_URL").rstrip("/")
+_ARGUS_API_KEY = _load_env_var("ARGUS_API_KEY")
 
 # Token cost per million tokens (Anthropic pricing, mid-2026)
-# cache_read = prompt cache hit; cache_write = cache creation (first write)
 _COST_PER_MTOK: dict[str, dict[str, float]] = {
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cache_read": 0.08,  "cache_write": 1.00},
     "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
@@ -46,9 +49,32 @@ def _estimate_cost(
     ) / 1_000_000
 
 
+def _ingest_post(path: str, payload: dict) -> None:
+    """
+    Fire-and-forget POST to the Argus ingest API. Non-fatal on any error.
+    All ingest calls use this — centralises auth header and error suppression.
+    """
+    if not _ARGUS_URL or not _ARGUS_API_KEY:
+        return
+    try:
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(
+            f"{_ARGUS_URL}{path}",
+            data=data,
+            headers={
+                "Content-Type": "application/json",
+                "x-argus-key":  _ARGUS_API_KEY,
+            },
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass  # non-fatal — direct Supabase writes are the data-of-record
+
+
 class TraceLogger:
     """
-    Writes structured trace rows to ag_traces and a summary row to ag_sessions.
+    Writes structured trace rows to the Argus ingest API (ag_traces, ag_sessions).
 
     Usage:
         tracer = TraceLogger(session_id)
@@ -70,25 +96,22 @@ class TraceLogger:
         self._session_type = session_type
         self._parent_session_id = parent_session_id
         self._sequence = 0
-        self._agent_spans: dict[str, str] = {}   # agent -> current span_id
+        self._agent_spans: dict[str, str] = {}
         self._session_span_id = str(uuid4())
-        self._tokens: dict[str, dict[str, int]] = {}   # agent -> {input, output}
+        self._tokens: dict[str, dict[str, int]] = {}
         self._pending_trades: list = []
         self._started_at = datetime.utcnow()
-        self._insert_session_stub()
+        # Open session via ingest API — fire-and-forget; traces can flow immediately
+        # because client already holds session_id.
+        self._open_thread = threading.Thread(target=self._open_session, daemon=True)
+        self._open_thread.start()
 
     def set_pending_trades(self, trades: list) -> None:
-        """Store deferred pre-open trades so close_session persists them in ag_sessions metadata."""
         self._pending_trades = trades
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def start_agent_span(self, agent: str) -> str:
-        """
-        Register a new span for this agent invocation.
-        All subsequent log calls for this agent use this as parent_span_id.
-        Returns the new span_id.
-        """
         span_id = str(uuid4())
         self._agent_spans[agent] = span_id
         return span_id
@@ -103,7 +126,6 @@ class TraceLogger:
         latency_ms: int = 0,
         model: Optional[str] = None,
     ) -> str:
-        """Write a tool_call row. Returns the new span_id."""
         return self._write({
             "step_type":   "tool_call",
             "agent":       agent,
@@ -126,7 +148,6 @@ class TraceLogger:
         model: Optional[str] = None,
         latency_ms: int = 0,
     ) -> str:
-        """Write an agent_message row. Returns the new span_id."""
         return self._write({
             "step_type":       "agent_message",
             "agent":           agent,
@@ -147,7 +168,6 @@ class TraceLogger:
         latency_ms: int = 0,
         model: Optional[str] = None,
     ) -> str:
-        """Write a session-level decision row (no tool, no entity). Returns span_id."""
         return self._write({
             "step_type":   "decision",
             "agent":       agent,
@@ -163,17 +183,6 @@ class TraceLogger:
         reason: str,
         skip_type: str = "design",
     ) -> str:
-        """
-        Record that an agent was intentionally skipped.
-
-        Args:
-            agent:     Base agent name (e.g. 'news', 'risk').
-            reason:    Why it was skipped (e.g. 'no_candidates', 'market_skip').
-            skip_type: 'design' — expected routing (gray in Argus, no alarm).
-                       'error'  — upstream failure caused the skip (amber in Argus).
-
-        Returns span_id.
-        """
         return self._write({
             "step_type": "skip",
             "agent":     agent,
@@ -187,7 +196,6 @@ class TraceLogger:
         error_message: str,
         entity_id: Optional[str] = None,
     ) -> str:
-        """Write an error row. Returns span_id."""
         return self._write({
             "step_type": "error",
             "agent":     agent,
@@ -197,16 +205,11 @@ class TraceLogger:
         })
 
     def log_tokens(self, agent: str, usage: Any) -> None:
-        """
-        Accumulate token counts for an agent. `usage` is an Anthropic Usage object
-        or a plain dict. Captures cache tokens for accurate cost calculation.
-        Written to ag_sessions at close_session().
-        """
         if hasattr(usage, "input_tokens"):
-            inp   = usage.input_tokens
-            out   = usage.output_tokens
-            cr    = getattr(usage, "cache_read_input_tokens",    0) or 0
-            cw    = getattr(usage, "cache_creation_input_tokens", 0) or 0
+            inp = usage.input_tokens
+            out = usage.output_tokens
+            cr  = getattr(usage, "cache_read_input_tokens",    0) or 0
+            cw  = getattr(usage, "cache_creation_input_tokens", 0) or 0
         else:
             inp = usage.get("input_tokens", 0)
             out = usage.get("output_tokens", 0)
@@ -221,22 +224,26 @@ class TraceLogger:
         self._tokens[agent]["cache_write"] += cw
 
     def ingest_otel_span(self, span: dict) -> None:
-        """
-        Normalize an OTel span emitted by a TypeScript agent and insert into ag_traces.
-        Called by the session driver for each OTEL_SPAN: line from subprocess stdout.
-        """
+        """Normalize an OTel span from a TypeScript agent and POST to ingest API."""
         from trace.normalizer import normalize_otel_span
         self._sequence += 1
         row = normalize_otel_span(span, self._sequence, self.session_id, _TENANT_ID)
         if row:
-            from core.db import get_client
-            get_client().table("ag_traces").insert(row).execute()
+            # Map normalised row fields to ingest trace payload
+            _ingest_post("/api/ingest/trace", {
+                "session_id": self.session_id,
+                "agent":      row.get("agent", "news"),
+                "step_type":  row.get("step_type", "tool_call"),
+                "outcome":    row.get("outcome"),
+                "latency_ms": row.get("latency_ms", 0),
+                "payload":    row.get("payload"),
+            })
 
     def flush_cost_breakdown(self) -> None:
         """
-        Upsert the current accumulated cost breakdown to ag_sessions without closing
-        the session. Call after each major agent completes so partial cost is captured
-        even if the process is killed before close_session().
+        Persist accumulated cost breakdown mid-session without closing it.
+        Kept as a direct Supabase write — no ingest API equivalent for partial
+        session metadata updates. Ensures cost is captured if process is killed.
         """
         if not self._tokens:
             return
@@ -277,14 +284,7 @@ class TraceLogger:
         retry_triggered: bool = False,
         result_summary: Optional[str] = None,
     ) -> None:
-        """Finalize the ag_sessions row for this session.
-
-        Uses update() so callers that attach to an existing session (EOD, intraday)
-        never overwrite started_at or token counts set by premarket.
-        Cost/token fields are only written when this TraceLogger actually logged tokens.
-        """
-        from core.db import get_client
-
+        """Close session via ingest API — triggers embeddings + diagnosis inline."""
         completed_at = datetime.utcnow()
         latency_ms   = int((completed_at - self._started_at).total_seconds() * 1000)
 
@@ -301,14 +301,13 @@ class TraceLogger:
         if self._pending_trades:
             metadata["pending_trades"] = self._pending_trades
 
-        row: dict[str, Any] = {
+        body: dict[str, Any] = {
+            "session_id":     self.session_id,
             "terminal_reason": terminal_reason,
-            "ended_at":        completed_at.isoformat(),
-            "status":          "completed",
-            "metadata":        metadata,
+            "metadata":       metadata,
         }
         if result_summary:
-            row["result_summary"] = result_summary
+            body["result_summary"] = result_summary
 
         if self._tokens:
             agent_costs: dict[str, Any] = {}
@@ -332,10 +331,10 @@ class TraceLogger:
             total_cost   = sum(a["cost_usd"] for a in agent_costs.values())
             total_input  = sum(v["input"]    for v in self._tokens.values())
             total_output = sum(v["output"]   for v in self._tokens.values())
-            row.update({
-                "total_tokens_input":  total_input,
-                "total_tokens_output": total_output,
-                "total_cost_usd":      round(total_cost, 6),
+            body.update({
+                "total_tokens_in":  total_input,
+                "total_tokens_out": total_output,
+                "total_cost_usd":   round(total_cost, 6),
             })
             metadata.update({
                 "agents_invoked":   agents_invoked or list(self._tokens.keys()),
@@ -344,66 +343,26 @@ class TraceLogger:
                 "cost_breakdown":   agent_costs,
             })
 
-        get_client().table("ag_sessions").update(row).eq("id", self.session_id).execute()
-        self._trigger_argus_compute(terminal_reason)
+        # Synchronous — waits for ingest close to fire diagnosis + embeddings
+        _ingest_post("/api/ingest/session/close", body)
 
     # ── Private ────────────────────────────────────────────────────────────────
 
-    def _trigger_argus_compute(self, terminal_reason: Optional[str]) -> None:
-        """Fire-and-forget: trigger diagnosis + embeddings on Argus immediately after close.
-        Falls back to the Argus cron if the call fails or ARGUS_URL is not set."""
-        import threading
-        import json
-        import urllib.request
-
-        if not _ARGUS_URL or not _TENANT_ID or not self._workflow_id:
-            return
-
-        payload = json.dumps({
-            "session_id":  self.session_id,
-            "tenant_id":   _TENANT_ID,
-            "workflow_id": self._workflow_id,
-        }).encode()
-
-        def _post(path: str) -> None:
-            try:
-                req = urllib.request.Request(
-                    f"{_ARGUS_URL}{path}",
-                    data=payload,
-                    headers={"Content-Type": "application/json"},
-                    method="POST",
-                )
-                urllib.request.urlopen(req, timeout=30)
-            except Exception:
-                pass  # non-fatal; Argus cron is the safety net
-
-        threading.Thread(target=_post, args=("/api/compute/diagnoses",), daemon=True).start()
-        threading.Thread(target=_post, args=("/api/compute/embeddings",), daemon=True).start()
-
-    def _insert_session_stub(self) -> None:
-        """Upsert a minimal ag_sessions row so ag_traces FK is satisfied from the start."""
-        from core.db import get_client
-        stub: dict[str, Any] = {
-            "id":              self.session_id,
-            "tenant_id":       _TENANT_ID,
-            "workflow_id":     self._workflow_id,
-            "started_at":      self._started_at.isoformat(),
-            "status":          "in_progress",
-            "terminal_reason": "in_progress",
-        }
-        if self._session_type:
-            stub["session_type"] = self._session_type
-        if self._parent_session_id:
-            stub["parent_session_id"] = self._parent_session_id
-        get_client().table("ag_sessions").upsert(stub, on_conflict="id", ignore_duplicates=True).execute()
+    def _open_session(self) -> None:
+        """POST to ingest session/open. Runs as daemon thread — client already holds session_id."""
+        _ingest_post("/api/ingest/session/open", {
+            "session_id":       self.session_id,
+            "session_type":     self._session_type or "premarket",
+            "parent_session_id": self._parent_session_id,
+            "started_at":       self._started_at.isoformat(),
+            "metadata":         {"date": date.today().isoformat()},
+        })
 
     def _write(self, fields: dict) -> str:
-        from core.db import get_client
         span_id = str(uuid4())
         self._sequence += 1
         agent = fields.get("agent", "orchestrator")
 
-        # Auto-derive entity_id for research sub-agents (pattern: research_TICKER)
         entity_id = fields.get("entity_id")
         if entity_id is None and "_" in agent and agent.split("_", 1)[0] == "research":
             entity_id = agent.split("_", 1)[1].upper()
@@ -426,34 +385,29 @@ class TraceLogger:
             "date":           date.today().isoformat(),
             "sequence":       self._sequence,
             "model":          model,
+            "cost_usd":       cost_usd,
         }
         if fields.get("tool_input")      is not None: payload["tool_input"]      = fields["tool_input"]
         if fields.get("tool_output")     is not None: payload["tool_output"]     = fields["tool_output"]
         if fields.get("agent_reasoning") is not None: payload["agent_reasoning"] = fields["agent_reasoning"]
         if fields.get("payload")         is not None: payload.update(fields["payload"])
 
-        row: dict[str, Any] = {
-            "tenant_id":    _TENANT_ID,
-            "workflow_id":  self._workflow_id,
-            "session_id":   self.session_id,
-            "agent":        agent,
-            "step_type":    fields.get("step_type"),
-            "tool_name":    fields.get("tool_name"),
-            "outcome":      fields.get("outcome"),
-            "error":        fields.get("error"),
-            "latency_ms":   fields.get("latency_ms", 0),
-            "tokens_input": tokens_input,
+        _ingest_post("/api/ingest/trace", {
+            "session_id": self.session_id,
+            "agent":      agent,
+            "step_type":  fields.get("step_type"),
+            "tool_name":  fields.get("tool_name"),
+            "outcome":    fields.get("outcome"),
+            "error":      fields.get("error"),
+            "latency_ms": fields.get("latency_ms", 0),
+            "tokens_input":  tokens_input,
             "tokens_output": tokens_output,
-            "cost_usd":     cost_usd,
-            "payload":      payload,
-            "created_at":   datetime.utcnow().isoformat(),
-        }
-        get_client().table("ag_traces").insert(row).execute()
+            "payload":    payload,
+        })
         return span_id
 
     def _count_tool_calls(self) -> int:
-        """Returns total tool_call rows written this session."""
-        return self._sequence  # conservative — actual count tracked by sequence
+        return self._sequence
 
     def get_sequence(self) -> int:
         return self._sequence
@@ -463,8 +417,6 @@ class TraceLogger:
 
 
 def _agent_model(agent: str) -> str:
-    """Map agent name to its Claude model for cost estimation."""
-    # research mini-agents log as "research_TICKER" — strip suffix before matching
     base = agent.split("_")[0] if "_" in agent else agent
     sonnet_agents = {"orchestrator", "learning"}
     return "claude-sonnet-4-6" if base in sonnet_agents else "claude-haiku-4-5-20251001"

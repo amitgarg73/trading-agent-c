@@ -98,26 +98,22 @@ class TestRunScannerAgent:
         assert result["n_returned"] == 0
         assert "error" in result["scan_rationale"]
 
-    def test_decision_logged_candidates_selected(self, tracer, mock_supabase):
+    def test_decision_logged_candidates_selected(self, tracer, mock_ingest_post):
         client = _make_client(_SCANNER_JSON)
-        inserts = []
-        mock_supabase.table.return_value.insert.side_effect = lambda row: (
-            inserts.append(row) or mock_supabase.table.return_value
-        )
         with patch("agents.scanner_agent.anthropic.Anthropic", return_value=client):
             run_scanner_agent(tracer, _MARKET_GO, StrategyParams())
-        outcomes = [r.get("outcome") for r in inserts if isinstance(r, dict)]
+        trace_calls = [c[0][1] for c in mock_ingest_post.call_args_list
+                       if c[0][0] == "/api/ingest/trace"]
+        outcomes = [p.get("outcome") for p in trace_calls]
         assert "candidates_selected" in outcomes
 
-    def test_decision_logged_low_quality_halt(self, tracer, mock_supabase):
+    def test_decision_logged_low_quality_halt(self, tracer, mock_ingest_post):
         client = _make_client(_EMPTY_JSON)
-        inserts = []
-        mock_supabase.table.return_value.insert.side_effect = lambda row: (
-            inserts.append(row) or mock_supabase.table.return_value
-        )
         with patch("agents.scanner_agent.anthropic.Anthropic", return_value=client):
             run_scanner_agent(tracer, _MARKET_GO, StrategyParams())
-        outcomes = [r.get("outcome") for r in inserts if isinstance(r, dict)]
+        trace_calls = [c[0][1] for c in mock_ingest_post.call_args_list
+                       if c[0][0] == "/api/ingest/trace"]
+        outcomes = [p.get("outcome") for p in trace_calls]
         assert "low_quality_halt" in outcomes
 
     def test_caution_message_includes_caution(self, tracer):
@@ -167,7 +163,7 @@ class TestDispatch:
 
 
 class TestToolLoop:
-    def test_tool_call_is_logged(self, tracer, mock_supabase):
+    def test_tool_call_is_logged(self, tracer, mock_ingest_post):
         client = MagicMock()
         client.messages.create.side_effect = [
             make_api_response("tool_use", [
@@ -175,16 +171,13 @@ class TestToolLoop:
             ]),
             make_api_response("end_turn", [text_block(_SCANNER_JSON)]),
         ]
-        inserts = []
-        mock_supabase.table.return_value.insert.side_effect = lambda row: (
-            inserts.append(row) or mock_supabase.table.return_value
-        )
         with patch("agents.scanner_agent.anthropic.Anthropic", return_value=client), \
              patch("agents.scanner_agent._dispatch", return_value=[]):
             run_scanner_agent(tracer, _MARKET_GO, StrategyParams())
-        tool_rows = [r for r in inserts if isinstance(r, dict)
-                     and r.get("step_type") == "tool_call"
-                     and r.get("agent") == "scanner"]
+        tool_rows = [c[0][1] for c in mock_ingest_post.call_args_list
+                     if c[0][0] == "/api/ingest/trace"
+                     and c[0][1].get("step_type") == "tool_call"
+                     and c[0][1].get("agent") == "scanner"]
         assert len(tool_rows) >= 1
 
     def test_sequence_advances_on_tool_calls(self, tracer):
