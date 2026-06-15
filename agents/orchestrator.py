@@ -39,6 +39,11 @@ DECISION RULES:
    - If ANY rejection is fixable (sector concentration, count limit exceeded):
      set retry_needed = true.
 4. If len(approved_trades) > 0: return them, terminal_reason = "converged".
+5. For each trade's reasoning field you MUST include BOTH:
+   - Entry rationale: why this setup is valid now (catalyst, momentum, regime alignment)
+   - Exit rationale: why stop_loss and target_price are at those specific levels
+     Example: "stop at $174 = 2×ATR below entry per risk agent; target at $183 = prior
+     resistance from April 14 at 1:2 R:R; do not adjust these levels."
 
 For each approved trade compute:
 - shares = floor(position_size / entry_price)
@@ -54,7 +59,8 @@ Return JSON only — schema must match exactly:
     "ticker": str, "action": "BUY", "entry_price": float,
     "target_price": float, "stop_loss": float, "position_size": float,
     "shares": int, "confidence": str, "estimated_profit": float,
-    "max_loss": float, "reward_risk": float, "reasoning": str
+    "max_loss": float, "reward_risk": float,
+    "reasoning": str    // entry thesis + why stop_loss and target_price are at these levels
   }],
   "total_estimated_profit": float,
   "total_max_loss": float,
