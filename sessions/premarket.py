@@ -18,7 +18,7 @@ from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
 _PREMARKET_START = time(6, 0)   # default — overridable via c_agent_config.premarket_window_start
-_PREMARKET_END   = time(11, 30) # default — overridable via c_agent_config.premarket_window_end
+_PREMARKET_END   = time(10, 30) # default — overridable via c_agent_config.premarket_window_end
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 

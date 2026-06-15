@@ -360,14 +360,15 @@ def main() -> None:
     # within a trading day. Each intraday poll gets its own session_id for traces.
     premarket_session_id = get_premarket_session_id()
     if not premarket_session_id:
-        _PREMARKET_DISPATCH_END = time(10, 30)
-        if now_t <= _PREMARKET_DISPATCH_END:
-            print(f"[intraday] No session yet at {now_et.strftime('%H:%M ET')} — running premarket pipeline")
-            from sessions.premarket import main as _premarket_main
-            _premarket_main()
-            premarket_session_id = get_premarket_session_id()
+        # No premarket session yet — run the full pipeline now regardless of time.
+        # bypass_checks=True skips the time-window gate while keeping market agent,
+        # scanner, news analyst, research, and risk agents intact.
+        print(f"[intraday] No premarket session at {now_et.strftime('%H:%M ET')} — running full pipeline")
+        from sessions.premarket import main as _premarket_main
+        _premarket_main(bypass_checks=True)
+        premarket_session_id = get_premarket_session_id()
         if not premarket_session_id:
-            print("[intraday] No premarket session today. Exiting.")
+            print("[intraday] Premarket pipeline produced no session — exiting.")
             return
 
     protection = check_protection_status()

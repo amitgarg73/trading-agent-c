@@ -675,21 +675,24 @@ class TestIntradayMain:
             main()
         assert "Outside poll window" in capsys.readouterr().out
 
-    def test_exits_when_no_session(self, mock_supabase, capsys):
+    def test_exits_when_no_session_and_pipeline_produces_nothing(self, mock_supabase, capsys):
+        """If premarket pipeline runs but creates no session (e.g. no candidates), exit cleanly."""
         import pytz
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 10, 0, tzinfo=_ET)
+        # get_premarket_session_id returns None both before and after the pipeline runs
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
-             patch("sessions.intraday.get_premarket_session_id", return_value=None):
+             patch("sessions.intraday.get_premarket_session_id", return_value=None), \
+             patch("sessions.premarket.main"):
             mock_dt.now.return_value = fake_now
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             from sessions.intraday import main
             main()
-        assert "No premarket session" in capsys.readouterr().out
+        assert "Premarket pipeline produced no session" in capsys.readouterr().out
 
-    def test_dispatches_premarket_when_no_session_in_window(self, mock_supabase, capsys):
-        """At 9:30 AM with no session yet, intraday dispatches to premarket pipeline."""
+    def test_dispatches_full_pipeline_when_no_session(self, mock_supabase, capsys):
+        """Any time no premarket session exists, intraday runs the full pipeline with bypass_checks=True."""
         import pytz
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 9, 30, tzinfo=_ET)
@@ -701,8 +704,23 @@ class TestIntradayMain:
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             from sessions.intraday import main
             main()
-        mock_pm.assert_called_once()
-        assert "premarket pipeline" in capsys.readouterr().out
+        mock_pm.assert_called_once_with(bypass_checks=True)
+        assert "full pipeline" in capsys.readouterr().out
+
+    def test_dispatches_full_pipeline_past_old_10am_cutoff(self, mock_supabase, capsys):
+        """At 1 PM ET (past the old 10:30 AM gate), still dispatches the full premarket pipeline."""
+        import pytz
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 13, 0, tzinfo=_ET)
+        with patch("sessions.intraday.is_trading_day", return_value=True), \
+             patch("sessions.intraday.datetime") as mock_dt, \
+             patch("sessions.intraday.get_premarket_session_id", return_value=None), \
+             patch("sessions.premarket.main") as mock_pm:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            from sessions.intraday import main
+            main()
+        mock_pm.assert_called_once_with(bypass_checks=True)
 
     def test_exits_when_protection_suspended(self, mock_supabase, capsys):
         import pytz
