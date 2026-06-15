@@ -93,12 +93,12 @@ def get_today_tickers(session_id: str) -> set[str]:
 
 
 def get_open_positions(session_id: str) -> list[dict]:
-    """Return open positions for today with entry_price and unrealized_pnl."""
+    """Return open positions for today with entry_price."""
     from core.db import get_client
     rows = (
         get_client()
         .table("c_positions")
-        .select("ticker,entry_price,unrealized_pnl")
+        .select("ticker,entry_price")
         .eq("session_id", session_id)
         .eq("status", "open")
         .eq("open_date", date.today().isoformat())
