@@ -45,7 +45,10 @@ SKIP RULES (return SKIP if ANY apply):
 - News context: blackout is true
 - get_ticker_market_data: atr_pct > 5 (stop too noisy)
 - get_ticker_market_data: today_pct_change > 4 (already extended; 8% target unreachable)
-- get_ticker_market_data: live_price is null and not pre-market (data issue)
+- get_ticker_market_data: live_price is null AND available is not false (intraday data issue)
+NOTE: live_price is always null before market open — this is expected, NOT a skip trigger.
+If premarket_error is set, that is a known paper-account SIP limitation. Use premarket_change_pct
+(from scanner context or tool result) as your primary pre-market signal instead.
 
 CONFIDENCE RULES:
 - HIGH:   score >= 7, above_vwap true, rs_vs_spy >= 1.5, today_pct_change <= 2

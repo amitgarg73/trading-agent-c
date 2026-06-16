@@ -80,6 +80,7 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
     et       = pytz.timezone("America/New_York")
     now_et   = datetime.now(et)
     result: dict[str, Any] = {}
+    daily_bars: list = []  # populated in step 1; used as fallback in step 2
 
     # ── 1. Daily bars (50 calendar days → ~35 trading days) ──────────────────
     try:
@@ -137,8 +138,32 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
 
     except Exception as e:
         result["premarket_volume"] = None
-        result["conviction"]       = "unknown"
         result["premarket_error"]  = str(e)
+        # Paper-account SIP limitation: minute bars blocked, but latest quote works.
+        # Derive conviction from snapshot vs previous-day close so the agent isn't flying blind.
+        conviction = "unknown"
+        try:
+            from alpaca.data.requests import StockLatestQuoteRequest
+            q_map = _dclient().get_stock_latest_quote(
+                StockLatestQuoteRequest(symbol_or_symbols=[ticker])
+            )
+            q = q_map.get(ticker)
+            prev_close = float(daily_bars[-1].close) if daily_bars else None
+            if q and prev_close:
+                ask = float(getattr(q, "ask_price", 0) or 0)
+                bid = float(getattr(q, "bid_price", 0) or 0)
+                mid = (ask + bid) / 2 if ask > 0 and bid > 0 else (ask or bid)
+                if mid > 0:
+                    chg_pct = (mid - prev_close) / prev_close * 100
+                    result["premarket_change_pct"] = round(chg_pct, 2)
+                    conviction = (
+                        "HIGH"     if chg_pct >= 1.0 else
+                        "MODERATE" if chg_pct >= 0.3 else
+                        "LOW"
+                    )
+        except Exception:
+            pass  # best-effort; conviction stays "unknown"
+        result["conviction"] = conviction
 
     # ── 3. Intraday minute bars (9:30 AM ET → now) with SPY ──────────────────
     if _is_premarket():

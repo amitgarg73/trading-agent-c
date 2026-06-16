@@ -634,3 +634,68 @@ class TestGetTickerMarketData:
             result = get_ticker_market_data("AAPL")
         assert result["atr_pct"] is None
         assert "daily_bars_error" in result
+
+    def _mock_sip_fallback_client(self, daily_bars, ask, bid):
+        """Mock client where SIP premarket bars fail but latest quote succeeds."""
+        mock_resp_daily = MagicMock()
+        mock_resp_daily.data = {"AAPL": daily_bars}
+
+        mock_dc = MagicMock()
+        # First call (daily bars) succeeds; second call (premarket bars) raises SIP error
+        mock_dc.get_stock_bars.side_effect = [
+            mock_resp_daily,
+            Exception('{"message":"subscription does not permit querying recent SIP data"}'),
+        ]
+        # Latest quote returns ask/bid
+        mock_quote = MagicMock()
+        mock_quote.ask_price = ask
+        mock_quote.bid_price = bid
+        mock_dc.get_stock_latest_quote.return_value = {"AAPL": mock_quote}
+        return mock_dc
+
+    def test_sip_fallback_high_conviction_on_large_gap(self):
+        # +2% premarket move vs prev close should yield HIGH conviction
+        bars = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        mock_dc = self._mock_sip_fallback_client(bars, ask=102.1, bid=102.0)  # ~+2.05%
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "HIGH"
+        assert "premarket_change_pct" in result
+        assert result["premarket_change_pct"] > 1.0
+        assert "premarket_error" in result
+
+    def test_sip_fallback_moderate_conviction_on_small_gap(self):
+        # +0.5% move → MODERATE conviction
+        bars = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        mock_dc = self._mock_sip_fallback_client(bars, ask=100.55, bid=100.45)  # ~+0.5%
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "MODERATE"
+
+    def test_sip_fallback_low_conviction_on_flat(self):
+        # Flat quote → LOW conviction
+        bars = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        mock_dc = self._mock_sip_fallback_client(bars, ask=100.1, bid=100.0)  # +0.05%
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "LOW"
+
+    def test_sip_fallback_unknown_when_quote_also_fails(self):
+        # Both SIP bars and latest quote fail → conviction stays "unknown"
+        bars = [self._make_daily_bar(100.0, volume=1_000_000) for _ in range(22)]
+        mock_resp_daily = MagicMock()
+        mock_resp_daily.data = {"AAPL": bars}
+        mock_dc = MagicMock()
+        mock_dc.get_stock_bars.side_effect = [
+            mock_resp_daily,
+            Exception("SIP error"),
+        ]
+        mock_dc.get_stock_latest_quote.side_effect = Exception("quote unavailable")
+        with patch("core.alpaca._dclient", return_value=mock_dc), \
+             patch("agents.tools.research_tools._is_premarket", return_value=True, create=True):
+            result = get_ticker_market_data("AAPL")
+        assert result["conviction"] == "unknown"
+        assert "premarket_error" in result
