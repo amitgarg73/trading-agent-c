@@ -183,7 +183,7 @@ def run_learning_agent(
     writes structured learnings, and optionally adjusts parameters.
     Returns a summary dict with context_for_tomorrow.
     """
-    tracer.start_agent_span("learning")
+    tracer.start_agent_span("learner")
     client = anthropic.Anthropic()
     text = run_tool_loop(
         client=client,
@@ -197,7 +197,7 @@ def run_learning_agent(
         ),
         dispatch=_make_dispatch(session_id),
         tracer=tracer,
-        agent_name="learning",
+        agent_name="learner",
         max_turns=20,
     )
     return parse_json_response(text)

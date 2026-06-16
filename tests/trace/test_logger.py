@@ -345,11 +345,11 @@ class TestIngestOtelSpan:
             "traceId": "abc123",
             "spanId":  "def456",
             "parentSpanId": None,
-            "name": "news_analyst.get_ticker_news",
+            "name": "news.get_ticker_news",
             "startTimeUnixNano": 1000000000,
             "endTimeUnixNano":   1840000000,
             "attributes": {
-                "agent.name":      "news_analyst",
+                "agent.name":      "news",
                 "agent.language":  "typescript",
                 "session.id":      "test-session-id-1234",
                 "tool.name":       "get_ticker_news",
@@ -360,7 +360,7 @@ class TestIngestOtelSpan:
         }
         tracer.ingest_otel_span(span)
         p = _last_trace(mock_ingest_post)
-        assert p["agent"] == "news_analyst"
+        assert p["agent"] == "news"
         assert p["session_id"] == "test-session-id-1234"
 
     def test_skips_span_without_agent_name(self, tracer, mock_ingest_post):
@@ -388,11 +388,11 @@ class TestCostHelpers:
         assert cost_cached < cost_uncached
 
     def test_agent_model_haiku_agents(self):
-        for agent in ("market", "risk", "news_analyst", "research", "research_NVDA", "research_AAPL"):
+        for agent in ("market", "risk", "news", "research", "research_NVDA", "research_AAPL"):
             assert _agent_model(agent) == "claude-haiku-4-5-20251001"
 
     def test_agent_model_sonnet_agents(self):
-        for agent in ("orchestrator", "learning"):
+        for agent in ("orchestrator", "learner"):
             assert _agent_model(agent) == "claude-sonnet-4-6"
 
 

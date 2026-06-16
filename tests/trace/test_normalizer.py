@@ -12,11 +12,11 @@ def _make_span(**overrides) -> dict:
         "traceId": "abc123",
         "spanId": "def456",
         "parentSpanId": None,
-        "name": "news_analyst.get_ticker_news",
+        "name": "news.get_ticker_news",
         "startTimeUnixNano": 1_000_000_000,
         "endTimeUnixNano":   1_840_000_000,
         "attributes": {
-            "agent.name":        "news_analyst",
+            "agent.name":        "news",
             "agent.language":    "typescript",
             "session.id":        "sess-001",
             "tool.name":         "get_ticker_news",
@@ -36,7 +36,7 @@ class TestNormalizeOtelSpan:
 
     def test_returns_none_without_session_id(self):
         attrs = {
-            "agent.name": "news_analyst",
+            "agent.name": "news",
             "agent.language": "typescript",
         }
         assert normalize_otel_span({"attributes": attrs}, 1) is None
@@ -51,7 +51,7 @@ class TestNormalizeOtelSpan:
 
     def test_agent_field_populated(self):
         row = normalize_otel_span(_make_span(), 1)
-        assert row["agent"] == "news_analyst"
+        assert row["agent"] == "news"
 
     def test_tool_name_extracted(self):
         row = normalize_otel_span(_make_span(), 1)
@@ -70,7 +70,7 @@ class TestNormalizeOtelSpan:
         assert row["step_type"] == "tool_call"
 
     def test_step_type_decision_when_span_name_ends_with_session(self):
-        span = _make_span(name="news_analyst.session")
+        span = _make_span(name="news.session")
         attrs = span["attributes"].copy()
         del attrs["tool.name"]
         span["attributes"] = attrs
@@ -78,7 +78,7 @@ class TestNormalizeOtelSpan:
         assert row["step_type"] == "decision"
 
     def test_step_type_agent_message_when_no_tool(self):
-        span = _make_span(name="news_analyst.analyze")
+        span = _make_span(name="news.analyze")
         attrs = span["attributes"].copy()
         del attrs["tool.name"]
         span["attributes"] = attrs
@@ -154,6 +154,18 @@ class TestNormalizeOtelSpan:
             assert key in row
         for key in ("span_id", "sequence", "date"):
             assert key in row["payload"]
+
+    def test_agent_reasoning_extracted_from_attribute(self):
+        span = _make_span(name="news.reasoning")
+        del span["attributes"]["tool.name"]
+        span["attributes"]["agent.reasoning"] = "AAPL: bullish · NVDA: neutral"
+        row = normalize_otel_span(span, 1)
+        assert row["step_type"] == "agent_message"
+        assert row["payload"]["agent_reasoning"] == "AAPL: bullish · NVDA: neutral"
+
+    def test_agent_reasoning_absent_when_not_in_attributes(self):
+        row = normalize_otel_span(_make_span(), 1)
+        assert "agent_reasoning" not in row["payload"]
 
 
 # ── normalize_log_line ────────────────────────────────────────────────────────

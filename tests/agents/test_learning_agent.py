@@ -71,11 +71,11 @@ class TestRunLearningAgent:
 
     def test_span_started(self, tracer):
         _run(tracer)
-        assert tracer.get_agent_span("learning") is not None
+        assert tracer.get_agent_span("learner") is not None
 
     def test_tokens_accumulated(self, tracer):
         _run(tracer)
-        assert tracer._tokens.get("learning", {}).get("input", 0) > 0
+        assert tracer._tokens.get("learner", {}).get("input", 0) > 0
 
     def test_session_id_in_initial_message(self, tracer):
         client = _setup_client()

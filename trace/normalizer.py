@@ -69,6 +69,8 @@ def normalize_otel_span(
         "tool_input":     tool_input or None,
         "tool_output":    tool_output or None,
     }
+    if attrs.get("agent.reasoning"):
+        payload["agent_reasoning"] = attrs["agent.reasoning"]
 
     return {
         "tenant_id":    tenant_id,

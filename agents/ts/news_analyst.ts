@@ -214,12 +214,12 @@ export async function runNewsAnalyst(
             traceId,
             spanId: generateSpanId(),
             parentSpanId: sessionSpanId,
-            name: `news_analyst.${block.name}`,
+            name: `news.${block.name}`,
             kind: 3,
             startTimeUnixNano: callStart * 1_000_000,
             endTimeUnixNano: callEnd * 1_000_000,
             attributes: {
-              "agent.name": "news_analyst",
+              "agent.name": "news",
               "agent.language": "typescript",
               "tool.name": block.name,
               "tool.input.ticker": ticker,
@@ -266,16 +266,39 @@ export async function runNewsAnalyst(
         duration_ms: Date.now() - startTime,
       };
 
-      const sessionSpan: OtelSpan = {
+      // Emit a reasoning span so the embeddings job can embed this agent's output.
+      // The normalizer maps agent.reasoning → payload.agent_reasoning for step_type=agent_message.
+      const reasoningSpan: OtelSpan = {
         traceId,
-        spanId: sessionSpanId,
-        parentSpanId: input.session_id.replace(/-/g, "").slice(0, 12),
-        name: "news_analyst.session",
+        spanId: generateSpanId(),
+        parentSpanId: sessionSpanId,
+        name: "news.reasoning",
         kind: 2,
         startTimeUnixNano: startTime * 1_000_000,
         endTimeUnixNano: Date.now() * 1_000_000,
         attributes: {
-          "agent.name": "news_analyst",
+          "agent.name": "news",
+          "agent.language": "typescript",
+          "agent.reasoning": textBlock.text,
+          "tokens.input": totalInputTokens,
+          "tokens.output": totalOutputTokens,
+          "session.id": input.session_id,
+          model: MODEL,
+        },
+        status: { code: 1 },
+      };
+      emit(`OTEL_SPAN: ${JSON.stringify(reasoningSpan)}`);
+
+      const sessionSpan: OtelSpan = {
+        traceId,
+        spanId: sessionSpanId,
+        parentSpanId: input.session_id.replace(/-/g, "").slice(0, 12),
+        name: "news.session",
+        kind: 2,
+        startTimeUnixNano: startTime * 1_000_000,
+        endTimeUnixNano: Date.now() * 1_000_000,
+        attributes: {
+          "agent.name": "news",
           "agent.language": "typescript",
           "tickers.analyzed": input.tickers.length,
           "blackout.count": output.blackout_count,

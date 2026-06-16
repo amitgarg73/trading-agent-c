@@ -443,5 +443,5 @@ class TraceLogger:
 
 def _agent_model(agent: str) -> str:
     base = agent.split("_")[0] if "_" in agent else agent
-    sonnet_agents = {"orchestrator", "learning"}
+    sonnet_agents = {"orchestrator", "learner"}
     return "claude-sonnet-4-6" if base in sonnet_agents else "claude-haiku-4-5-20251001"
