@@ -19,7 +19,7 @@ from agents.tools.research_tools import (
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
-_MODEL = "claude-haiku-4-5-20251001"
+_MODEL = "claude-sonnet-4-6"
 
 # Per-ticker agent cap: 4 tools × ~15s each + reasoning = ~90s is plenty
 _TICKER_TIMEOUT_S  = 120
@@ -45,10 +45,18 @@ SKIP RULES (return SKIP if ANY apply):
 - News context: blackout is true
 - get_ticker_market_data: atr_pct > 5 (stop too noisy)
 - get_ticker_market_data: today_pct_change > 4 (already extended; 8% target unreachable)
-- get_ticker_market_data: live_price is null AND available is not false (intraday data issue)
-NOTE: live_price is always null before market open — this is expected, NOT a skip trigger.
-If premarket_error is set, that is a known paper-account SIP limitation. Use premarket_change_pct
-(from scanner context or tool result) as your primary pre-market signal instead.
+- get_ticker_market_data: available=true AND live_price is null (intraday data missing — real problem)
+
+PRE-MARKET DATA RULE (critical — read carefully):
+If get_ticker_market_data returns available=false, that means it is the pre-market period.
+This is NORMAL and EXPECTED. Do NOT skip for this reason.
+When available=false: live_price, VWAP, RS, ORB, today_pct_change are all null — that is fine.
+Use premarket_change_pct from the scanner context as your primary signal instead.
+ATR is still returned and valid even when available=false — use it for stop sizing.
+
+POSITION HISTORY RULE:
+If trade_count < 5, the win_rate is too small a sample to be meaningful. Ignore it entirely.
+Only factor win_rate into your decision when trade_count >= 5.
 
 CONFIDENCE RULES:
 - HIGH:   score >= 7, above_vwap true, rs_vs_spy >= 1.5, today_pct_change <= 2
