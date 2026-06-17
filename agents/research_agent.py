@@ -43,8 +43,8 @@ TOOL ORDER (mandatory):
 
 SKIP RULES (return SKIP if ANY apply):
 - News context: blackout is true
-- get_ticker_market_data: atr_pct > 5 (stop too noisy)
-- get_ticker_market_data: today_pct_change > 4 (already extended; 8% target unreachable)
+- get_ticker_market_data: atr_pct > 10 (stop too noisy — raised from 5 to match scanner)
+- get_ticker_market_data: today_pct_change > 8 (already extended — raised from 4; sector leaders can run 5-8% and still have upside)
 - get_ticker_market_data: available=true AND live_price is null (intraday data missing — real problem)
 
 PRE-MARKET DATA RULE (critical — read carefully):
@@ -201,73 +201,180 @@ def _investigate_ticker(
 
 # ── Phase 1: deterministic screening (no LLM needed) ─────────────────────────
 
+def _compute_composite_score(
+    baseline: int,
+    gap_pct: float,
+    sector_etf_pct: float | None,
+    rs_vs_spy: float | None = None,
+    above_vwap: bool | None = None,
+    orb_pct: float | None = None,
+) -> int:
+    """
+    Composite score = baseline (scanner) + premarket momentum + sector ETF + intraday signals.
+
+    Pre-market additions (max +5):
+      gap >= 3%: +3   gap >= 1.5%: +2   gap >= 0.5%: +1
+      sector ETF >= 2%: +2   sector ETF >= 0.75%: +1
+
+    Intraday additions (max +5, only when rs_vs_spy/above_vwap available):
+      RS vs SPY >= 2.0: +3   >= 1.0: +2   >= 0.3: +1   <= -1.0: -1
+      above VWAP: +1
+      above ORB high: +1
+    """
+    score = baseline
+
+    # Gap bonus
+    if gap_pct >= 3.0:
+        score += 3
+    elif gap_pct >= 1.5:
+        score += 2
+    elif gap_pct >= 0.5:
+        score += 1
+    elif gap_pct <= -1.0:
+        score -= 1
+
+    # Sector ETF momentum
+    if sector_etf_pct is not None:
+        if sector_etf_pct >= 2.0:
+            score += 2
+        elif sector_etf_pct >= 0.75:
+            score += 1
+
+    # Intraday signals (only present during intraday scan path)
+    if rs_vs_spy is not None:
+        if rs_vs_spy >= 2.0:
+            score += 3
+        elif rs_vs_spy >= 1.0:
+            score += 2
+        elif rs_vs_spy >= 0.3:
+            score += 1
+        elif rs_vs_spy <= -1.0:
+            score -= 1
+
+    if above_vwap is True:
+        score += 1
+
+    if orb_pct is not None and orb_pct >= 0:
+        score += 1
+
+    return score
+
+
 def _screen_candidates(
     market_report: dict,
     sector_data: list[dict],
     rejected_tickers: list[str],
     min_score: int = 5,
+    is_intraday: bool = False,
 ) -> list[dict]:
     """
     Select up to _MAX_CANDIDATES tickers to investigate.
-    Done deterministically so we save a full LLM call and 2-3 turns.
+    Done deterministically — saves a full LLM call and 2-3 turns.
 
-    Sources (merged, deduped by ticker):
-      1. Scanner candidates (get_candidates) — technical-score ranked
-      2. Gap-up movers (get_gap_up_tickers) — Alpaca market movers >= 2% gain,
-         assigned score=6 so they compete with mid-tier scanner picks
+    Sources (merged, deduped):
+      1. Scanner candidates (get_candidates) — wider net: max(2, min_score - 2)
+      2. Gap-up movers (get_gap_up_tickers) — Alpaca market movers >= 2%
+
+    Enrichment (all in-memory, no LLM):
+      Pre-market: Alpaca latest quotes → gap%, premarket_change_pct
+      Sector ETF: batch snapshot → sector tailwind/headwind
+      Intraday only: batch minute bars → VWAP, RS vs SPY, ORB status
+
+    Final ranking: composite score = baseline + gap + sector + intraday signals
     """
-    from core.alpaca import get_gap_up_tickers
+    from core.alpaca import get_gap_up_tickers, get_sector_etf_changes
+    from scanner.universe import get_tickers as _get_universe_tickers, get_sector_etf, SECTOR_ETF_MAP
 
-    candidates = get_candidates(min_score=min_score)
-    valid = [c for c in candidates if "error" not in c and c["ticker"] not in rejected_tickers]
+    # Wider baseline net — enrichment will re-rank by composite score
+    effective_min = max(2, min_score - 2)
+    candidates    = get_candidates(min_score=effective_min)
+    valid         = [c for c in candidates if "error" not in c and c["ticker"] not in rejected_tickers]
 
-    # Merge gap-up movers — universe-restricted so micro-caps/warrants can't enter
-    from scanner.universe import get_tickers as _get_universe_tickers
-    universe_set = set(_get_universe_tickers())
+    # Merge gap-up movers — universe-restricted
+    universe_set    = set(_get_universe_tickers())
     scanner_tickers = {c["ticker"] for c in valid}
-    gap_ups = get_gap_up_tickers(min_gap_pct=2.0)
+    gap_ups         = get_gap_up_tickers(min_gap_pct=2.0)
     for g in gap_ups:
-        if g["ticker"] not in scanner_tickers and g["ticker"] not in rejected_tickers and g["ticker"] in universe_set:
+        t = g["ticker"]
+        if t not in scanner_tickers and t not in rejected_tickers and t in universe_set:
             valid.append({
-                "ticker":          g["ticker"],
-                "technical_score": 6,
+                "ticker":          t,
+                "technical_score": 5,
                 "sector":          None,
                 "_source":         "gap_up",
             })
-            scanner_tickers.add(g["ticker"])
+            scanner_tickers.add(t)
 
     if not valid:
         return []
 
-    tickers   = [c["ticker"] for c in valid]
+    tickers = [c["ticker"] for c in valid]
+
+    # Pre-market snapshots (gap%, premarket price)
     snapshots = get_premarket_snapshot(tickers)
     snap_map  = {s["ticker"]: s for s in snapshots if "error" not in s}
-
-    # Build a gap_pct lookup from Alpaca movers (premarket_snapshot may lag)
     gap_pct_map = {g["ticker"]: g["gap_pct"] for g in gap_ups}
+
+    # Sector ETF changes — fetch unique ETFs only
+    needed_etfs = list(set(
+        get_sector_etf(c["ticker"]) for c in valid
+    ))
+    needed_etfs += ["SMH"]  # always fetch SMH for semi sector
+    sector_etf_changes: dict[str, float] = {}
+    try:
+        sector_etf_changes = get_sector_etf_changes(list(set(needed_etfs)))
+    except Exception:
+        pass
+
+    # Intraday signals (only during intraday scan path)
+    intraday_signals: dict[str, dict] = {}
+    if is_intraday:
+        try:
+            from core.alpaca import batch_get_intraday_signals
+            intraday_signals = batch_get_intraday_signals(tickers)
+        except Exception:
+            pass
 
     is_caution = market_report.get("decision") == "CAUTION"
 
     scored = []
     for c in valid:
-        ticker = c["ticker"]
-        snap   = snap_map.get(ticker, {})
-        score  = c["technical_score"]
-        pct    = gap_pct_map.get(ticker) or snap.get("premarket_change_pct") or 0
+        ticker  = c["ticker"]
+        snap    = snap_map.get(ticker, {})
+        baseline = c["technical_score"]
+        gap_pct  = gap_pct_map.get(ticker) or snap.get("premarket_change_pct") or 0.0
 
-        if is_caution and (score < 7 or pct <= 0.3):
+        # CAUTION: only high-conviction setups
+        if is_caution and (baseline < 7 or gap_pct <= 0.3):
             continue
+
+        etf_symbol  = get_sector_etf(ticker)
+        etf_pct     = sector_etf_changes.get(etf_symbol)
+
+        intra = intraday_signals.get(ticker, {})
+        rs_vs_spy  = intra.get("rs_vs_spy")
+        above_vwap = intra.get("above_vwap")
+        orb_pct    = intra.get("orb_pct")
+
+        composite = _compute_composite_score(
+            baseline, gap_pct, etf_pct, rs_vs_spy, above_vwap, orb_pct
+        )
 
         scored.append({
             "ticker":               ticker,
-            "score":                score,
-            "premarket_change_pct": pct,
+            "score":                composite,
+            "baseline_score":       baseline,
+            "premarket_change_pct": gap_pct,
             "scanner_price":        snap.get("scanner_price"),
             "premarket_price":      snap.get("premarket_price") or c.get("price"),
-            "sector":               c.get("sector"),
+            "sector":               c.get("sector") or snap.get("sector"),
+            "sector_etf":           etf_symbol,
+            "sector_etf_pct":       etf_pct,
+            "rs_vs_spy":            rs_vs_spy,
+            "above_vwap":           above_vwap,
+            "orb_pct":              orb_pct,
         })
 
-    # Sort: score first, premarket momentum second
     scored.sort(key=lambda x: (x["score"], x["premarket_change_pct"]), reverse=True)
     return scored[:_MAX_CANDIDATES]
 
@@ -333,6 +440,7 @@ def run_research_agent(
         selected = _screen_candidates(
             market_report, sector_data, rejected_tickers,
             min_score=params.strategy_min_score,
+            is_intraday=True,
         )
         if not selected:
             tracer.log_decision("research", "no_candidates_after_screen")

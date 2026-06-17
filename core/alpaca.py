@@ -468,3 +468,100 @@ def get_gap_up_tickers(min_gap_pct: float = 2.0, top_n: int = 20) -> list[dict]:
     except Exception as e:
         print(f"  [alpaca] get_gap_up_tickers: {e}")
         return []
+
+
+def get_sector_etf_changes(etf_symbols: list[str]) -> dict[str, float]:
+    """
+    Batch-fetch today's % change for a list of ETF symbols.
+    Returns {etf_symbol: pct_change_today}.
+    Uses snapshot API: (daily_bar.close - previous_daily_bar.close) / previous_daily_bar.close.
+    Returns {} on error — callers treat sector context as optional.
+    """
+    try:
+        from alpaca.data.requests import StockSnapshotRequest
+        req = StockSnapshotRequest(symbol_or_symbols=etf_symbols)
+        snaps = _dclient().get_stock_snapshot(req)
+        result = {}
+        for symbol, snap in snaps.items():
+            try:
+                curr  = float(snap.daily_bar.close)
+                prev  = float(snap.previous_daily_bar.close)
+                result[symbol] = round((curr - prev) / prev * 100, 2) if prev else 0.0
+            except Exception:
+                pass
+        return result
+    except Exception as e:
+        print(f"  [alpaca] get_sector_etf_changes: {e}")
+        return {}
+
+
+def batch_get_intraday_signals(tickers: list[str]) -> dict[str, dict]:
+    """
+    Batch-fetch first-session intraday signals for a list of tickers.
+    Computes VWAP, RS vs SPY, ORB (first 30 min) status from minute bars since market open.
+    Returns {ticker: {available, live_price, vwap, above_vwap, rs_vs_spy, orb_pct, above_orb}}.
+    Used by intraday _screen_candidates() to rank before LLM investigation.
+    Returns {} on error — callers treat as optional enrichment.
+    """
+    try:
+        import pytz
+        from datetime import datetime, timezone
+        from alpaca.data.requests import StockBarsRequest
+        from alpaca.data.timeframe import TimeFrame
+
+        et = pytz.timezone("America/New_York")
+        now_et      = datetime.now(et)
+        market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+        all_symbols = list(set(tickers + ["SPY"]))
+        req = StockBarsRequest(
+            symbol_or_symbols=all_symbols,
+            timeframe=TimeFrame.Minute,
+            start=market_open.astimezone(timezone.utc),
+            end=now_et.astimezone(timezone.utc),
+        )
+        all_bars = _dclient().get_stock_bars(req).data
+
+        spy_bars  = all_bars.get("SPY", [])
+        spy_open  = float(spy_bars[0].open)  if spy_bars else None
+        spy_curr  = float(spy_bars[-1].close) if spy_bars else None
+        spy_pct   = round((spy_curr - spy_open) / spy_open * 100, 3) if spy_open and spy_curr else None
+
+        result: dict[str, dict] = {}
+        for ticker in tickers:
+            bars = all_bars.get(ticker, [])
+            if not bars:
+                result[ticker] = {"available": False}
+                continue
+
+            # VWAP (dollar-weighted)
+            total_pv  = sum(float(getattr(b, "vwap", None) or (b.high + b.low + b.close) / 3) * float(b.volume) for b in bars)
+            total_vol = sum(float(b.volume) for b in bars)
+            vwap      = round(total_pv / total_vol, 2) if total_vol > 0 else None
+            curr      = round(float(bars[-1].close), 2)
+
+            # RS vs SPY
+            open_price  = float(bars[0].open)
+            ticker_pct  = round((curr - open_price) / open_price * 100, 3) if open_price else None
+            rs_vs_spy   = round(ticker_pct - spy_pct, 2) if ticker_pct is not None and spy_pct is not None else None
+            rs_vs_spy   = round(max(-20.0, min(20.0, rs_vs_spy)), 2) if rs_vs_spy is not None else None
+
+            # ORB: high of first 30 min bars
+            orb_bars = bars[:30]
+            orb_high = max(float(b.high) for b in orb_bars) if orb_bars else None
+            orb_pct  = round((curr - orb_high) / orb_high * 100, 2) if orb_high else None
+
+            result[ticker] = {
+                "available":  True,
+                "live_price": curr,
+                "vwap":       vwap,
+                "above_vwap": curr > vwap if vwap else None,
+                "rs_vs_spy":  rs_vs_spy,
+                "orb_pct":    orb_pct,
+                "above_orb":  curr > orb_high if orb_high else None,
+            }
+
+        return result
+    except Exception as e:
+        print(f"  [alpaca] batch_get_intraday_signals: {e}")
+        return {}

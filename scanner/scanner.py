@@ -10,12 +10,11 @@ import pandas as pd
 
 from scanner.universe import get_tickers, get_sector
 
-_MIN_PRICE       = 10.0
-_MAX_PRICE       = 500.0
-_MAX_ATR_PCT     = 5.0
-_MIN_AVG_VOL     = 500_000   # filter illiquid tickers
-_DOWNLOAD_TIMEOUT = 90       # seconds — yfinance can hang; abort and return 0
-_HISTORY_DAYS  = "60d"     # enough for SMA50 + ATR14 + MACD
+_MIN_PRICE        = 10.0          # no upper cap — positions are dollar-sized
+_MAX_ATR_PCT      = 10.0          # raised from 5% — semis / high-beta leaders need room
+_MIN_AVG_VOL      = 500_000
+_DOWNLOAD_TIMEOUT = 90
+_HISTORY_DAYS     = "90d"         # 90d for reliable SMA50 + 52W proximity
 
 
 def _compute_rsi(closes: pd.Series, period: int = 14) -> float:
@@ -33,11 +32,11 @@ def _compute_rsi(closes: pd.Series, period: int = 14) -> float:
 
 
 def _compute_macd_hist(closes: pd.Series) -> float:
-    ema12 = closes.ewm(span=12, adjust=False).mean()
-    ema26 = closes.ewm(span=26, adjust=False).mean()
-    macd  = ema12 - ema26
+    ema12  = closes.ewm(span=12, adjust=False).mean()
+    ema26  = closes.ewm(span=26, adjust=False).mean()
+    macd   = ema12 - ema26
     signal = macd.ewm(span=9, adjust=False).mean()
-    hist  = macd - signal
+    hist   = macd - signal
     return round(float(hist.iloc[-1]), 4) if not hist.empty else 0.0
 
 
@@ -47,7 +46,7 @@ def _compute_atr_pct(hist: pd.DataFrame, period: int = 14) -> float:
     h, l, c = hist["High"], hist["Low"], hist["Close"]
     prev_c  = c.shift(1)
     tr = (h - l).abs().combine((h - prev_c).abs(), max).combine((l - prev_c).abs(), max)
-    atr = float(tr.iloc[-period:].mean())
+    atr   = float(tr.iloc[-period:].mean())
     price = float(c.iloc[-1])
     return round(atr / price * 100, 2) if price else 0.0
 
@@ -55,7 +54,22 @@ def _compute_atr_pct(hist: pd.DataFrame, period: int = 14) -> float:
 def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
     """
     Score a ticker from its daily OHLCV history.
-    Returns scoring fields or raises on insufficient data.
+
+    Scoring (max 11):
+      RSI          0-2   momentum zone 45-75, extended zone 40-45/75-82
+      MACD         0-2   positive+rising=2, positive=1, inflecting=1
+      Volume ratio 0-3   2x=3, 1.5x=2, 1.2x=1  (was max 2)
+      Trend (SMA)  0-2   above both=2, above SMA20=1  (soft — no hard gate)
+      52W proximity 0-2  within 5% of 52W high=2, within 15%=1
+
+    Hard gates removed:
+      - No $500 price cap (was eliminating AMAT, CRWD, GS, MU, CAT, etc.)
+      - No ATR% = 5% cap (was eliminating LRCX, AVGO, KLAC, QCOM, PLTR)
+      - SMA20 is now a scoring signal not a rejection gate
+      - MACD is now a scoring signal not a rejection gate
+
+    Raises ValueError on truly disqualifying conditions:
+      price < $10, avg volume < 500K, ATR > 10%, insufficient history
     """
     if len(hist) < 55:
         raise ValueError("insufficient history")
@@ -64,9 +78,8 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
     volumes = hist["Volume"]
 
     price = round(float(closes.iloc[-1]), 2)
-
-    if not (_MIN_PRICE <= price <= _MAX_PRICE):
-        raise ValueError(f"price {price} out of range")
+    if price < _MIN_PRICE:
+        raise ValueError(f"price {price} below minimum")
 
     avg_vol = int(volumes.iloc[-20:].mean())
     if avg_vol < _MIN_AVG_VOL:
@@ -74,10 +87,10 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
 
     atr_pct = _compute_atr_pct(hist)
     if atr_pct > _MAX_ATR_PCT:
-        raise ValueError(f"ATR% {atr_pct} too high")
+        raise ValueError(f"ATR% {atr_pct:.1f} too high (>{_MAX_ATR_PCT})")
 
-    rsi  = _compute_rsi(closes)
-    macd = _compute_macd_hist(closes)
+    rsi       = _compute_rsi(closes)
+    macd      = _compute_macd_hist(closes)
     prev_macd = _compute_macd_hist(closes.iloc[:-1])
 
     sma20 = float(closes.iloc[-20:].mean())
@@ -90,43 +103,60 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
     above_sma20 = price > sma20
     above_sma50 = price > sma50
 
-    # ── Score ─────────────────────────────────────────────────────────────────
+    # 52-week high proximity — leaders near 52W high on strong relative strength
+    lookback = min(252, len(hist))
+    high_52w  = float(hist["High"].iloc[-lookback:].max())
+    pct_from_52w_high = round((high_52w - price) / high_52w * 100, 1) if high_52w > 0 else 100.0
+
+    # ── Scoring ───────────────────────────────────────────────────────────────
     score = 0
 
-    # RSI: momentum zone
-    if 50 <= rsi <= 70:
+    # RSI: momentum zone — extended to 82 for bull market leaders
+    if 45 <= rsi <= 75:
         score += 2
-    elif 45 <= rsi < 50 or 70 < rsi <= 75:
+    elif 40 <= rsi < 45 or 75 < rsi <= 82:
         score += 1
 
-    # MACD histogram: positive and increasing
+    # MACD: soft signal — reward both acceleration and inflection
     if macd > 0 and macd > prev_macd:
         score += 2
     elif macd > 0:
         score += 1
+    elif macd > prev_macd:
+        score += 1  # turning up even if still negative = early setup
 
-    # Volume surge
-    if volume_ratio >= 1.5:
+    # Volume surge — primary confirmation signal
+    if volume_ratio >= 2.0:
+        score += 3
+    elif volume_ratio >= 1.5:
         score += 2
     elif volume_ratio >= 1.2:
         score += 1
 
-    # Trend
+    # Trend — soft: below SMA20 is acceptable for gap-up / breakout setups
     if above_sma20 and above_sma50:
         score += 2
     elif above_sma20:
         score += 1
 
+    # 52-week proximity — near highs on volume = accumulation, not distribution
+    if pct_from_52w_high <= 5.0:
+        score += 2
+    elif pct_from_52w_high <= 15.0:
+        score += 1
+
     return {
-        "technical_score": score,
-        "current_price":   price,
-        "avg_volume":      avg_vol,
-        "rsi":             rsi,
-        "volume_ratio":    volume_ratio,
-        "atr_pct":         atr_pct,
-        "above_sma20":     above_sma20,
-        "above_sma50":     above_sma50,
-        "macd_rising":     macd > 0 and macd > prev_macd,
+        "technical_score":   score,
+        "current_price":     price,
+        "avg_volume":        avg_vol,
+        "rsi":               rsi,
+        "volume_ratio":      volume_ratio,
+        "atr_pct":           atr_pct,
+        "above_sma20":       above_sma20,
+        "above_sma50":       above_sma50,
+        "macd_rising":       macd > 0 and macd > prev_macd,
+        "macd_inflecting":   macd > prev_macd,
+        "pct_from_52w_high": pct_from_52w_high,
     }
 
 
@@ -137,9 +167,8 @@ def run_scanner(
 ) -> int:
     """
     Score all universe tickers and write results to c_scan_results.
-    Returns count of rows written.
-
-    Skips tickers already scored for scan_date (idempotent).
+    Returns count of rows written (including already-scored rows from today).
+    Idempotent: skips tickers already scored for scan_date.
     """
     from core.db import get_client
 
@@ -148,7 +177,6 @@ def run_scanner(
     symbols   = tickers or get_tickers()
     db        = get_client()
 
-    # Check if already ran today (idempotent)
     existing = (
         db.table("c_scan_results")
         .select("ticker")
@@ -160,10 +188,8 @@ def run_scanner(
     symbols = [s for s in symbols if s not in already_scored]
 
     if not symbols:
-        return len(existing)
+        return len(already_scored)
 
-    # Bulk-fetch daily history for all tickers at once.
-    # Runs in a thread so a yfinance hang doesn't block the premarket session forever.
     try:
         with ThreadPoolExecutor(max_workers=1) as _pool:
             _future = _pool.submit(
@@ -184,13 +210,14 @@ def run_scanner(
         print(f"[scanner] yfinance download failed: {e}")
         return 0
 
-    rows_written  = 0
-    filtered_trend = 0  # below SMA20 — downtrend
-    filtered_macd  = 0  # MACD histogram declining — fading momentum
+    rows_written     = 0
+    filtered_price   = 0
+    filtered_atr     = 0
+    filtered_volume  = 0
+    filtered_score   = 0
 
     for ticker in symbols:
         try:
-            # Extract per-ticker DataFrame from multi-level columns
             if len(symbols) == 1:
                 hist = raw
             else:
@@ -198,39 +225,36 @@ def run_scanner(
 
             if hist.empty or "Close" not in hist.columns:
                 continue
-            hist = hist.dropna(subset=["Close"])
+            hist   = hist.dropna(subset=["Close"])
             fields = _score_ticker(hist)
 
             if fields["technical_score"] < min_score:
-                continue
-
-            # Hard filter 1: must be above SMA20 — no buying downtrends for momentum
-            if not fields["above_sma20"]:
-                filtered_trend += 1
-                continue
-
-            # Hard filter 2: MACD histogram must be rising — momentum accelerating, not fading
-            if not fields["macd_rising"]:
-                filtered_macd += 1
+                filtered_score += 1
                 continue
 
             db.table("c_scan_results").insert({
-                "date":    today_iso,
-                "ticker":  ticker,
-                "score":   fields["technical_score"],
-                "price":   fields["current_price"],
-                "sector":  get_sector(ticker),
+                "date":   today_iso,
+                "ticker": ticker,
+                "score":  fields["technical_score"],
+                "price":  fields["current_price"],
+                "sector": get_sector(ticker),
             }).execute()
             rows_written += 1
 
-        except ValueError:
-            pass  # filtered out — price range, ATR, volume
+        except ValueError as e:
+            msg = str(e)
+            if "price" in msg:
+                filtered_price += 1
+            elif "ATR" in msg:
+                filtered_atr += 1
+            elif "volume" in msg:
+                filtered_volume += 1
         except Exception as e:
             print(f"[scanner] {ticker}: {e}")
 
     print(
         f"[scanner] {rows_written} tickers written for {today_iso} "
-        f"(below_sma20={filtered_trend}, macd_fading={filtered_macd}, "
-        f"other={len(symbols) - rows_written - filtered_trend - filtered_macd})"
+        f"(price={filtered_price}, atr={filtered_atr}, "
+        f"volume={filtered_volume}, score={filtered_score})"
     )
     return rows_written + len(already_scored)
