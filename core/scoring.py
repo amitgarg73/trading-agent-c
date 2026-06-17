@@ -22,7 +22,7 @@ Silently skips if DB columns don't yet exist (run supabase/migrations/add_trade_
 """
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 import yfinance as yf
@@ -38,11 +38,13 @@ def _fetch_day_ohlc(tickers: list[str], trade_date: str) -> dict[str, dict]:
     if not tickers:
         return {}
     try:
+        end_date = (date.fromisoformat(trade_date) + timedelta(days=1)).isoformat()
         raw = yf.download(
             tickers,
             start=trade_date,
-            end=trade_date,
+            end=end_date,
             interval="1d",
+            group_by="ticker",
             auto_adjust=True,
             progress=False,
             threads=True,
