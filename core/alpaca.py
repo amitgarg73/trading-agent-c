@@ -134,9 +134,9 @@ def submit_bracket_order(
             raw_ask = getattr(q, "ask_price", None)
             if raw_ask and float(raw_ask) > 0:
                 ask = round(float(raw_ask), 4)
-                if ask > entry_price * 1.025:
-                    print(f"  [alpaca] {ticker} stale: ask ${ask:.2f} is "
-                          f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skip")
+                if ask > entry_price * 1.04:
+                    print(f"  [alpaca] {ticker} STALENESS GATE: ask ${ask:.2f} is "
+                          f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skipping order")
                     return None, None
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price

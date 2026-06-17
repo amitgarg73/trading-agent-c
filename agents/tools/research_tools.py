@@ -202,7 +202,8 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
                     if spy_o and spy_c != spy_o:
                         spy_chg   = (spy_c - spy_o) / spy_o
                         stock_chg = (curr - open_) / open_ if open_ else 0.0
-                        rs_vs_spy = round(stock_chg / spy_chg, 2) if spy_chg != 0 else None
+                        rs_raw = stock_chg / spy_chg if spy_chg != 0 else None
+                        rs_vs_spy = round(max(-20.0, min(20.0, rs_raw)), 2) if rs_raw is not None else None
 
                 orb_pct = None
                 if len(stock_bars) >= 30:

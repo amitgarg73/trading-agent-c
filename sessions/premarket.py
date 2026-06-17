@@ -22,7 +22,7 @@ _PREMARKET_END   = time(10, 30) # default — overridable via c_agent_config.pre
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
-def _execute_trades(trades: list[dict], session_id: str, trail_pct: float) -> None:
+def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, tracer=None) -> None:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
     from core.alpaca import submit_bracket_order, submit_trailing_stop
     from core.db import get_client
@@ -39,7 +39,13 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float) -> No
             stop_price=trade["stop_loss"],
         )
         if order_id is None:
-            print(f"  [premarket] {trade['ticker']} order rejected — skipping")
+            print(f"  [premarket] {trade['ticker']} order rejected or staleness gate fired — skipping")
+            if tracer:
+                tracer.log_tool_call(
+                    "orchestrator", "submit_bracket_order", trade["ticker"],
+                    outcome="rejected",
+                    error=f"order rejected or staleness gate: proposal=${trade['entry_price']:.2f}",
+                )
             continue
 
         trail_order_id = None
@@ -238,7 +244,7 @@ def main(bypass_checks: bool = False) -> None:
         terminal  = result["session_meta"]["terminal_reason"]
 
         if trades and now_t >= _MARKET_OPEN:
-            _execute_trades(trades, session_id, params.trail_pct)
+            _execute_trades(trades, session_id, params.trail_pct, tracer=tracer)
         elif trades:
             print(f"[premarket] Market not yet open ({now_et.strftime('%H:%M ET')}) "
                   f"— storing {len(trades)} pending trade(s) for 9:30 AM execution")

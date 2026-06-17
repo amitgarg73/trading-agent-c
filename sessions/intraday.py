@@ -286,6 +286,7 @@ def _place_intraday_trades(
     session_id: str,
     trail_pct: float,
     today_tickers: set[str] | None = None,
+    tracer=None,
 ) -> int:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
     from core.alpaca import submit_bracket_order, submit_trailing_stop
@@ -311,7 +312,13 @@ def _place_intraday_trades(
             stop_price=p["stop_loss"],
         )
         if order_id is None:
-            print(f"  [intraday] {p['ticker']} order rejected — skipping")
+            print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
+            if tracer:
+                tracer.log_tool_call(
+                    "orchestrator", "submit_bracket_order", ticker,
+                    outcome="rejected",
+                    error=f"order rejected or staleness gate: proposal=${p['entry_price']:.2f}",
+                )
             continue
 
         trail_order_id = None
@@ -478,6 +485,7 @@ def main() -> None:
         count = _place_intraday_trades(
             proposals, {v["ticker"] for v in approved}, premarket_session_id, params.trail_pct,
             today_tickers=today_tickers,
+            tracer=tracer,
         )
         tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
         tracer.close_session(
