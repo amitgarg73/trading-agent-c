@@ -384,6 +384,7 @@ class TestEodMain:
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance") as mock_save, \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.eod.record_protection_event"), \
@@ -415,6 +416,7 @@ class TestEodMain:
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance"), \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.eod.update_goal_progress"), \
@@ -442,6 +444,7 @@ class TestEodMain:
              patch("sessions.eod.get_today_trades", return_value=[]), \
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance"), \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.eod.update_goal_progress"), \
@@ -467,6 +470,7 @@ class TestEodMain:
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance"), \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection(tier=4, reason="drawdown")), \
              patch("sessions.eod.record_protection_event") as mock_rec, \
@@ -493,6 +497,7 @@ class TestEodMain:
              patch("sessions.eod.get_today_trades", return_value=_TRADES), \
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance"), \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.eod.update_goal_progress"), \

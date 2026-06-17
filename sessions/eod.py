@@ -365,6 +365,11 @@ def main() -> None:
     tracer.log_decision("orchestrator", "performance_saved",
                         detail={"pnl": perf.realized_pnl, "trades": perf.trades_total})
 
+    # Post-session decision quality scoring
+    from core.scoring import score_trades
+    scoring = score_trades(session_id)
+    tracer.log_decision("orchestrator", "trades_scored", detail=scoring)
+
     # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
     from evals.outcomes import write_eod_outcome_metrics
     write_eod_outcome_metrics(session_id, perf.realized_pnl, perf.win_rate, perf.trades_total)
