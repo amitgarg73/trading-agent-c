@@ -6,9 +6,21 @@ import threading
 import urllib.request
 from datetime import date, datetime
 from typing import Any, Optional
-from uuid import uuid4
 
-import pytz
+import pytz  # noqa: F401 (used downstream by callers)
+
+# OTel imports — required; raises ImportError with a clear message if missing
+try:
+    from opentelemetry import trace as otel_trace
+    from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.trace import NonRecordingSpan, set_span_in_context
+    import opentelemetry.context as otel_ctx
+except ImportError as _e:  # pragma: no cover
+    raise ImportError(
+        "opentelemetry-api and opentelemetry-sdk are required. "
+        "Run: pip install opentelemetry-api opentelemetry-sdk"
+    ) from _e
 
 def _load_env_var(key: str) -> str:
     val = os.environ.get(key, "")
@@ -53,8 +65,14 @@ def _ingest_post(path: str, payload: dict) -> None:
     """Fire-and-forget POST to Argus ingest API. Non-fatal on any error."""
     if not _ARGUS_URL or not _ARGUS_API_KEY:
         return
+    _ingest_post_raw(path, json.dumps(payload).encode())
+
+
+def _ingest_post_raw(path: str, data: bytes) -> None:
+    """Fire-and-forget POST with pre-encoded bytes. Non-fatal on any error."""
+    if not _ARGUS_URL or not _ARGUS_API_KEY:
+        return
     try:
-        data = json.dumps(payload).encode()
         req = urllib.request.Request(
             f"{_ARGUS_URL}{path}",
             data=data,
@@ -125,13 +143,31 @@ class TraceLogger:
         self._session_type = session_type
         self._parent_session_id = parent_session_id
         self._sequence = 0
-        self._agent_spans: dict[str, str] = {}
-        self._session_span_id = str(uuid4())
         self._tokens: dict[str, dict[str, int]] = {}
         self._pending_trades: list = []
         self._started_at = datetime.utcnow()
+
+        # OTel setup — each TraceLogger gets its own provider so session spans
+        # don't bleed across concurrent sessions.
+        from trace.otel_exporter import ArgusExporter
+        self._otel_provider = TracerProvider()
+        if _ARGUS_URL and _ARGUS_API_KEY:
+            self._otel_provider.add_span_processor(
+                SimpleSpanProcessor(ArgusExporter(api_key=_ARGUS_API_KEY, endpoint=_ARGUS_URL))
+            )
+        self._tracer = self._otel_provider.get_tracer("trading-agent-c")
+
+        # Session root span — all agent spans are children of this
+        self._session_span = self._tracer.start_span(
+            f"session:{session_type or 'premarket'}",
+            attributes={"argus.session": "true", "argus.session_id": session_id},
+        )
+        self._session_ctx = set_span_in_context(self._session_span)
+
+        # Map agent name → its OTel span (kept open until close_session)
+        self._agent_otel_spans: dict[str, Any] = {}
+
         # Open session via ingest API — fire-and-forget; traces can flow immediately
-        # because client already holds session_id.
         self._open_thread = threading.Thread(target=self._open_session, daemon=True)
         self._open_thread.start()
 
@@ -141,9 +177,22 @@ class TraceLogger:
     # ── Public API ─────────────────────────────────────────────────────────────
 
     def start_agent_span(self, agent: str) -> str:
-        span_id = str(uuid4())
-        self._agent_spans[agent] = span_id
-        return span_id
+        """Create an OTel child span for this agent under the session root."""
+        span = self._tracer.start_span(
+            f"agent:{agent}",
+            context=self._session_ctx,
+            attributes={"argus.session_id": self.session_id, "argus.agent": agent},
+        )
+        self._agent_otel_spans[agent] = span
+        sc = span.get_span_context()
+        return format(sc.span_id, "016x") if sc else agent
+
+    def get_agent_span(self, agent: str) -> Optional[str]:
+        span = self._agent_otel_spans.get(agent)
+        if not span:
+            return None
+        sc = span.get_span_context()
+        return format(sc.span_id, "016x") if sc else None
 
     def log_tool_call(
         self,
@@ -253,20 +302,17 @@ class TraceLogger:
         self._tokens[agent]["cache_write"] += cw
 
     def ingest_otel_span(self, span: dict) -> None:
-        """Normalize an OTel span from a TypeScript agent and POST to ingest API."""
-        from trace.normalizer import normalize_otel_span
-        self._sequence += 1
-        row = normalize_otel_span(span, self._sequence, self.session_id, _TENANT_ID)
-        if row:
-            # Map normalised row fields to ingest trace payload
-            _ingest_post("/api/ingest/trace", {
-                "session_id": self.session_id,
-                "agent":      row.get("agent", "news"),
-                "step_type":  row.get("step_type", "tool_call"),
-                "outcome":    row.get("outcome"),
-                "latency_ms": row.get("latency_ms", 0),
-                "payload":    row.get("payload"),
-            })
+        """Forward an OTel span from the TypeScript News Analyst to the Argus OTLP gateway.
+        The span must already carry argus.session_id as an attribute."""
+        # Attach session_id if the span doesn't already have it
+        attrs = span.get("attributes") or []
+        has_session = any(a.get("key") == "argus.session_id" for a in attrs)
+        if not has_session:
+            attrs = list(attrs) + [{"key": "argus.session_id", "value": {"stringValue": self.session_id}}]
+            span = {**span, "attributes": attrs}
+
+        payload = json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]}).encode()
+        _ingest_post_raw("/api/otlp/v1/traces", payload)
 
     def flush_cost_breakdown(self) -> None:
         """Persist accumulated cost mid-session via ingest PATCH. Ensures cost is captured if process is killed."""
@@ -368,6 +414,16 @@ class TraceLogger:
                 "cost_breakdown":   agent_costs,
             })
 
+        # End all open agent spans, then the session root span
+        for span in self._agent_otel_spans.values():
+            try: span.end()
+            except Exception: pass
+        try: self._session_span.end()
+        except Exception: pass
+
+        # Force-flush the OTel provider so all spans ship before the process exits
+        self._otel_provider.force_flush(timeout_millis=8000)
+
         # Synchronous — waits for ingest close to fire diagnosis + embeddings
         _ingest_post("/api/ingest/session/close", body)
 
@@ -384,15 +440,16 @@ class TraceLogger:
         })
 
     def _write(self, fields: dict) -> str:
-        span_id = str(uuid4())
+        """Create an OTel span for this trace step and export it via ArgusExporter."""
         self._sequence += 1
-        agent = fields.get("agent", "orchestrator")
+        agent     = fields.get("agent", "orchestrator")
+        step_type = fields.get("step_type", "tool_call")
 
         entity_id = fields.get("entity_id")
         if entity_id is None and "_" in agent and agent.split("_", 1)[0] == "research":
             entity_id = agent.split("_", 1)[1].upper()
 
-        tokens_input  = fields.get("tokens_input", 0)
+        tokens_input  = fields.get("tokens_input",  0)
         tokens_output = fields.get("tokens_output", 0)
         model         = fields.get("model")
         cost_usd: Optional[float] = None
@@ -403,43 +460,56 @@ class TraceLogger:
                 tokens_output,
             ), 8)
 
-        payload: dict[str, Any] = {
-            "span_id":        span_id,
-            "parent_span_id": self._agent_spans.get(agent),
-            "entity_id":      entity_id,
-            "date":           date.today().isoformat(),
-            "sequence":       self._sequence,
-            "model":          model,
-            "cost_usd":       cost_usd,
-        }
-        if fields.get("tool_input")      is not None: payload["tool_input"]      = fields["tool_input"]
-        if fields.get("tool_output")     is not None: payload["tool_output"]     = fields["tool_output"]
-        if fields.get("agent_reasoning") is not None: payload["agent_reasoning"] = fields["agent_reasoning"]
-        if fields.get("payload")         is not None: payload.update(fields["payload"])
+        # Parent context: use agent span if it exists, else fall back to session root
+        parent_span = self._agent_otel_spans.get(agent)
+        parent_ctx  = set_span_in_context(parent_span) if parent_span else self._session_ctx
 
-        _ingest_post("/api/ingest/trace", {
-            "session_id": self.session_id,
-            "agent":      agent,
-            "step_type":  fields.get("step_type"),
-            "tool_name":  fields.get("tool_name"),
-            "outcome":    fields.get("outcome"),
-            "error":      fields.get("error"),
-            "latency_ms": fields.get("latency_ms", 0),
-            "tokens_input":  tokens_input,
-            "tokens_output": tokens_output,
-            "payload":    payload,
-        })
-        return span_id
+        # Build OTel span attributes — these are mapped by the OTLP normalizer
+        attrs: dict[str, Any] = {
+            "argus.session_id": self.session_id,
+            "argus.agent":      agent,
+            "argus.step_type":  step_type,
+            "argus.sequence":   self._sequence,
+        }
+        if fields.get("tool_name")  is not None: attrs["argus.tool_name"]      = fields["tool_name"]
+        if fields.get("outcome")    is not None: attrs["argus.outcome"]         = str(fields["outcome"])
+        if fields.get("error")      is not None: attrs["argus.error"]           = str(fields["error"])
+        if fields.get("latency_ms") is not None: attrs["argus.latency_ms"]      = int(fields["latency_ms"])
+        if tokens_input:                          attrs["llm.token_count.input"]  = tokens_input
+        if tokens_output:                         attrs["llm.token_count.output"] = tokens_output
+        if model:                                 attrs["argus.model"]            = model
+        if cost_usd is not None:                  attrs["argus.cost_usd"]         = cost_usd
+        if entity_id is not None:                 attrs["argus.entity_id"]        = entity_id
+
+        # Payload fields serialised as JSON strings (OTLP attributes are scalars)
+        if fields.get("agent_reasoning") is not None:
+            attrs["argus.agent_reasoning"] = str(fields["agent_reasoning"])[:4000]
+        if fields.get("tool_input") is not None:
+            attrs["argus.tool_input"]  = json.dumps(fields["tool_input"],  default=str)[:4000]
+        if fields.get("tool_output") is not None:
+            attrs["argus.tool_output"] = json.dumps(
+                fields["tool_output"] if isinstance(fields["tool_output"], dict) else {"value": fields["tool_output"]},
+                default=str,
+            )[:4000]
+        if fields.get("payload") is not None:
+            for k, v in fields["payload"].items():
+                attrs[f"argus.payload.{k}"] = json.dumps(v, default=str) if not isinstance(v, (str, int, float, bool)) else v
+
+        span = self._tracer.start_span(
+            f"{step_type}:{fields.get('tool_name', agent)}",
+            context=parent_ctx,
+            attributes=attrs,
+        )
+        span.end()
+
+        sc = span.get_span_context()
+        return format(sc.span_id, "016x") if sc else ""
 
     def _count_tool_calls(self) -> int:
         return self._sequence
 
     def get_sequence(self) -> int:
         return self._sequence
-
-    def get_agent_span(self, agent: str) -> Optional[str]:
-        return self._agent_spans.get(agent)
-
 
 def _agent_model(agent: str) -> str:
     base = agent.split("_")[0] if "_" in agent else agent

@@ -1,22 +1,37 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from trace.logger import TraceLogger, _agent_model, _estimate_cost
-from tests.conftest import make_query
+from tests.conftest import make_query, RecordingExporter
 
 
-def _trace_calls(mock_ingest_post):
-    """Return payloads for all /api/ingest/trace calls."""
-    return [c[0][1] for c in mock_ingest_post.call_args_list if c[0][0] == "/api/ingest/trace"]
+# ── OTel span helpers ─────────────────────────────────────────────────────────
+
+def _span_attrs(span) -> dict:
+    return dict(span.attributes or {})
 
 
-def _last_trace(mock_ingest_post):
-    calls = _trace_calls(mock_ingest_post)
-    assert calls, "No /api/ingest/trace calls found"
-    return calls[-1]
+def _trace_spans(recorder: RecordingExporter) -> list:
+    """All spans except session root and agent-level parent spans."""
+    return [
+        s for s in recorder.spans
+        if _span_attrs(s).get("argus.session") != "true"
+        and not str(s.name).startswith("agent:")
+    ]
+
+
+def _last_span(recorder: RecordingExporter):
+    spans = _trace_spans(recorder)
+    assert spans, "No trace spans exported"
+    return spans[-1]
+
+
+def _last_span_attrs(recorder: RecordingExporter) -> dict:
+    return _span_attrs(_last_span(recorder))
 
 
 def _close_payload(mock_ingest_post):
@@ -36,9 +51,9 @@ def _open_payload(mock_ingest_post):
 # ── start_agent_span ───────────────────────────────────────────────────────────
 
 class TestStartAgentSpan:
-    def test_returns_uuid_string(self, tracer):
+    def test_returns_hex_span_id(self, tracer):
         span_id = tracer.start_agent_span("market")
-        assert isinstance(span_id, str) and len(span_id) == 36
+        assert isinstance(span_id, str) and len(span_id) == 16
 
     def test_different_agents_get_different_span_ids(self, tracer):
         m = tracer.start_agent_span("market")
@@ -58,104 +73,104 @@ class TestStartAgentSpan:
 # ── log_tool_call ──────────────────────────────────────────────────────────────
 
 class TestLogToolCall:
-    def test_posts_to_ingest_trace(self, tracer, mock_ingest_post):
+    def test_exports_span_with_correct_step_type(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("market", "get_vix", {}, {"vix": 18.4}, latency_ms=220)
-        p = _last_trace(mock_ingest_post)
-        assert p["step_type"] == "tool_call"
-        assert p["agent"] == "market"
-        assert p["tool_name"] == "get_vix"
-        assert p["payload"]["tool_output"] == {"vix": 18.4}
-        assert p["latency_ms"] == 220
-        assert p["session_id"] == "test-session-id-1234"
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["argus.step_type"] == "tool_call"
+        assert attrs["argus.agent"] == "market"
+        assert attrs["argus.tool_name"] == "get_vix"
+        assert attrs["argus.latency_ms"] == 220
+        assert attrs["argus.session_id"] == "test-session-id-1234"
 
-    def test_returns_span_id_string(self, tracer, mock_ingest_post):
+    def test_tool_output_serialised_as_json(self, tracer, mock_argus_exporter):
+        tracer.log_tool_call("market", "get_vix", {}, {"vix": 18.4})
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert json.loads(attrs["argus.tool_output"]) == {"vix": 18.4}
+
+    def test_returns_hex_span_id(self, tracer, mock_argus_exporter):
         span_id = tracer.log_tool_call("market", "get_vix", {}, {})
-        assert isinstance(span_id, str) and len(span_id) == 36
+        assert isinstance(span_id, str) and len(span_id) == 16
 
-    def test_parent_span_id_set_after_start_agent_span(self, tracer, mock_ingest_post):
-        agent_span = tracer.start_agent_span("research")
+    def test_parent_is_agent_span_when_start_agent_span_called(self, tracer, mock_argus_exporter):
+        agent_span_id = tracer.start_agent_span("research")
         tracer.log_tool_call("research", "get_candidates", {}, {})
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["parent_span_id"] == agent_span
+        tool_span = _last_span(mock_argus_exporter)
+        parent_hex = format(tool_span.parent.span_id, "016x") if tool_span.parent else None
+        assert parent_hex == agent_span_id
 
-    def test_entity_id_included_when_provided(self, tracer, mock_ingest_post):
+    def test_entity_id_included_when_provided(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("research", "get_news", {"ticker": "AAPL"}, {}, entity_id="AAPL")
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["entity_id"] == "AAPL"
+        assert _last_span_attrs(mock_argus_exporter)["argus.entity_id"] == "AAPL"
 
-    def test_entity_id_auto_derived_for_research_ticker_agent(self, tracer, mock_ingest_post):
+    def test_entity_id_auto_derived_for_research_ticker_agent(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("research_NVDA", "get_news", {"ticker": "NVDA"}, {})
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["entity_id"] == "NVDA"
+        assert _last_span_attrs(mock_argus_exporter)["argus.entity_id"] == "NVDA"
 
-    def test_entity_id_explicit_overrides_auto_derive(self, tracer, mock_ingest_post):
+    def test_entity_id_explicit_overrides_auto_derive(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("research_NVDA", "get_news", {}, {}, entity_id="OVERRIDE")
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["entity_id"] == "OVERRIDE"
+        assert _last_span_attrs(mock_argus_exporter)["argus.entity_id"] == "OVERRIDE"
 
-    def test_non_research_agent_no_auto_derive(self, tracer, mock_ingest_post):
+    def test_non_research_agent_no_auto_derive(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("market", "get_spy_price", {}, {})
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["entity_id"] is None
+        assert "argus.entity_id" not in _last_span_attrs(mock_argus_exporter)
 
-    def test_sequence_increments_per_call(self, tracer, mock_ingest_post):
+    def test_sequence_increments_per_call(self, tracer, mock_argus_exporter):
         assert tracer.get_sequence() == 0
         tracer.log_tool_call("market", "get_vix", {}, {})
         assert tracer.get_sequence() == 1
         tracer.log_tool_call("market", "get_futures", {}, {})
         assert tracer.get_sequence() == 2
 
-    def test_non_dict_tool_output_wrapped(self, tracer, mock_ingest_post):
+    def test_non_dict_tool_output_wrapped(self, tracer, mock_argus_exporter):
         tracer.log_tool_call("market", "get_vix", {}, 18.4)
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["tool_output"] == {"value": 18.4}
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert json.loads(attrs["argus.tool_output"]) == {"value": 18.4}
 
 
 # ── log_agent_message ──────────────────────────────────────────────────────────
 
 class TestLogAgentMessage:
-    def test_posts_with_correct_step_type(self, tracer, mock_ingest_post):
+    def test_exports_with_correct_step_type(self, tracer, mock_argus_exporter):
         tracer.log_agent_message("market", "VIX at 18 — GO", "go",
                                  tokens_input=400, tokens_output=80,
                                  model="claude-haiku-4-5-20251001")
-        p = _last_trace(mock_ingest_post)
-        assert p["step_type"] == "agent_message"
-        assert p["agent"] == "market"
-        assert p["payload"]["agent_reasoning"] == "VIX at 18 — GO"
-        assert p["outcome"] == "go"
-        assert p["tokens_input"] == 400
-        assert p["tokens_output"] == 80
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["argus.step_type"] == "agent_message"
+        assert attrs["argus.agent"] == "market"
+        assert attrs["argus.agent_reasoning"] == "VIX at 18 — GO"
+        assert attrs["argus.outcome"] == "go"
+        assert attrs["llm.token_count.input"] == 400
+        assert attrs["llm.token_count.output"] == 80
 
-    def test_returns_span_id(self, tracer, mock_ingest_post):
+    def test_returns_hex_span_id(self, tracer, mock_argus_exporter):
         span_id = tracer.log_agent_message("market", "reasoning", "go")
-        assert len(span_id) == 36
+        assert isinstance(span_id, str) and len(span_id) == 16
 
 
 # ── log_decision ───────────────────────────────────────────────────────────────
 
 class TestLogDecision:
-    def test_posts_decision_row(self, tracer, mock_ingest_post):
+    def test_exports_decision_span(self, tracer, mock_argus_exporter):
         tracer.log_decision("orchestrator", "converged", detail={"trades": 3})
-        p = _last_trace(mock_ingest_post)
-        assert p["step_type"] == "decision"
-        assert p["outcome"] == "converged"
-        assert p["payload"]["tool_output"] == {"trades": 3}
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["argus.step_type"] == "decision"
+        assert attrs["argus.outcome"] == "converged"
+        assert json.loads(attrs["argus.tool_output"]) == {"trades": 3}
 
-    def test_no_entity_id_on_decision(self, tracer, mock_ingest_post):
+    def test_no_entity_id_on_decision(self, tracer, mock_argus_exporter):
         tracer.log_decision("orchestrator", "skip_propagated")
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["entity_id"] is None
+        assert "argus.entity_id" not in _last_span_attrs(mock_argus_exporter)
 
 
 # ── log_error ─────────────────────────────────────────────────────────────────
 
 class TestLogError:
-    def test_posts_error_row(self, tracer, mock_ingest_post):
+    def test_exports_error_span(self, tracer, mock_argus_exporter):
         tracer.log_error("research", "JSON parse failed")
-        p = _last_trace(mock_ingest_post)
-        assert p["step_type"] == "error"
-        assert p["error"] == "JSON parse failed"
-        assert p["outcome"] == "error"
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["argus.step_type"] == "error"
+        assert attrs["argus.error"] == "JSON parse failed"
+        assert attrs["argus.outcome"] == "error"
 
 
 # ── log_tokens ────────────────────────────────────────────────────────────────
@@ -248,7 +263,7 @@ class TestCloseSession:
         assert "research" in breakdown
         assert breakdown["market"]["cache_read"] == 200
 
-    def test_total_steps_reflects_logged_calls(self, tracer, mock_ingest_post):
+    def test_total_steps_reflects_logged_calls(self, tracer, mock_ingest_post, mock_argus_exporter):
         tracer.log_tool_call("market", "get_vix", {}, {})
         tracer.log_tool_call("market", "get_futures", {}, {})
         tracer.log_decision("orchestrator", "converged")
@@ -270,26 +285,26 @@ class TestCloseSession:
 # ── session open (daemon thread) ──────────────────────────────────────────────
 
 class TestSessionOpen:
-    def test_session_open_posts_session_id(self, mock_ingest_post, mock_ingest_patch):
+    def test_session_open_posts_session_id(self, mock_argus_exporter, mock_ingest_post, mock_ingest_patch, mock_supabase):
         t = TraceLogger("sess-open-001", session_type="premarket")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["session_id"] == "sess-open-001"
         assert p["session_type"] == "premarket"
 
-    def test_session_type_included(self, mock_ingest_post, mock_ingest_patch):
+    def test_session_type_included(self, mock_argus_exporter, mock_ingest_post, mock_ingest_patch, mock_supabase):
         t = TraceLogger("sess-open-002", session_type="intraday")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["session_type"] == "intraday"
 
-    def test_parent_session_id_included(self, mock_ingest_post, mock_ingest_patch):
+    def test_parent_session_id_included(self, mock_argus_exporter, mock_ingest_post, mock_ingest_patch, mock_supabase):
         t = TraceLogger("sess-open-003", session_type="intraday", parent_session_id="pre-001")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
         assert p["parent_session_id"] == "pre-001"
 
-    def test_eod_session_type(self, mock_ingest_post, mock_ingest_patch):
+    def test_eod_session_type(self, mock_argus_exporter, mock_ingest_post, mock_ingest_patch, mock_supabase):
         t = TraceLogger("sess-open-004", session_type="eod")
         t._open_thread.join(timeout=1.0)
         p = _open_payload(mock_ingest_post)
@@ -340,7 +355,8 @@ class TestFlushCostBreakdown:
 # ── ingest_otel_span ──────────────────────────────────────────────────────────
 
 class TestIngestOtelSpan:
-    def test_normalizes_and_posts_otel_span(self, tracer, mock_ingest_post):
+    def test_forwards_to_otlp_endpoint(self, tracer, mock_ingest_post):
+        """TypeScript News Analyst spans are forwarded to the OTLP gateway."""
         span = {
             "traceId": "abc123",
             "spanId":  "def456",
@@ -348,26 +364,55 @@ class TestIngestOtelSpan:
             "name": "news.get_ticker_news",
             "startTimeUnixNano": 1000000000,
             "endTimeUnixNano":   1840000000,
-            "attributes": {
-                "agent.name":      "news",
-                "agent.language":  "typescript",
-                "session.id":      "test-session-id-1234",
-                "tool.name":       "get_ticker_news",
-                "tool.input.ticker": "AAPL",
-                "tool.output.signal": "neutral",
-                "model":           "claude-haiku-4-5-20251001",
-            },
+            "attributes": [
+                {"key": "argus.agent",      "value": {"stringValue": "news"}},
+                {"key": "argus.session_id", "value": {"stringValue": "test-session-id-1234"}},
+            ],
         }
-        tracer.ingest_otel_span(span)
-        p = _last_trace(mock_ingest_post)
-        assert p["agent"] == "news"
-        assert p["session_id"] == "test-session-id-1234"
+        with patch("trace.logger._ingest_post_raw") as mock_raw:
+            tracer.ingest_otel_span(span)
+            assert mock_raw.called
+            path = mock_raw.call_args[0][0]
+            assert path == "/api/otlp/v1/traces"
 
-    def test_skips_span_without_agent_name(self, tracer, mock_ingest_post):
-        before = len([c for c in mock_ingest_post.call_args_list if c[0][0] == "/api/ingest/trace"])
-        tracer.ingest_otel_span({"attributes": {}})
-        after = len([c for c in mock_ingest_post.call_args_list if c[0][0] == "/api/ingest/trace"])
-        assert after == before  # no new trace call
+    def test_attaches_session_id_when_missing(self, tracer):
+        """Session ID is injected if the span doesn't have it."""
+        span = {
+            "spanId": "abc",
+            "name":   "news.fetch",
+            "attributes": [{"key": "argus.agent", "value": {"stringValue": "news"}}],
+        }
+        with patch("trace.logger._ingest_post_raw") as mock_raw:
+            tracer.ingest_otel_span(span)
+            raw_body = json.loads(mock_raw.call_args[0][1].decode())
+            sent_span = raw_body["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+            session_attrs = [a for a in sent_span["attributes"] if a["key"] == "argus.session_id"]
+            assert session_attrs and session_attrs[0]["value"]["stringValue"] == "test-session-id-1234"
+
+
+# ── log_skip ───────────────────────────────────────────────────────────────────
+
+class TestLogSkip:
+    def test_design_skip_exports_correct_span(self, tracer, mock_argus_exporter):
+        tracer.log_skip("news", reason="no_candidates", skip_type="design")
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["argus.step_type"] == "skip"
+        assert attrs["argus.agent"] == "news"
+        assert attrs["argus.outcome"] == "skipped"
+        assert attrs["argus.payload.reason"] == "no_candidates"
+        assert attrs["argus.payload.skip_type"] == "design"
+
+    def test_error_skip_sets_amber_signal(self, tracer, mock_argus_exporter):
+        tracer.log_skip("risk", reason="market_skip", skip_type="error")
+        assert _last_span_attrs(mock_argus_exporter)["argus.payload.skip_type"] == "error"
+
+    def test_default_skip_type_is_design(self, tracer, mock_argus_exporter):
+        tracer.log_skip("research", reason="no_candidates")
+        assert _last_span_attrs(mock_argus_exporter)["argus.payload.skip_type"] == "design"
+
+    def test_returns_hex_span_id(self, tracer, mock_argus_exporter):
+        result = tracer.log_skip("news", reason="no_candidates")
+        assert isinstance(result, str) and len(result) == 16
 
 
 # ── cost helpers ───────────────────────────────────────────────────────────────
@@ -394,30 +439,3 @@ class TestCostHelpers:
     def test_agent_model_sonnet_agents(self):
         for agent in ("orchestrator", "learner"):
             assert _agent_model(agent) == "claude-sonnet-4-6"
-
-
-# ── log_skip ───────────────────────────────────────────────────────────────────
-
-class TestLogSkip:
-    def test_design_skip_posts_correct_row(self, tracer, mock_ingest_post):
-        tracer.log_skip("news", reason="no_candidates", skip_type="design")
-        p = _last_trace(mock_ingest_post)
-        assert p["step_type"] == "skip"
-        assert p["agent"] == "news"
-        assert p["outcome"] == "skipped"
-        assert p["payload"]["reason"] == "no_candidates"
-        assert p["payload"]["skip_type"] == "design"
-
-    def test_error_skip_sets_amber_signal(self, tracer, mock_ingest_post):
-        tracer.log_skip("risk", reason="market_skip", skip_type="error")
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["skip_type"] == "error"
-
-    def test_default_skip_type_is_design(self, tracer, mock_ingest_post):
-        tracer.log_skip("research", reason="no_candidates")
-        p = _last_trace(mock_ingest_post)
-        assert p["payload"]["skip_type"] == "design"
-
-    def test_returns_span_id(self, tracer, mock_ingest_post):
-        result = tracer.log_skip("news", reason="no_candidates")
-        assert isinstance(result, str) and len(result) == 36

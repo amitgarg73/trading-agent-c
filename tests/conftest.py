@@ -51,9 +51,34 @@ def mock_supabase(monkeypatch):
     return mock_client
 
 
+class RecordingExporter:
+    """Captures OTel spans exported by ArgusExporter for test assertions."""
+    def __init__(self):
+        self.spans: list = []
+
+    def export(self, spans) -> int:
+        self.spans.extend(spans)
+        return 0  # SUCCESS
+
+    def shutdown(self) -> None:
+        pass
+
+    def force_flush(self, timeout_millis: int = 30_000) -> bool:
+        return True
+
+
+@pytest.fixture
+def mock_argus_exporter():
+    """Replaces ArgusExporter with RecordingExporter so test can inspect exported spans."""
+    recorder = RecordingExporter()
+    # Patch the source module — ArgusExporter is imported inside __init__
+    with patch("trace.otel_exporter.ArgusExporter", return_value=recorder):
+        yield recorder
+
+
 @pytest.fixture
 def mock_ingest_post():
-    """Patches trace.logger._ingest_post — POST writes (session open/close, traces, evals)."""
+    """Patches trace.logger._ingest_post — used only for session open/close (not trace rows)."""
     with patch("trace.logger._ingest_post") as m:
         yield m
 
@@ -74,11 +99,10 @@ def mock_ingest_get():
 
 
 @pytest.fixture
-def tracer(mock_ingest_post, mock_ingest_patch, mock_supabase):
+def tracer(mock_argus_exporter, mock_ingest_post, mock_ingest_patch, mock_supabase):
     """
-    Shared TraceLogger backed by mocked ingest API.
-    mock_supabase still required for trading-specific table reads (c_ tables, scanner_tools, etc.).
-    Waits for the open-session daemon thread to complete before returning.
+    Shared TraceLogger with OTel spans captured by RecordingExporter.
+    Session open/close still go through mock_ingest_post (ingest API).
     """
     from trace.logger import TraceLogger
     t = TraceLogger("test-session-id-1234")
