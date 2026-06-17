@@ -674,6 +674,30 @@ class TestIntradayMain:
         p.max_positions = 3
         return p
 
+    def test_exits_when_portfolio_at_max_capacity(self, mock_supabase, capsys):
+        """When open positions == max_positions, exits before spawning agents (capacity gate)."""
+        import pytz
+        _ET = pytz.timezone("America/New_York")
+        fake_now = datetime(2026, 5, 27, 10, 30, tzinfo=_ET)
+        with patch("sessions.intraday.is_trading_day", return_value=True), \
+             patch("sessions.intraday.datetime") as mock_dt, \
+             patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
+             patch("sessions.intraday.check_protection_status",
+                   return_value=self._mock_protection()), \
+             patch("sessions.intraday.load_agent_config",
+                   return_value={"enable_intraday_entries": True}), \
+             patch("sessions.intraday.load_params", return_value=self._mock_params()), \
+             patch("sessions.intraday.get_daily_pnl", return_value=0.0), \
+             patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
+             patch("sessions.intraday.count_open_positions", return_value=3), \
+             patch("agents.research_agent.run_research_agent") as mock_research:
+            mock_dt.now.return_value = fake_now
+            mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
+            from sessions.intraday import main
+            main()
+        assert "No capacity" in capsys.readouterr().out
+        mock_research.assert_not_called()
+
     def test_exits_on_non_trading_day(self, mock_supabase, capsys):
         with patch("sessions.intraday.is_trading_day", return_value=False):
             from sessions.intraday import main

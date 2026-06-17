@@ -461,7 +461,7 @@ def main() -> None:
 
     synthetic_report = {
         "decision": "GO",
-        "max_positions": max_new,
+        "max_positions": params.max_positions,
         "bias": "NEUTRAL",
         "skip_reason": None,
         "open_positions_context": open_pos_context,
