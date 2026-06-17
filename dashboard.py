@@ -504,12 +504,20 @@ if page == "Today":
                 cc   = {"HIGH": "#3fb950", "MEDIUM": "#d29922", "LOW": "#888"}.get(conf, "#888")
                 ctx  = p.get("entry_context", "")
                 ctx_str = f" &nbsp; <span style='color:#888;font-size:0.7rem'>{ctx}</span>" if ctx else ""
+                fill_confirmed = bool(p.get("alpaca_order_id"))
+                fill_badge = (
+                    "<span style='background:#1f6feb;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7rem'>FILLED</span>"
+                    if fill_confirmed else
+                    "<span style='background:#d29922;color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7rem'>PENDING</span>"
+                )
+                fill_px = p.get("entry_price", 0)
                 st.markdown(
                     f"<b>{p['ticker']}</b> &nbsp; "
                     f"<span style='background:{cc};color:#fff;padding:1px 6px;border-radius:3px;font-size:0.7rem'>{conf}</span>"
+                    f" &nbsp; {fill_badge}"
                     f"{ctx_str}<br>"
                     f"<span style='font-size:0.85rem'>"
-                    f"Entry &#36;{p.get('entry_price', 0):.2f} · "
+                    f"Fill &#36;{fill_px:.2f} · "
                     f"{p.get('shares', 0)} sh<br>"
                     f"Stop &#36;{p.get('stop_loss', 0):.2f} · "
                     f"Target &#36;{p.get('target_price', 0):.2f} "
