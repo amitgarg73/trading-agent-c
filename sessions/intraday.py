@@ -327,9 +327,9 @@ def _place_intraday_trades(
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
             if tracer:
                 tracer.log_tool_call(
-                    "orchestrator", "submit_bracket_order", ticker,
-                    outcome="rejected",
-                    error=f"order rejected or staleness gate: proposal=${p['entry_price']:.2f}",
+                    "orchestrator", "submit_bracket_order",
+                    {"ticker": ticker, "entry_price": p["entry_price"]},
+                    {"outcome": "rejected", "error": f"order rejected or staleness gate: proposal=${p['entry_price']:.2f}"},
                 )
             continue
 

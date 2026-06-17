@@ -42,9 +42,9 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, trace
             print(f"  [premarket] {trade['ticker']} order rejected or staleness gate fired — skipping")
             if tracer:
                 tracer.log_tool_call(
-                    "orchestrator", "submit_bracket_order", trade["ticker"],
-                    outcome="rejected",
-                    error=f"order rejected or staleness gate: proposal=${trade['entry_price']:.2f}",
+                    "orchestrator", "submit_bracket_order",
+                    {"ticker": trade["ticker"], "entry_price": trade["entry_price"]},
+                    {"outcome": "rejected", "error": f"order rejected or staleness gate: proposal=${trade['entry_price']:.2f}"},
                 )
             continue
 

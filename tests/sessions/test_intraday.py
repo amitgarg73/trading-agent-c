@@ -258,6 +258,23 @@ class TestPlaceIntradayTrades:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
 
+    def test_rejected_order_logs_tool_call_without_error(self, mock_supabase):
+        """log_tool_call must not crash when order is rejected (regression for TypeError: unexpected keyword 'outcome')."""
+        mock_supabase.table.return_value = make_query([])
+        mock_tracer = MagicMock()
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=mock_tracer)
+        assert count == 0
+        mock_tracer.log_tool_call.assert_called_once()
+        call_args = mock_tracer.log_tool_call.call_args
+        # positional: agent, tool_name, tool_input (dict), tool_output (dict)
+        assert call_args.args[0] == "orchestrator"
+        assert call_args.args[1] == "submit_bracket_order"
+        assert isinstance(call_args.args[2], dict)  # tool_input
+        assert isinstance(call_args.args[3], dict)  # tool_output
+        assert call_args.args[3].get("outcome") == "rejected"
+
     def test_hard_gate_blocks_ticker_already_entered_today(self, mock_supabase):
         """If AAPL was already entered today (open or closed), hard gate must skip it."""
         mock_supabase.table.return_value = make_query([])
