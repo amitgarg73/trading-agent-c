@@ -184,13 +184,18 @@ def submit_bracket_order(
         print(f"  [alpaca] {ticker} queued for market open — skipping fill poll")
         return str(order.id), None
 
-    for _ in range(60):   # 120s total (was 30s — premarket bracket orders need up to 2 min)
+    last_status = "unknown"
+    for i in range(90):   # 180s total — paper account bracket status can lag 2-3 min
         time.sleep(2)
         try:
             o      = _client().get_order_by_id(str(order.id))
             status = str(o.status).lower()
+            if status != last_status:
+                print(f"  [alpaca] {ticker} order status → {status} (poll {i+1})")
+                last_status = status
             if status in ("filled", "partially_filled"):
                 fill_price = float(o.filled_avg_price) if o.filled_avg_price else None
+                print(f"  [alpaca] {ticker} filled @ avg ${fill_price} — cancelling bracket legs")
                 # Cancel both stop-loss AND take-profit legs so trailing stop can be submitted.
                 # Alpaca counts all bracket child legs against available qty — leaving either
                 # open blocks the trailing stop submission.
@@ -207,11 +212,11 @@ def submit_bracket_order(
             if status in ("cancelled", "rejected", "expired"):
                 print(f"  [alpaca] {ticker} order {status} — skipping DB write")
                 return None, None
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  [alpaca] {ticker} poll error (attempt {i+1}): {e}")
 
-    # Still pending after 120s — record for reconciliation
-    print(f"  [alpaca] {ticker} fill pending after 120s — recording for reconcile")
+    # Still pending after 180s — record for reconciliation
+    print(f"  [alpaca] {ticker} fill still pending after 180s (last status: {last_status}) — recording for reconcile")
     return str(order.id), None
 
 

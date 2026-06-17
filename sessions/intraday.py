@@ -206,13 +206,19 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                     if abs(actual_entry - float(pos.get("entry_price") or 0)) > 0.001:
                         update["entry_price"] = actual_entry
                     _cancel_bracket_stop_leg(order_id)
-                    _time.sleep(2)  # wait for Alpaca to release bracket leg qty
-                    new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
+                    _time.sleep(3)  # wait for Alpaca to release bracket leg qty
+                    new_trail_id = None
+                    for attempt in range(3):  # retry up to 3 times with 5s gaps
+                        new_trail_id = submit_trailing_stop(ticker, shares, trail_pct)
+                        if new_trail_id:
+                            break
+                        print(f"  [intraday] {ticker} trail submit attempt {attempt+1} failed — retrying in 5s")
+                        _time.sleep(5)
                     if new_trail_id:
                         update["trail_order_id"] = new_trail_id
                         print(f"  [intraday] {ticker} trailing stop submitted (post-fill): {new_trail_id[:8]}")
                     else:
-                        print(f"  [intraday] ⚠️  Trail still pending for {ticker} — will retry next cycle")
+                        print(f"  [intraday] ⚠️  Trail still failing for {ticker} after 3 attempts — will retry next cycle")
             if update:
                 db.table("c_positions").update(update).eq("id", pos["id"]).execute()
         else:
@@ -229,7 +235,10 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                 if order_id:
                     from core.alpaca import cancel_order
                     bracket = get_bracket_status(order_id)
-                    if not bracket.get("entry_filled"):
+                    # IMPORTANT: only mark unfilled when entry_filled is explicitly False.
+                    # If get_bracket_status returns {"error": "..."} the key is absent (None).
+                    # not None = True would incorrectly cancel filled orders — must check False.
+                    if bracket.get("entry_filled") is False:
                         # Allow 30 minutes before cancelling — the next 15-min cycle would
                         # otherwise cancel a freshly-submitted order before it has a chance to fill.
                         entry_time_str = pos.get("entry_time")
@@ -254,6 +263,9 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
                             "realized_pnl": 0.0,
                         }).eq("id", pos["id"]).execute()
                         print(f"  [intraday] {ticker} limit order never filled — cancelled and marked unfilled")
+                        continue
+                    if "error" in bracket:
+                        print(f"  [intraday] {ticker} bracket status error — skipping unfill check: {bracket['error']}")
                         continue
                 # Entry was filled but position is gone with no fill record — use last trade price
                 exit_reason = "external_close"
