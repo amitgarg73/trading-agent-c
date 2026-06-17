@@ -519,6 +519,7 @@ def batch_get_intraday_signals(tickers: list[str]) -> dict[str, dict]:
             timeframe=TimeFrame.Minute,
             start=market_open.astimezone(timezone.utc),
             end=now_et.astimezone(timezone.utc),
+            feed="iex",
         )
         all_bars = _dclient().get_stock_bars(req).data
 

@@ -647,6 +647,71 @@ class TestGetBracketStatusNativeTrail:
 
 # ── order prefix ──────────────────────────────────────────────────────────────
 
+# ── batch_get_intraday_signals ─────────────────────────────────────────────────
+
+class TestBatchGetIntradaySignals:
+    def _make_bar(self, open_=100.0, high=105.0, low=99.0, close=103.0, volume=500_000, vwap=101.5):
+        b = MagicMock()
+        b.open   = open_
+        b.high   = high
+        b.low    = low
+        b.close  = close
+        b.volume = volume
+        b.vwap   = vwap
+        return b
+
+    def _patch_dclient(self, ticker_bars: dict):
+        mock_dc = MagicMock()
+        mock_dc.return_value.get_stock_bars.return_value.data = ticker_bars
+        return patch("core.alpaca._dclient", mock_dc)
+
+    def test_uses_iex_feed(self):
+        spy_bar    = self._make_bar(open_=500.0, close=505.0)
+        ticker_bar = self._make_bar()
+        mock_dc    = MagicMock()
+        mock_dc.return_value.get_stock_bars.return_value.data = {
+            "SPY": [spy_bar], "NVDA": [ticker_bar]
+        }
+        with patch("core.alpaca._dclient", mock_dc):
+            from core.alpaca import batch_get_intraday_signals
+            batch_get_intraday_signals(["NVDA"])
+        req = mock_dc.return_value.get_stock_bars.call_args[0][0]
+        assert getattr(req, "feed", None) == "iex"
+
+    def test_returns_empty_dict_on_exception(self):
+        with patch("core.alpaca._dclient") as mc:
+            mc.return_value.get_stock_bars.side_effect = Exception("subscription error")
+            from core.alpaca import batch_get_intraday_signals
+            result = batch_get_intraday_signals(["NVDA"])
+        assert result == {}
+
+    def test_returns_available_false_when_no_bars(self):
+        spy_bar = self._make_bar(open_=500.0, close=505.0)
+        with self._patch_dclient({"SPY": [spy_bar], "NVDA": []}):
+            from core.alpaca import batch_get_intraday_signals
+            result = batch_get_intraday_signals(["NVDA"])
+        assert result["NVDA"]["available"] is False
+
+    def test_computes_vwap_above_vwap(self):
+        spy_bar = self._make_bar(open_=500.0, close=505.0)
+        bar     = self._make_bar(open_=100.0, close=103.0, vwap=101.0, volume=1_000_000)
+        with self._patch_dclient({"SPY": [spy_bar], "AAPL": [bar]}):
+            from core.alpaca import batch_get_intraday_signals
+            result = batch_get_intraday_signals(["AAPL"])
+        assert result["AAPL"]["available"]  is True
+        assert result["AAPL"]["above_vwap"] is True   # close=103 > vwap=101
+
+    def test_rs_vs_spy_capped_at_20(self):
+        spy_bar    = self._make_bar(open_=500.0, close=500.0)   # SPY flat
+        ticker_bar = self._make_bar(open_=100.0, close=130.0)   # ticker +30%
+        with self._patch_dclient({"SPY": [spy_bar], "NVDA": [ticker_bar]}):
+            from core.alpaca import batch_get_intraday_signals
+            result = batch_get_intraday_signals(["NVDA"])
+        assert result["NVDA"]["rs_vs_spy"] == 20.0  # capped
+
+
+# ── order prefix ──────────────────────────────────────────────────────────────
+
 class TestOrderPrefix:
     def test_client_order_id_starts_with_stratc(self):
         order = _mock_order(status="filled", filled_avg_price=185.0)
