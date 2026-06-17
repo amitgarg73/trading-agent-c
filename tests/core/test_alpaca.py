@@ -236,11 +236,24 @@ class TestSubmitBracketOrder:
         req = mc.return_value.submit_order.call_args[0][0]
         assert req.limit_price == pytest.approx(184.90, rel=1e-3)
 
-    def test_staleness_gate_skips_when_ask_2_5pct_above_proposal(self):
-        """If ask is >2.5% above proposal entry, the stock ran since the research call — skip."""
-        # entry_price=185.0, ask=190.5 → 2.97% above → stale → (None, None)
+    def test_fill_recognized_when_status_has_enum_prefix(self):
+        """Alpaca SDK may return 'orderstatus.filled' — must still be treated as filled."""
+        order = _mock_order(status="orderstatus.filled", filled_avg_price=185.20)
         with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
-             _MARKET_OPEN, _mock_dclient("AAPL", 190.5):
+             _MARKET_OPEN, _mock_dclient("AAPL", 184.90):
+            mt.sleep = MagicMock()
+            mc.return_value.submit_order.return_value = order
+            mc.return_value.get_order_by_id.return_value = order
+            from core.alpaca import submit_bracket_order
+            oid, fill = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)
+        assert oid == "ord-001"
+        assert fill == pytest.approx(185.20)
+
+    def test_staleness_gate_skips_when_ask_4pct_above_proposal(self):
+        """If ask is >4% above proposal entry, the stock ran since the research call — skip."""
+        # entry_price=185.0, ask=193.0 → 4.32% above → stale → (None, None)
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             _MARKET_OPEN, _mock_dclient("AAPL", 193.0):
             mt.sleep = MagicMock()
             from core.alpaca import submit_bracket_order
             oid, fill = submit_bracket_order("AAPL", 10, 185.0, 192.0, 183.0)

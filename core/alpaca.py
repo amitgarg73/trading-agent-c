@@ -189,7 +189,7 @@ def submit_bracket_order(
         time.sleep(2)
         try:
             o      = _client().get_order_by_id(str(order.id))
-            status = str(o.status).lower()
+            status = str(o.status).lower().split(".")[-1]  # normalize "orderstatus.filled" → "filled"
             if status != last_status:
                 print(f"  [alpaca] {ticker} order status → {status} (poll {i+1})")
                 last_status = status
@@ -227,7 +227,7 @@ def get_bracket_status(order_id: str) -> dict:
     """
     try:
         order        = _client().get_order_by_id(order_id)
-        order_status = str(order.status).lower()
+        order_status = str(order.status).lower().split(".")[-1]  # normalize enum prefix
         entry_filled = order_status in ("filled", "partially_filled")
         entry_price  = round(float(order.filled_avg_price), 4) if order.filled_avg_price else None
 
@@ -355,7 +355,7 @@ def close_position(ticker: str) -> tuple[bool, Optional[float]]:
             time.sleep(2)
             try:
                 o      = _client().get_order_by_id(str(order.id))
-                status = str(o.status).lower()
+                status = str(o.status).lower().split(".")[-1]  # normalize "orderstatus.filled" → "filled"
                 if status in ("filled", "partially_filled") and o.filled_avg_price:
                     return True, float(o.filled_avg_price)
                 if status in ("cancelled", "rejected", "expired"):
