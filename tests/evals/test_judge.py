@@ -206,6 +206,25 @@ class TestFetchCriteria:
         from evals.judge import _fetch_criteria
         assert _fetch_criteria([]) == {}
 
+    def test_skips_non_l4_layer_configs(self, monkeypatch):
+        # L3 rule checks (e.g. orchestrator decision_made / exit_quality) must not be
+        # run through the LLM judge; only L4 semantic criteria are judged. Configs with
+        # no layer field stay judgeable (backward compat).
+        monkeypatch.setattr("trace.logger._ingest_get", MagicMock(return_value={
+            "configs": [
+                {"id": "c1", "eval_name": "decision_made", "agent": "orchestrator", "layer": 3, "threshold": 0.9, "config": {}},
+                {"id": "c2", "eval_name": "exit_quality", "agent": "orchestrator", "layer": 3, "threshold": 0.9, "config": {}},
+                {"id": "c3", "eval_name": "orchestrator_synthesis", "agent": "orchestrator", "layer": 4, "threshold": 0.7, "config": {"prompt": "Did it synthesize all inputs?"}},
+                {"id": "c4", "eval_name": "legacy_no_layer", "agent": "orchestrator", "threshold": 0.7, "config": {"prompt": "x"}},
+            ]
+        }))
+        from evals.judge import _fetch_criteria
+        names = [c["eval_name"] for c in _fetch_criteria(["orchestrator"]).get("orchestrator", [])]
+        assert "decision_made" not in names
+        assert "exit_quality" not in names
+        assert "orchestrator_synthesis" in names   # L4 judged
+        assert "legacy_no_layer" in names          # layer absent → still judged
+
     def test_returns_empty_when_api_returns_empty(self, monkeypatch):
         monkeypatch.setattr("trace.logger._ingest_get", MagicMock(return_value={}))
         from evals.judge import _fetch_criteria

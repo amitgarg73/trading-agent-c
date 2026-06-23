@@ -65,6 +65,17 @@ def _fetch_criteria(agent_names: list[str]) -> dict[str, list[dict]]:
     agent_set = set(agent_names)
     by_agent: dict[str, list[dict]] = {}
     for row in rows:
+        # The judge scores only L4 (semantic) criteria. L3 rule checks are deterministic
+        # and must not be run through the LLM — doing so (with their null prompt) scored
+        # them against the bare eval name and produced meaningless 0% results (e.g. the
+        # orchestrator's decision_made / exit_quality). Layer absent → keep (backward compat).
+        layer = row.get("layer")
+        if layer is not None:
+            try:
+                if int(layer) != 4:
+                    continue
+            except (TypeError, ValueError):
+                pass
         agent = row.get("agent")
         if agent == "*":
             for name in agent_names:
