@@ -105,12 +105,16 @@ def force_close_positions(session_id: str) -> int:
     if not positions:
         return 0
 
-    # Snapshot unrealized P&L before cancelling orders (prices still valid)
-    alpaca_pnl: dict[str, float] = {}
+    # Snapshot unrealized P&L and current price before cancelling orders (prices still valid)
+    alpaca_pnl:   dict[str, float] = {}
+    alpaca_price: dict[str, float] = {}
     for pos in positions:
         data = get_position_data(pos["ticker"])
-        if data and data.get("unrealized_pnl") is not None:
-            alpaca_pnl[pos["ticker"]] = data["unrealized_pnl"]
+        if data:
+            if data.get("unrealized_pnl") is not None:
+                alpaca_pnl[pos["ticker"]] = data["unrealized_pnl"]
+            if data.get("current_price") is not None:
+                alpaca_price[pos["ticker"]] = data["current_price"]
 
     cancel_all_orders()
     closed = close_all_strategy_positions()
@@ -123,20 +127,23 @@ def force_close_positions(session_id: str) -> int:
         try:
             fill_price = fills.get(pos["ticker"])
             if fill_price:
-                entry    = pos.get("entry_price") or 0.0
-                realized = round((fill_price - float(entry)) * int(pos["shares"]), 2)
-                src      = "fill"
+                entry            = pos.get("entry_price") or 0.0
+                realized         = round((fill_price - float(entry)) * int(pos["shares"]), 2)
+                exit_price_store = fill_price
+                src              = "fill"
             elif pos["ticker"] in alpaca_pnl:
-                realized = alpaca_pnl[pos["ticker"]]
-                src      = "alpaca_snapshot"
+                realized         = alpaca_pnl[pos["ticker"]]
+                exit_price_store = alpaca_price.get(pos["ticker"])
+                src              = "alpaca_snapshot"
             else:
-                realized = 0.0
-                src      = "unavailable"
+                realized         = 0.0
+                exit_price_store = None
+                src              = "unavailable"
 
             client.table("c_positions").update({
                 "status":       "closed",
                 "exit_reason":  "eod_forced",
-                "exit_price":   fill_price if fill_price else None,
+                "exit_price":   exit_price_store,
                 "close_date":   today,
                 "close_time":   now_,
                 "realized_pnl": realized,
@@ -273,19 +280,24 @@ def compute_performance(session_id: str, trades: list[dict]) -> DailyPerformance
 
 def save_performance(perf: DailyPerformance) -> None:
     from core.db import get_client
-    get_client().table("c_daily_performance").upsert({
-        "session_id":    perf.session_id,
-        "date":          perf.date,
-        "realized_pnl":  perf.realized_pnl,
-        "trades_total":  perf.trades_total,
-        "trades_won":    perf.trades_won,
-        "trades_lost":   perf.trades_lost,
-        "win_rate":      perf.win_rate,
-        "largest_win":   perf.largest_win,
-        "largest_loss":  perf.largest_loss,
-        "avg_hold_min":  perf.avg_hold_min,
+    row: dict = {
+        "session_id":      perf.session_id,
+        "date":            perf.date,
+        "realized_pnl":    perf.realized_pnl,
+        "trades_total":    perf.trades_total,
+        "trades_won":      perf.trades_won,
+        "trades_lost":     perf.trades_lost,
+        "win_rate":        perf.win_rate,
+        "largest_win":     perf.largest_win,
+        "largest_loss":    perf.largest_loss,
+        "avg_hold_min":    perf.avg_hold_min,
         "protection_tier": perf.protection_tier,
-    }).execute()
+    }
+    if perf.vix_at_open is not None:
+        row["vix_at_open"] = perf.vix_at_open
+    if perf.market_signal is not None:
+        row["market_signal"] = perf.market_signal
+    get_client().table("c_daily_performance").upsert(row).execute()
 
 
 def build_daily_summary(

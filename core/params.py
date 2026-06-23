@@ -13,7 +13,7 @@ PARAM_DEFAULTS: dict[str, float] = {
     "caution_position_multiplier": 0.6,
     "caution_min_score":           7.0,
     "max_sector_concentration":    0.35,
-    "trail_pct":                   0.008,
+    "trail_pct":                   0.015,
 }
 
 
@@ -28,7 +28,7 @@ class StrategyParams:
     caution_position_multiplier: float = 0.6
     caution_min_score: int = 7
     max_sector_concentration: float = 0.35
-    trail_pct: float = 0.008
+    trail_pct: float = 0.015
 
 
 @dataclass
