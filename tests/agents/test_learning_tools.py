@@ -43,12 +43,15 @@ class TestReadTodayTrades:
 # ── read_session_context ───────────────────────────────────────────────────────
 
 class TestReadSessionContext:
-    def test_returns_session_row(self, mock_supabase):
-        rows = [{"id": "sess-001", "terminal_reason": "converged", "total_steps": 42}]
+    def test_returns_session_row_with_flattened_metadata(self, mock_supabase):
+        rows = [{"id": "sess-001", "terminal_reason": "converged",
+                 "metadata": {"spy_change_pct": -0.4, "regime": "neutral"}}]
         mock_supabase.table.return_value = make_query(rows)
         result = read_session_context("sess-001")
         assert result["id"] == "sess-001"
         assert result["terminal_reason"] == "converged"
+        assert result["spy_change_pct"] == -0.4 and result["regime"] == "neutral"  # metadata flattened
+        assert "metadata" not in result
 
     def test_returns_error_when_not_found(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -66,13 +69,16 @@ class TestReadSessionContext:
 class TestReadStrategyParams:
     def test_returns_all_param_rows(self, mock_supabase):
         rows = [
-            {"param_name": "strategy_min_score", "current_value": 5, "default_value": 5,
-             "min_value": 3, "max_value": 9, "cooldown_until": None, "last_adjusted_by": None},
+            {"param_key": "strategy_min_score", "param_value": 5, "default_value": 5,
+             "min_bound": 3, "max_bound": 9, "cooldown_until": None, "updated_by": "seed"},
         ]
         mock_supabase.table.return_value = make_query(rows)
         result = read_strategy_params()
         assert len(result) == 1
-        assert result[0]["param_name"] == "strategy_min_score"
+        assert result[0]["param_name"] == "strategy_min_score"      # mapped from param_key
+        assert result[0]["current_value"] == 5                      # from param_value
+        assert result[0]["min_value"] == 3 and result[0]["max_value"] == 9
+        assert result[0]["last_adjusted_by"] == "seed"             # from updated_by
 
     def test_returns_empty_when_no_params(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -89,14 +95,16 @@ class TestReadStrategyParams:
 class TestReadRecentLearnings:
     def test_returns_learnings(self, mock_supabase):
         rows = [
-            {"learning_date": "2026-05-27", "learning_type": "observation",
+            {"session_date": "2026-05-27", "learning_type": "observation",
              "dimension": "entry_quality", "finding": "bid entries outperform",
-             "param_adjusted": None, "confidence": 0.8},
+             "param_key": "trail_pct", "confidence": "high", "outcome": "pending"},
         ]
         mock_supabase.table.return_value = make_query(rows)
         result = read_recent_learnings()
         assert len(result) == 1
         assert result[0]["learning_type"] == "observation"
+        assert result[0]["learning_date"] == "2026-05-27"     # mapped from session_date
+        assert result[0]["param_adjusted"] == "trail_pct"     # mapped from param_key
 
     def test_returns_empty_when_none(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
@@ -121,7 +129,7 @@ class TestWriteLearning:
         assert result["status"] == "written"
         assert len(result["id"]) == 36
 
-    def test_insert_called_with_correct_fields(self, mock_supabase):
+    def test_insert_maps_to_real_schema_columns(self, mock_supabase):
         query = make_query([])
         mock_supabase.table.return_value = query
 
@@ -132,13 +140,22 @@ class TestWriteLearning:
             param_adjusted="strategy_min_score",
             old_value=4.0,
             new_value=5.0,
+            sample_size=6,
+            confidence=0.9,
         )
 
         row = query.insert.call_args[0][0]
         assert row["learning_type"] == "adjustment"
-        assert row["param_adjusted"] == "strategy_min_score"
-        assert row["old_value"] == 4.0
-        assert row["new_value"] == 5.0
+        # Mapped to the actual c_learnings columns
+        assert row["param_key"] == "strategy_min_score"
+        assert row["old_param_value"] == 4.0
+        assert row["new_param_value"] == 5.0
+        assert row["confidence"] == "high"          # numeric -> TEXT
+        assert row["session_date"] and row["expires_date"]
+        assert "(n=6)" in row["finding"]
+        # Columns that don't exist on c_learnings must NOT be sent (these failed the insert)
+        for bad in ("learning_date", "param_adjusted", "old_value", "new_value", "sample_size", "active"):
+            assert bad not in row
 
     def test_returns_error_on_db_exception(self, mock_supabase):
         mock_supabase.table.side_effect = Exception("db error")

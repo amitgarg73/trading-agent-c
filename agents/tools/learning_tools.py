@@ -4,6 +4,20 @@ from datetime import date, timedelta
 from typing import Any, Optional
 from uuid import uuid4
 
+# Learning-window default for new learnings (c_learnings.expires_date is NOT NULL).
+_LEARNING_TTL_DAYS = 30
+
+
+def _confidence_text(c: Any) -> str:
+    """c_learnings.confidence is TEXT (low|medium|high). Accept a string or a 0-1 number."""
+    if isinstance(c, str):
+        return c if c in ("low", "medium", "high") else "medium"
+    try:
+        v = float(c)
+    except (TypeError, ValueError):
+        return "medium"
+    return "high" if v >= 0.8 else "medium" if v >= 0.5 else "low"
+
 
 def read_today_trades() -> list[dict[str, Any]]:
     """Fetch all trades closed today for Learning Agent analysis."""
@@ -29,58 +43,85 @@ def read_today_trades() -> list[dict[str, Any]]:
 
 
 def read_session_context(session_id: str) -> dict[str, Any]:
-    """Fetch the session row from c_sessions for market context."""
+    """Fetch the session row for market context. Sessions live in ag_sessions
+    (TraceLogger migrated off c_sessions); market context is in the metadata JSONB,
+    which we flatten so the agent sees it alongside the session fields."""
     try:
         from core.db import get_client
         rows = (
             get_client()
-            .table("c_sessions")
-            .select("*")
+            .table("ag_sessions")
+            .select("id,session_type,status,terminal_reason,result_summary,metadata,started_at,ended_at")
             .eq("id", session_id)
             .limit(1)
             .execute()
             .data
         )
-        return rows[0] if rows else {"error": "session not found"}
+        if not rows:
+            return {"error": "session not found"}
+        r = rows[0]
+        meta = r.get("metadata") or {}
+        return {**(meta if isinstance(meta, dict) else {}), **{k: v for k, v in r.items() if k != "metadata"}}
     except Exception as e:
         return {"error": str(e)}
 
 
 def read_strategy_params() -> list[dict[str, Any]]:
-    """Fetch all active strategy params with current values and bounds."""
+    """Fetch all strategy params with current values and bounds. Returns agent-facing
+    keys (param_name/current_value/min_value/max_value) mapped from the actual
+    c_strategy_params columns (param_key/param_value/min_bound/max_bound)."""
     try:
         from core.db import get_client
         rows = (
             get_client()
             .table("c_strategy_params")
-            .select(
-                "param_name,current_value,default_value,"
-                "min_value,max_value,cooldown_until,last_adjusted_by"
-            )
-            .eq("active", True)
+            .select("param_key,param_value,default_value,min_bound,max_bound,cooldown_until,updated_by")
             .execute()
             .data
         )
-        return rows or []
+        return [
+            {
+                "param_name":       r.get("param_key"),
+                "current_value":    r.get("param_value"),
+                "default_value":    r.get("default_value"),
+                "min_value":        r.get("min_bound"),
+                "max_value":        r.get("max_bound"),
+                "cooldown_until":   r.get("cooldown_until"),
+                "last_adjusted_by": r.get("updated_by"),
+            }
+            for r in (rows or [])
+        ]
     except Exception as e:
         return [{"error": str(e)}]
 
 
 def read_recent_learnings(days: int = 14) -> list[dict[str, Any]]:
-    """Fetch learnings written in the past N days, newest first."""
+    """Fetch learnings written in the past N days, newest first. Maps the actual
+    c_learnings columns (session_date/param_key) to the agent-facing shape."""
     try:
         from core.db import get_client
         cutoff = (date.today() - timedelta(days=days)).isoformat()
         rows = (
             get_client()
             .table("c_learnings")
-            .select("learning_date,learning_type,dimension,finding,param_adjusted,confidence")
-            .gte("learning_date", cutoff)
-            .order("learning_date", desc=True)
+            .select("session_date,learning_type,dimension,finding,param_key,confidence,outcome")
+            .gte("session_date", cutoff)
+            .order("session_date", desc=True)
             .execute()
             .data
         )
-        return rows or []
+        return [
+            {
+                "learning_date":  r.get("session_date"),
+                "learning_type":  r.get("learning_type"),
+                "dimension":      r.get("dimension"),
+                "finding":        r.get("finding"),
+                "param_adjusted": r.get("param_key"),
+                "confidence":     r.get("confidence"),
+                "outcome":        r.get("outcome"),
+            }
+            for r in (rows or [])
+        ]
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -93,28 +134,33 @@ def write_learning(
     old_value: Optional[float] = None,
     new_value: Optional[float] = None,
     sample_size: int = 0,
-    confidence: float = 0.0,
+    confidence: Any = 0.0,
     session_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """
     Persist a structured learning to c_learnings.
-    learning_type: "observation" | "adjustment" | "false_positive_detected"
+    learning_type: "observation" | "adjustment" | "false_positive_detected" | "goal_recommendation"
     dimension: "entry_quality" | "exit_quality" | "market_regime" | "ticker_pattern" | "parameter"
+
+    Column-mapped to the actual c_learnings schema: session_date / param_key /
+    old_param_value / new_param_value, confidence as TEXT, and the NOT NULL
+    expires_date. sample_size has no column, so it is folded into the finding text.
     """
     try:
         from core.db import get_client
+        finding_text = finding + (f" (n={sample_size})" if sample_size else "")
         row = {
-            "id":             str(uuid4()),
-            "session_id":     session_id,
-            "learning_date":  date.today().isoformat(),
-            "learning_type":  learning_type,
-            "dimension":      dimension,
-            "finding":        finding,
-            "param_adjusted": param_adjusted,
-            "old_value":      old_value,
-            "new_value":      new_value,
-            "sample_size":    sample_size,
-            "confidence":     confidence,
+            "id":               str(uuid4()),
+            "session_id":       session_id,
+            "session_date":     date.today().isoformat(),
+            "learning_type":    learning_type,
+            "dimension":        dimension,
+            "finding":          finding_text,
+            "confidence":       _confidence_text(confidence),
+            "param_key":        param_adjusted,
+            "old_param_value":  old_value,
+            "new_param_value":  new_value,
+            "expires_date":     (date.today() + timedelta(days=_LEARNING_TTL_DAYS)).isoformat(),
         }
         get_client().table("c_learnings").insert(row).execute()
         return {"status": "written", "id": row["id"]}
@@ -161,6 +207,7 @@ def recommend_goal(
             learning_type="goal_recommendation",
             dimension="parameter",
             finding=f"Recommend goal: {goal_type} target={target_value}. {rationale}",
+            confidence="medium",
             session_id=session_id,
         )
     except Exception as e:
