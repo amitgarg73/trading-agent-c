@@ -31,8 +31,14 @@ CONSTRAINTS (apply in order):
 5. Position count: reject proposals beyond (max_positions - positions_open)
    where max_positions comes from market_report embedded in the proposals context
 
-For each proposal: APPROVED or REJECTED with a specific reason.
-Rejection reason must name the constraint violated.
+For each proposal: APPROVED or REJECTED with a reason that cites the specific
+constraint(s) checked AND their concrete values, so the decision is auditable from
+the verdict alone. Never use a generic reason like "all constraints passed".
+- REJECTED: name the violated constraint with the numbers, e.g.
+  "sector concentration would hit 38% > 35% cap" or
+  "buying power $2,100 < position_size $3,000" or "daily P&L -$520 hit -$500 limit".
+- APPROVED: cite the binding checks with their headroom, e.g.
+  "BP $50,000 >= $3,500 needed; Technology 7% < 35% cap; P&L -$28.67 within -$500 limit".
 You may not propose alternative trades or suggest modifications.
 
 Return JSON only:

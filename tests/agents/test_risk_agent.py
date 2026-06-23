@@ -58,6 +58,20 @@ def _run(tracer, mock_client=None):
         return run_risk_agent(tracer, _PROPOSALS, StrategyParams())
 
 
+class TestSystemPromptSpecificity:
+    """Guards the fix for the risk_verdict_specificity eval (was scoring ~0):
+    the verdict reason must cite concrete constraint values, not 'all constraints passed'."""
+
+    def test_prompt_requires_concrete_values_and_forbids_generic_reason(self):
+        from agents.risk_agent import _SYSTEM
+        low = _SYSTEM.lower()
+        assert "concrete value" in low
+        assert "all constraints passed" in low  # named explicitly as the thing to avoid
+        assert "never use a generic reason" in low
+        # gives guidance for BOTH decisions, not just rejections
+        assert "approved:" in low and "rejected:" in low
+
+
 class TestRunRiskAgent:
     def test_returns_verdicts_dict(self, tracer):
         result = _run(tracer)
