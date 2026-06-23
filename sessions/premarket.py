@@ -161,6 +161,7 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     _COMPLETE = {
         "no_opportunity", "converged", "error", "eod_complete", "no_candidates",
         "risk_rejected", "manual_stop", "watchdog_timeout", "circuit_breaker",
+        "deferred_to_open",
     }
     if term in _COMPLETE or status == "completed":
         return True, f"Session {sid[:8]} already completed ({term}). Skipping."
@@ -181,6 +182,7 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
 
 def main(bypass_checks: bool = False) -> None:
     now_et  = datetime.now(_ET)
+    now_t   = now_et.time()
     weekday = now_et.strftime("%a").upper()[:3]
 
     if not bypass_checks:
@@ -192,7 +194,6 @@ def main(bypass_checks: bool = False) -> None:
         window_start  = _window_time(config, "premarket_window_start", _PREMARKET_START)
         window_end    = _window_time(config, "premarket_window_end",   _PREMARKET_END)
 
-        now_t = now_et.time()
         if not (window_start <= now_t <= window_end):
             print(f"[premarket] Outside premarket window ({now_et.strftime('%H:%M ET')}, "
                   f"allowed {window_start.strftime('%H:%M')}–{window_end.strftime('%H:%M')} ET). Exiting.")
@@ -235,6 +236,30 @@ def main(bypass_checks: bool = False) -> None:
             send_alert(
                 f"Strategy C — No Candidates {now_et.strftime('%Y-%m-%d')}",
                 "Scanner returned 0 results. Market data issue or all tickers filtered.",
+            )
+            return
+
+        # Defer to open: before market open the IEX feed has no live/premarket quotes, so
+        # the research agent's gates receive null intraday signals (rs_vs_spy, above_vwap,
+        # premarket_change) for every candidate and skip them all — a daily false
+        # "no_viable_proposals". Scan to populate today's candidates and defer the entry
+        # decision to the open; the intraday session runs the full research + entry pipeline
+        # after 9:30 with live data. (To trade premarket, move the data client to the SIP
+        # feed and run the pipeline here instead of deferring.)
+        if now_t < _MARKET_OPEN:
+            print(f"[premarket] Pre-open ({now_et.strftime('%H:%M ET')}) — {candidate_count} candidates "
+                  f"scanned; deferring entry decision to market open (intraday).")
+            tracer.close_session(
+                terminal_reason="deferred_to_open",
+                result_summary=(
+                    f"{candidate_count} candidates scanned. Entry decision deferred to market open; "
+                    "intraday runs research with live data."
+                ),
+            )
+            send_alert(
+                f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
+                f"{candidate_count} candidates scanned. Entries deferred to market open — intraday "
+                "runs the research + entry pipeline with live data after 9:30 ET.",
             )
             return
 

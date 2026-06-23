@@ -320,8 +320,10 @@ class TestPremarketMain:
             main()
         mock_exec.assert_called_once()
 
-    def test_skips_execution_before_market_open_stores_pending(self, mock_supabase, capsys):
-        """Trades are not submitted before 9:30 AM but are stored via tracer.set_pending_trades."""
+    def test_defers_to_open_before_market_open(self, mock_supabase, capsys):
+        """Before 9:30 the premarket session scans and DEFERS the entry decision to the open:
+        the research pipeline is not run (no live data) and no pending trades are stored —
+        the intraday session makes the call after open with live data."""
         q = make_query([])
         mock_supabase.table.return_value = q
         with patch("sessions.premarket.is_trading_day", return_value=True), \
@@ -332,27 +334,28 @@ class TestPremarketMain:
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
              patch("sessions.premarket.load_agent_config", return_value=self._mock_config()), \
-             patch("sessions.premarket.run_premarket_pipeline",
-                   return_value={**_RESULT_WITH_TRADES, "_v2_market_report": _V2_REPORT}), \
+             patch("sessions.premarket.run_premarket_pipeline") as mock_pipeline, \
              patch("sessions.premarket._execute_trades") as mock_exec, \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
-             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
-             patch("sessions.premarket._log_market_eval"), \
              patch("scanner.scanner.run_scanner", return_value=5), \
-             patch("sessions.premarket.send_alert"):
+             patch("sessions.premarket.send_alert") as mock_alert:
             mock_tracer = MagicMock()
             mock_tracer_cls.return_value = mock_tracer
             from sessions.premarket import main
             main()
+        mock_pipeline.assert_not_called()                 # decision deferred — no research pre-open
         mock_exec.assert_not_called()
-        mock_tracer.set_pending_trades.assert_called_once()
+        mock_tracer.set_pending_trades.assert_not_called()
+        assert mock_tracer.close_session.call_args.kwargs["terminal_reason"] == "deferred_to_open"
+        mock_alert.assert_called_once()
         out = capsys.readouterr().out
-        assert "pending" in out
+        assert "deferring" in out.lower()
 
     def test_no_execute_when_no_trades(self, mock_supabase):
         with patch("sessions.premarket.is_trading_day", return_value=True), \
              patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
              patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket._MARKET_OPEN", time(0, 0)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -375,6 +378,7 @@ class TestPremarketMain:
         with patch("sessions.premarket.is_trading_day", return_value=True), \
              patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
              patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket._MARKET_OPEN", time(0, 0)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
@@ -397,6 +401,7 @@ class TestPremarketMain:
         with patch("sessions.premarket.is_trading_day", return_value=True), \
              patch("sessions.premarket._PREMARKET_START", time(0, 0)), \
              patch("sessions.premarket._PREMARKET_END", time(23, 59)), \
+             patch("sessions.premarket._MARKET_OPEN", time(0, 0)), \
              patch("sessions.premarket.check_protection_status",
                    return_value=self._mock_protection()), \
              patch("sessions.premarket.load_params", return_value=self._mock_params()), \
