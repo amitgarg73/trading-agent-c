@@ -48,6 +48,33 @@ Respond with JSON only:
 
 # ── Fetch criteria ─────────────────────────────────────────────────────────────
 
+def _already_scored_l4(session_id: str) -> set[tuple[str, str]]:
+    """Return {(agent, eval_name)} of L4 evals already written for this session.
+
+    Used to make the judge idempotent so the daemon-thread pass and the synchronous
+    end-of-session backstop never double-write. Empty set on any error (fail open: a
+    missed dedup only risks a duplicate, never a missing score).
+    """
+    try:
+        import os
+        from core.db import get_client
+        tenant_id = os.environ.get("TENANT_ID", "")
+        if not tenant_id:
+            return set()
+        rows = (
+            get_client().table("ag_evals")
+            .select("agent, eval_name")
+            .eq("tenant_id", tenant_id)
+            .eq("session_id", session_id)
+            .eq("layer", 4)
+            .execute()
+            .data
+        )
+        return {(r.get("agent"), r.get("eval_name")) for r in rows}
+    except Exception:
+        return set()
+
+
 def _fetch_criteria(agent_names: list[str]) -> dict[str, list[dict]]:
     """
     Fetch enabled semantic eval configs via Argus ingest API.
@@ -206,6 +233,13 @@ def evaluate_session_outputs(
     if not criteria_by_agent:
         return {}
 
+    # Idempotency: skip (agent, eval) already scored for this session. The judge can run
+    # twice for one session — the orchestrator fires it in a daemon thread for a head start,
+    # and the session fires a synchronous backstop at the end so evals still land if the
+    # Action process exits before the daemon finishes. Without this, the two passes would
+    # double-write (the ingest /eval route does not dedup).
+    already = _already_scored_l4(session_id)
+
     client = anthropic.Anthropic()
     all_results: dict[str, list[dict]] = {}
 
@@ -216,6 +250,8 @@ def evaluate_session_outputs(
 
         agent_results: list[dict] = []
         for criterion in criteria:
+            if (agent, criterion.get("eval_name")) in already:
+                continue
             try:
                 result = _score_criterion(client, agent, output, criterion)
                 agent_results.append(result)
