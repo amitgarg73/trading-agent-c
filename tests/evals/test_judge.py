@@ -28,6 +28,46 @@ def _mock_get(monkeypatch, traces: list) -> MagicMock:
     return mock
 
 
+class TestJudgeIdempotency:
+    """The judge runs twice per session (daemon head-start + synchronous backstop);
+    already-scored (agent, eval) pairs must be skipped so the two passes never double-write."""
+
+    _CRITERIA = {"research": [{"eval_name": "research_quality", "threshold": 0.7}]}
+
+    def test_skips_already_scored_criterion(self, monkeypatch):
+        from evals import judge
+        monkeypatch.setattr(judge, "_fetch_criteria", lambda names: self._CRITERIA)
+        monkeypatch.setattr(judge, "_already_scored_l4",
+                            lambda sid: {("research", "research_quality")})
+        score = MagicMock()
+        write = MagicMock()
+        monkeypatch.setattr(judge, "_score_criterion", score)
+        monkeypatch.setattr(judge, "_write_eval_results", write)
+        monkeypatch.setattr(judge.anthropic, "Anthropic", MagicMock())
+
+        out = judge.evaluate_session_outputs("sess-1", {"research": "AAPL momentum strong"})
+        score.assert_not_called()   # already scored → no LLM call
+        write.assert_not_called()
+        assert out == {}
+
+    def test_scores_when_not_already_done(self, monkeypatch):
+        from evals import judge
+        monkeypatch.setattr(judge, "_fetch_criteria", lambda names: self._CRITERIA)
+        monkeypatch.setattr(judge, "_already_scored_l4", lambda sid: set())
+        score = MagicMock(return_value={"eval_name": "research_quality", "score": 0.8,
+                                        "passed": True, "threshold": 0.7, "reasoning": "ok"})
+        write = MagicMock()
+        monkeypatch.setattr(judge, "_score_criterion", score)
+        monkeypatch.setattr(judge, "_write_eval_results", write)
+        monkeypatch.setattr(judge, "_patch_session_quality_score", MagicMock())
+        monkeypatch.setattr(judge.anthropic, "Anthropic", MagicMock())
+
+        out = judge.evaluate_session_outputs("sess-1", {"research": "AAPL momentum strong"})
+        score.assert_called_once()
+        write.assert_called_once()
+        assert "research" in out
+
+
 # ── evaluate_session_from_traces ──────────────────────────────────────────────
 
 class TestEvaluateSessionFromTraces:

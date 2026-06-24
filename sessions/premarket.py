@@ -97,6 +97,32 @@ def _log_market_eval(session_id: str, v1: dict, v2: dict) -> None:
         print(f"  [premarket] _log_market_eval failed (non-fatal): {e}")
 
 
+def _write_session_evals(
+    session_id: str,
+    trades_proposed: int,
+    trades_approved: int,
+    terminal_reason: str,
+) -> None:
+    """Write L5 business evals and score L4 quality for this session.
+
+    The L4 judge is run inline here so every session gets a quality signal, rather than
+    only the ones a manual backfill happened to cover (the gap that left most sessions,
+    including profitable days, with no quality score). The L4 judge is best-effort: a
+    judge failure must never break the trading session.
+    """
+    write_premarket_outcome_evals(
+        session_id=session_id,
+        trades_proposed=trades_proposed,
+        trades_approved=trades_approved,
+        terminal_reason=terminal_reason,
+    )
+    try:
+        from evals.judge import evaluate_session_from_traces
+        evaluate_session_from_traces(session_id)
+    except Exception as e:
+        print(f"[premarket] L4 judge failed (non-fatal): {e}")
+
+
 def _run_news_analyst(_candidates: list[dict]) -> list[dict]:
     """Phase 0 stub. Phase 1: spawn agents/ts/news_analyst.js subprocess."""
     return []
@@ -293,7 +319,7 @@ def main(bypass_checks: bool = False) -> None:
             summary = f"{len(trades)} trade(s) executed: {tickers}"
         else:
             summary = f"No trades. {terminal}"
-        write_premarket_outcome_evals(
+        _write_session_evals(
             session_id=session_id,
             trades_proposed=len(result.get("trades", [])),
             trades_approved=len(trades),

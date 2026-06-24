@@ -10,8 +10,32 @@ from sessions.premarket import (
     _execute_trades,
     _existing_session_guard,
     _run_news_analyst,
+    _write_session_evals,
 )
 from tests.conftest import make_query
+
+
+class TestWriteSessionEvals:
+    """Every session must get both L5 business evals and an L4 quality score (the L4
+    judge was previously only run by a manual backfill, leaving most sessions blank)."""
+
+    def test_writes_l5_and_runs_l4_judge(self):
+        with patch("sessions.premarket.write_premarket_outcome_evals") as l5, \
+             patch("evals.judge.evaluate_session_from_traces") as l4:
+            _write_session_evals("sess-1", trades_proposed=3, trades_approved=2,
+                                 terminal_reason="executed")
+            l5.assert_called_once_with(session_id="sess-1", trades_proposed=3,
+                                       trades_approved=2, terminal_reason="executed")
+            l4.assert_called_once_with("sess-1")
+
+    def test_l4_judge_failure_is_non_fatal(self):
+        with patch("sessions.premarket.write_premarket_outcome_evals") as l5, \
+             patch("evals.judge.evaluate_session_from_traces",
+                   side_effect=RuntimeError("judge down")):
+            # Must not raise — a judge failure cannot break the trading session.
+            _write_session_evals("sess-2", trades_proposed=0, trades_approved=0,
+                                 terminal_reason="no_candidates")
+            l5.assert_called_once()
 
 _SESSION_ID = "sess-pre-0001"
 
