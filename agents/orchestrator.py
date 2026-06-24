@@ -362,36 +362,9 @@ def _run_semantic_evals(
     orchestrator_result: dict,
 ) -> None:
     """
-    Run LLM-as-judge after all agents complete. Scores are written to ag_evals.
-    Non-blocking on failure — exceptions are logged, session is not affected.
-    Agent names must match ag_eval_configs.agent values configured in Argus.
+    Deprecated: L4 quality scoring moved to the canonical server-side judge, triggered at
+    session close (evals.outcomes.trigger_server_judge). The server judge scores per ENTITY
+    (per ticker) and writes the Outcome Ledger predictions, which this local collapsed judge
+    could not do. Kept as a no-op so the existing call sites stay harmless; remove later.
     """
-    orch_clean = (
-        {k: v for k, v in orchestrator_result.items() if not k.startswith("_")}
-        if orchestrator_result.get("trades")
-        else {}
-    )
-    candidates = {
-        "market":       market_report,
-        "scanner":      _prepare_scanner_for_judge(scanner_result) if scanner_result else {},
-        "research":     trade_proposals,
-        "risk":         _prepare_risk_for_judge(risk_verdicts) if risk_verdicts else {},
-        "orchestrator": orch_clean,
-    }
-    agent_outputs = {
-        name: json.dumps(output, indent=2)
-        for name, output in candidates.items()
-        if output
-    }
-    def _run() -> None:
-        try:
-            results = evaluate_session_outputs(session_id, agent_outputs)
-            if results:
-                total  = sum(len(v) for v in results.values())
-                passed = sum(1 for v in results.values() for r in v if r["passed"])
-                print(f"[judge] {passed}/{total} criteria passed across {len(results)} agents")
-        except Exception as exc:
-            print(f"[judge] semantic eval skipped: {exc}")
-
-    threading.Thread(target=_run, daemon=True, name=f"judge-{session_id[:8]}").start()
-    print(f"[judge] semantic eval started in background for session {session_id[:8]}")
+    return

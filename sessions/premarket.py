@@ -103,12 +103,11 @@ def _write_session_evals(
     trades_approved: int,
     terminal_reason: str,
 ) -> None:
-    """Write L5 business evals and score L4 quality for this session.
+    """Write L5 business evals for this session.
 
-    The L4 judge is run inline here so every session gets a quality signal, rather than
-    only the ones a manual backfill happened to cover (the gap that left most sessions,
-    including profitable days, with no quality score). The L4 judge is best-effort: a
-    judge failure must never break the trading session.
+    L4 quality scoring is no longer done here: it moved to the canonical server-side judge,
+    triggered after close_session (it scores per ticker and writes the Outcome Ledger
+    predictions, which the old local judge could not).
     """
     write_premarket_outcome_evals(
         session_id=session_id,
@@ -116,11 +115,6 @@ def _write_session_evals(
         trades_approved=trades_approved,
         terminal_reason=terminal_reason,
     )
-    try:
-        from evals.judge import evaluate_session_from_traces
-        evaluate_session_from_traces(session_id)
-    except Exception as e:
-        print(f"[premarket] L4 judge failed (non-fatal): {e}")
 
 
 def _run_news_analyst(_candidates: list[dict]) -> list[dict]:
@@ -333,6 +327,10 @@ def main(bypass_checks: bool = False) -> None:
             retry_triggered=result["session_meta"].get("retry_triggered", False),
             result_summary=summary,
         )
+        # After close (so terminal_reason is set for the ledger skip-exclusion), trigger the
+        # canonical server judge: per-ticker L4 quality + Outcome Ledger predictions.
+        from evals.outcomes import trigger_server_judge
+        trigger_server_judge(session_id)
         subject, body = _build_premarket_alert(result, session_id, now_et)
         send_alert(subject, body)
 

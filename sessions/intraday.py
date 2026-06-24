@@ -500,21 +500,16 @@ def main() -> None:
             tracer=tracer,
         )
         tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
-        # Synchronous L4 backstop: the orchestrator scores quality in a daemon thread that
-        # the Action process can kill on exit. Re-run from traces before close so intraday
-        # entries reliably get a quality score. Idempotent (skips what the daemon wrote);
-        # non-fatal so it can never break trading.
-        try:
-            from evals.judge import evaluate_session_from_traces
-            evaluate_session_from_traces(intraday_session_id)
-        except Exception as e:
-            print(f"[intraday] L4 judge backstop failed (non-fatal): {e}")
         tracer.close_session(
             "intraday_entries_placed",
             trades_proposed=len(proposals.get("proposals", [])),
             trades_executed=count,
             result_summary=f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}",
         )
+        # After close (terminal_reason set), trigger the canonical server judge: per-ticker
+        # L4 quality + Outcome Ledger predictions for this intraday session.
+        from evals.outcomes import trigger_server_judge
+        trigger_server_judge(intraday_session_id)
         print(f"[intraday] {count} trade(s) placed: "
               f"{', '.join(v['ticker'] for v in approved)}")
 
