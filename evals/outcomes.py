@@ -72,3 +72,39 @@ def write_eod_outcome_metrics(
         print(f"[outcomes] Wrote {len(rows)} outcome metrics (quality_score={quality_score})")
     except Exception as e:
         print(f"[outcomes] Failed to write outcome metrics: {e}")
+
+
+# Exit reasons that mean no real trade happened, so there is no outcome to reconcile.
+_NO_TRADE_EXITS = {"unfilled", "test_cleanup"}
+
+
+def push_trade_outcomes(trades: list[dict]) -> int:
+    """Push each closed trade's realized P&L to the Argus Outcome Ledger, keyed on ticker.
+
+    Argus reconciles each against the trace-based prediction it made for that ticker
+    (matched / diverged). This is the tenant side of the Ledger: we own the outcome (P&L)
+    and report it to Argus like any external customer would. Orders that never filled are
+    skipped (no real outcome). Best-effort: a failure never affects the trading session.
+    Returns the number of outcomes posted.
+    """
+    from trace.logger import _ingest_post
+
+    sent = 0
+    for t in trades or []:
+        if (t.get("exit_reason") or "") in _NO_TRADE_EXITS:
+            continue
+        ticker = t.get("ticker")
+        pnl = t.get("realized_pnl")
+        if not ticker or pnl is None:
+            continue
+        try:
+            _ingest_post("/api/ingest/outcome", {
+                "entity_id":   ticker,
+                "value":       float(pnl),
+                "source":      "confirmed",
+                "occurred_at": t.get("close_time"),
+            })
+            sent += 1
+        except Exception as e:
+            print(f"[outcomes] ledger push failed for {ticker}: {e}")
+    return sent

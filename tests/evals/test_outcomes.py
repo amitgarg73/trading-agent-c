@@ -141,3 +141,41 @@ def test_handles_insert_error_gracefully(env_tenant, capsys):
 
     out = capsys.readouterr().out
     assert "Failed" in out
+
+
+class TestPushTradeOutcomes:
+    """Each closed trade's realized P&L is pushed to the Argus Outcome Ledger so the
+    trace-based prediction for that ticker reconciles against the real result."""
+
+    def _run(self, trades):
+        posted = []
+        with patch("trace.logger._ingest_post", side_effect=lambda path, payload: posted.append((path, payload))):
+            from evals.outcomes import push_trade_outcomes
+            n = push_trade_outcomes(trades)
+        return n, posted
+
+    def test_posts_one_outcome_per_filled_trade(self):
+        n, posted = self._run([
+            {"ticker": "CAT", "realized_pnl": 214.0, "exit_reason": "NATIVE_TRAIL", "close_time": "2026-06-24T20:00:00"},
+            {"ticker": "GE",  "realized_pnl": -50.0, "exit_reason": "eod_forced",   "close_time": "2026-06-24T20:00:00"},
+        ])
+        assert n == 2
+        assert [p for p, _ in posted] == ["/api/ingest/outcome", "/api/ingest/outcome"]
+        cat = next(pl for _, pl in posted if pl["entity_id"] == "CAT")
+        assert cat["value"] == 214.0
+        assert cat["source"] == "confirmed"
+        assert cat["occurred_at"] == "2026-06-24T20:00:00"
+
+    def test_skips_unfilled_orders(self):
+        n, posted = self._run([
+            {"ticker": "X", "realized_pnl": 0.0, "exit_reason": "unfilled", "close_time": None},
+        ])
+        assert n == 0
+        assert posted == []
+
+    def test_skips_rows_missing_ticker_or_pnl(self):
+        n, posted = self._run([
+            {"ticker": None, "realized_pnl": 10.0, "exit_reason": "eod_forced"},
+            {"ticker": "Y",  "realized_pnl": None, "exit_reason": "eod_forced"},
+        ])
+        assert n == 0

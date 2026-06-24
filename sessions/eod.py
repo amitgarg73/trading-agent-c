@@ -383,8 +383,13 @@ def main() -> None:
     tracer.log_decision("orchestrator", "trades_scored", detail=scoring)
 
     # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
-    from evals.outcomes import write_eod_outcome_metrics
+    from evals.outcomes import write_eod_outcome_metrics, push_trade_outcomes
     write_eod_outcome_metrics(session_id, perf.realized_pnl, perf.win_rate, perf.trades_total)
+    # Push each closed trade's realized P&L to the Argus Outcome Ledger so the trace-based
+    # prediction for that ticker reconciles against the real result.
+    pushed = push_trade_outcomes(get_today_trades(session_id))
+    if pushed:
+        tracer.log_decision("orchestrator", "ledger_outcomes_pushed", detail={"count": pushed})
 
     # Principal protection check
     protection = check_protection_status()
