@@ -74,6 +74,33 @@ def write_eod_outcome_metrics(
         print(f"[outcomes] Failed to write outcome metrics: {e}")
 
 
+def trigger_server_judge(session_id: str) -> None:
+    """Trigger Argus's server-side judge for a session, after it has closed.
+
+    The server judge scores per-entity (per-ticker) L4 quality and writes the Outcome
+    Ledger predictions for that session. This is the one canonical, entity-aware judge,
+    so the ledger fills automatically and quality is not double-scored. Call after
+    close_session so the session's terminal_reason is set (the ledger skip-exclusion
+    reads it). Best-effort: a failure never affects the trading session.
+    """
+    try:
+        import json
+        import urllib.request
+        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY
+
+        if not _ARGUS_URL:
+            return
+        req = urllib.request.Request(
+            f"{_ARGUS_URL}/api/compute/judge",
+            data=json.dumps({"session_id": session_id}).encode(),
+            headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY or ""},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=120)
+    except Exception as e:
+        print(f"[outcomes] server judge trigger failed for {session_id[:8]}: {e}")
+
+
 # Exit reasons that mean no real trade happened, so there is no outcome to reconcile.
 _NO_TRADE_EXITS = {"unfilled", "test_cleanup"}
 

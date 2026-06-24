@@ -179,3 +179,38 @@ class TestPushTradeOutcomes:
             {"ticker": "Y",  "realized_pnl": None, "exit_reason": "eod_forced"},
         ])
         assert n == 0
+
+
+class TestTriggerServerJudge:
+    """The pipeline triggers the canonical server judge after a session closes; it scores
+    per-ticker quality and writes the Outcome Ledger predictions."""
+
+    def test_posts_to_compute_judge(self):
+        from evals.outcomes import trigger_server_judge
+        captured = {}
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = req.data
+            captured["timeout"] = timeout
+            return MagicMock()
+        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            trigger_server_judge("sess-abc")
+        assert captured["url"].endswith("/api/compute/judge")
+        assert b"sess-abc" in captured["body"]
+        assert captured["timeout"] == 120
+
+    def test_failure_is_non_fatal(self):
+        from evals.outcomes import trigger_server_judge
+        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=RuntimeError("down")):
+            trigger_server_judge("sess-x")  # must not raise
+
+    def test_noop_without_argus_url(self):
+        from evals.outcomes import trigger_server_judge
+        with patch("trace.logger._ARGUS_URL", ""), \
+             patch("urllib.request.urlopen") as uo:
+            trigger_server_judge("sess-y")
+            uo.assert_not_called()
