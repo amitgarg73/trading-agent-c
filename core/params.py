@@ -14,6 +14,7 @@ PARAM_DEFAULTS: dict[str, float] = {
     "caution_min_score":           7.0,
     "max_sector_concentration":    0.35,
     "trail_pct":                   0.015,
+    "max_entry_premium":           0.005,
 }
 
 
@@ -29,6 +30,7 @@ class StrategyParams:
     caution_min_score: int = 7
     max_sector_concentration: float = 0.35
     trail_pct: float = 0.015
+    max_entry_premium: float = 0.005  # skip an entry already > this fraction above the day's open (chase guard)
 
 
 @dataclass
@@ -74,6 +76,7 @@ def load_params() -> StrategyParams:
         caution_min_score=int(values.get("caution_min_score", PARAM_DEFAULTS["caution_min_score"])),
         max_sector_concentration=values.get("max_sector_concentration", PARAM_DEFAULTS["max_sector_concentration"]),
         trail_pct=values.get("trail_pct", PARAM_DEFAULTS["trail_pct"]),
+        max_entry_premium=values.get("max_entry_premium", PARAM_DEFAULTS["max_entry_premium"]),
     )
 
 
