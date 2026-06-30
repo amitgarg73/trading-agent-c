@@ -297,6 +297,7 @@ def _place_intraday_trades(
     approved_tickers: set[str],
     session_id: str,
     trail_pct: float,
+    max_entry_premium: float = 0.005,
     today_tickers: set[str] | None = None,
     tracer=None,
 ) -> int:
@@ -322,6 +323,7 @@ def _place_intraday_trades(
             entry_price=p["entry_price"],
             target_price=p["target_price"],
             stop_price=p["stop_loss"],
+            max_entry_premium=max_entry_premium,
         )
         if order_id is None:
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
@@ -496,6 +498,7 @@ def main() -> None:
         # Positions are written under premarket_session_id — the day-level data key.
         count = _place_intraday_trades(
             proposals, {v["ticker"] for v in approved}, premarket_session_id, params.trail_pct,
+            params.max_entry_premium,
             today_tickers=today_tickers,
             tracer=tracer,
         )

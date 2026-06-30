@@ -90,6 +90,34 @@ def _entry_timing_pct(entry: float, day_high: float, day_low: float) -> float | 
     return round(max(0.0, min(100.0, (day_high - entry) / rng * 100)), 1)
 
 
+def entry_premium_pct(price: float, day_open: float) -> float | None:
+    """
+    Fraction the entry price sits above the day's open.
+    Positive = entering above the open (chasing the move); negative = below it.
+    Returns None when the price or open is missing/invalid.
+    """
+    if not price or price <= 0 or not day_open or day_open <= 0:
+        return None
+    return (price - day_open) / day_open
+
+
+def is_chasing_entry(price: float, day_open: float, max_premium: float) -> bool:
+    """
+    True if the entry price is more than `max_premium` above the day's open.
+
+    Entering after a name has already run up off the open is the dominant execution
+    drag (see design/why-we-are-losing-plain-english.md). Fails safe: a non-positive
+    max_premium disables the guard, and an unknown open returns False so the guard
+    never blocks an entry on missing data.
+    """
+    if not max_premium or max_premium <= 0:
+        return False
+    prem = entry_premium_pct(price, day_open)
+    if prem is None:
+        return False
+    return prem > max_premium
+
+
 def _r_multiple(realized_pnl: float, entry: float, stop: float, shares: int) -> float | None:
     """
     R-multiple = realized_pnl / initial_risk.

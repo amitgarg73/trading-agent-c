@@ -95,6 +95,22 @@ def get_live_price(ticker: str) -> Optional[float]:
     return None
 
 
+def get_day_open(ticker: str) -> Optional[float]:
+    """
+    Return today's regular-session OPEN price for a ticker, or None on failure.
+    Used by the entry-chase guard to skip entries that have already run up off the
+    open. Returns None (guard fails safe) before the open or on any data error.
+    """
+    try:
+        from alpaca.data.requests import StockSnapshotRequest
+        snap = _dclient().get_stock_snapshot(StockSnapshotRequest(symbol_or_symbols=[ticker])).get(ticker)
+        if snap and getattr(snap, "daily_bar", None) and float(snap.daily_bar.open) > 0:
+            return round(float(snap.daily_bar.open), 4)
+    except Exception as e:
+        print(f"  [alpaca] get_day_open({ticker}): {e}")
+    return None
+
+
 # ── Orders ─────────────────────────────────────────────────────────────────────
 
 def submit_bracket_order(
@@ -103,6 +119,7 @@ def submit_bracket_order(
     entry_price:  float,
     target_price: float,
     stop_price:   float,
+    max_entry_premium: float = 0.0,
 ) -> tuple[Optional[str], Optional[float]]:
     """
     Submit a bracket order (limit entry + take-profit + stop-loss).
@@ -138,6 +155,18 @@ def submit_bracket_order(
                     print(f"  [alpaca] {ticker} STALENESS GATE: ask ${ask:.2f} is "
                           f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skipping order")
                     return None, None
+                # Entry-chase guard: skip if the stock has already run up off the day's
+                # open. Late entries above the open are the dominant execution drag
+                # (design/why-we-are-losing-plain-english.md). Inactive when
+                # max_entry_premium <= 0, or before the open (day_open unknown).
+                if max_entry_premium and max_entry_premium > 0:
+                    from core.scoring import is_chasing_entry
+                    day_open = get_day_open(ticker)
+                    if is_chasing_entry(ask, day_open, max_entry_premium):
+                        print(f"  [alpaca] {ticker} CHASE GATE: ask ${ask:.2f} is "
+                              f"{(ask-day_open)/day_open:.1%} above day open ${day_open:.2f} "
+                              f"(max {max_entry_premium:.1%}) — skipping order")
+                        return None, None
                 stop_pct   = (entry_price - stop_price)  / entry_price
                 target_pct = (target_price - entry_price) / entry_price
                 limit_px   = round(ask * 1.001, 2)   # 0.1% buffer ensures fill even on minor ask movement
