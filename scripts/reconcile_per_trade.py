@@ -24,7 +24,7 @@ import math
 import os
 import urllib.request
 
-ARGUS_URL = "https://argusobs.vercel.app"
+ARGUS_URL = "https://provyai.vercel.app"
 EXCLUDE_EXITS = {"test_cleanup", "unfilled"}  # not real executed trades
 
 
