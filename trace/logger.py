@@ -14,7 +14,7 @@ try:
     from opentelemetry import trace as otel_trace
     from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.trace import NonRecordingSpan, set_span_in_context
+    from opentelemetry.trace import NonRecordingSpan, set_span_in_context, Status, StatusCode
     import opentelemetry.context as otel_ctx
 except ImportError as _e:  # pragma: no cover
     raise ImportError(
@@ -518,6 +518,13 @@ class TraceLogger:
             context=parent_ctx,
             attributes=attrs,
         )
+        # Error steps must carry OTel ERROR status. The Argus ingest gateway derives the trace
+        # outcome (and the error message) from span STATUS, not from attributes — so without this
+        # an error trace is stored as outcome='success' with a null error, invisible to every
+        # detector, the diagnosis, and the blind-spot check.
+        if step_type == "error" or fields.get("outcome") == "error":
+            span.set_status(Status(StatusCode.ERROR,
+                                   str(fields.get("error") or fields.get("outcome") or "error")))
         span.end()
 
         sc = span.get_span_context()

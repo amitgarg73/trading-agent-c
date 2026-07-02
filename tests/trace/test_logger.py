@@ -172,6 +172,21 @@ class TestLogError:
         assert attrs["argus.error"] == "JSON parse failed"
         assert attrs["argus.outcome"] == "error"
 
+    def test_error_span_carries_otel_error_status(self, tracer, mock_argus_exporter):
+        # The ingest gateway derives ag_traces.outcome from span STATUS, not attributes —
+        # so an error step must set OTel ERROR status or it lands as outcome='success'.
+        from opentelemetry.trace import StatusCode
+        tracer.log_error("research", "JSON parse failed")
+        span = _trace_spans(mock_argus_exporter)[-1]
+        assert span.status.status_code == StatusCode.ERROR
+        assert "JSON parse failed" in (span.status.description or "")
+
+    def test_non_error_span_has_no_error_status(self, tracer, mock_argus_exporter):
+        from opentelemetry.trace import StatusCode
+        tracer.log_agent_message("research", "reasoning", "approved")
+        span = _trace_spans(mock_argus_exporter)[-1]
+        assert span.status.status_code != StatusCode.ERROR
+
 
 # ── log_tokens ────────────────────────────────────────────────────────────────
 
