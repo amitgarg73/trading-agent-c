@@ -343,35 +343,38 @@ def submit_trailing_stop(ticker: str, shares: int, trail_pct: float) -> Optional
         return None
 
 
-def submit_opening_order(ticker: str, shares: int, limit_price: Optional[float] = None) -> Optional[str]:
+def submit_opening_order(ticker: str, shares: int, limit_price: Optional[float] = None,
+                         on_open: bool = True) -> Optional[str]:
     """
-    Submit an opening-auction BUY: market-on-open by default, limit-on-open if limit_price is given.
+    Submit an entry BUY. Default (on_open=True) uses TimeInForce.OPG so the fill is the regular-session
+    open — market-on-open, or limit-on-open if limit_price is given. OPG must be submitted before the
+    ~09:28 ET auction cutoff and cannot be a bracket, so protection attaches AFTER the fill via
+    submit_trailing_stop, as the chase path already does post-fill.
 
-    TimeInForce.OPG fills at the regular-session open. It must be submitted before the ~09:28 ET
-    auction cutoff and cannot be a bracket, so protection (trailing stop / target) is attached AFTER
-    the fill via submit_trailing_stop, exactly as the chase path already does post-fill.
-
-    There is deliberately NO chase or staleness gate here: entering at the open is the discipline
-    (validated in entry_backtest.py / entry_backtest_premarket.py), so there is nothing to veto.
-    Returns the order id, or None on failure.
+    on_open=False submits a same-day (DAY) order instead — the near-open FALLBACK used only when
+    premarket missed the auction window, so a premarket miss does not cost the whole day. Same code,
+    no chase/staleness gate; entering near the open is still the discipline. Returns the order id or None.
     """
     from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
     from alpaca.trading.enums import OrderSide, TimeInForce
+    tif = TimeInForce.OPG if on_open else TimeInForce.DAY
     try:
         if limit_price is not None:
             req = LimitOrderRequest(
                 symbol=ticker, qty=shares, side=OrderSide.BUY,
-                time_in_force=TimeInForce.OPG, limit_price=round(limit_price, 2),
+                time_in_force=tif, limit_price=round(limit_price, 2),
                 client_order_id=_order_id(ticker),
             )
         else:
             req = MarketOrderRequest(
                 symbol=ticker, qty=shares, side=OrderSide.BUY,
-                time_in_force=TimeInForce.OPG, client_order_id=_order_id(ticker),
+                time_in_force=tif, client_order_id=_order_id(ticker),
             )
         order = _client().submit_order(req)
-        kind = "LOO" if limit_price is not None else "MOO"
-        print(f"  [alpaca] Opening order ({kind}): {ticker} {shares}sh → {order.id}")
+        kind = ("LOO" if limit_price is not None else "MOO") if on_open else \
+               ("limit" if limit_price is not None else "market")
+        print(f"  [alpaca] {'Opening' if on_open else 'Near-open fallback'} order ({kind}): "
+              f"{ticker} {shares}sh → {order.id}")
         return str(order.id)
     except Exception as e:
         print(f"  [alpaca] submit_opening_order({ticker}): {e}")

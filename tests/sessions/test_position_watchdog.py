@@ -151,3 +151,28 @@ class TestReconcileOpeningOrders:
 
         assert n == 0
         trail.assert_not_called()
+
+
+class TestMaybeOpeningFallback:
+    """Near-open recovery: only 9:30-9:45, only when premarket produced no session."""
+
+    def test_skips_outside_window(self):
+        from sessions.position_watchdog import _maybe_opening_fallback
+        assert _maybe_opening_fallback(time(10, 30), MagicMock()) is False
+
+    def test_skips_when_premarket_session_exists(self):
+        from sessions.position_watchdog import _maybe_opening_fallback
+        with patch("sessions.position_watchdog.get_premarket_session_id", return_value="sess-1"):
+            assert _maybe_opening_fallback(time(9, 35), MagicMock()) is False
+
+    def test_runs_funnel_and_market_entry_when_premarket_missing(self):
+        from sessions.position_watchdog import _maybe_opening_fallback
+        trades = [{"ticker": "AAPL"}]
+        with patch("sessions.position_watchdog.get_premarket_session_id", return_value=None), \
+             patch("agents.orchestrator.run_premarket_pipeline",
+                   return_value={"trades": trades, "session_meta": {"terminal_reason": "ok"}}), \
+             patch("sessions.premarket._execute_opening_orders", return_value=1) as ex, \
+             patch("trace.logger.TraceLogger"):
+            ran = _maybe_opening_fallback(time(9, 35), MagicMock())
+        assert ran is True
+        assert ex.call_args.kwargs.get("on_open") is False   # near-open MARKET entry, not OPG
