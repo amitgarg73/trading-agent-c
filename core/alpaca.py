@@ -343,6 +343,41 @@ def submit_trailing_stop(ticker: str, shares: int, trail_pct: float) -> Optional
         return None
 
 
+def submit_opening_order(ticker: str, shares: int, limit_price: Optional[float] = None) -> Optional[str]:
+    """
+    Submit an opening-auction BUY: market-on-open by default, limit-on-open if limit_price is given.
+
+    TimeInForce.OPG fills at the regular-session open. It must be submitted before the ~09:28 ET
+    auction cutoff and cannot be a bracket, so protection (trailing stop / target) is attached AFTER
+    the fill via submit_trailing_stop, exactly as the chase path already does post-fill.
+
+    There is deliberately NO chase or staleness gate here: entering at the open is the discipline
+    (validated in entry_backtest.py / entry_backtest_premarket.py), so there is nothing to veto.
+    Returns the order id, or None on failure.
+    """
+    from alpaca.trading.requests import MarketOrderRequest, LimitOrderRequest
+    from alpaca.trading.enums import OrderSide, TimeInForce
+    try:
+        if limit_price is not None:
+            req = LimitOrderRequest(
+                symbol=ticker, qty=shares, side=OrderSide.BUY,
+                time_in_force=TimeInForce.OPG, limit_price=round(limit_price, 2),
+                client_order_id=_order_id(ticker),
+            )
+        else:
+            req = MarketOrderRequest(
+                symbol=ticker, qty=shares, side=OrderSide.BUY,
+                time_in_force=TimeInForce.OPG, client_order_id=_order_id(ticker),
+            )
+        order = _client().submit_order(req)
+        kind = "LOO" if limit_price is not None else "MOO"
+        print(f"  [alpaca] Opening order ({kind}): {ticker} {shares}sh → {order.id}")
+        return str(order.id)
+    except Exception as e:
+        print(f"  [alpaca] submit_opening_order({ticker}): {e}")
+        return None
+
+
 # ── Positions ──────────────────────────────────────────────────────────────────
 
 def get_position_data(ticker: str) -> Optional[dict]:
