@@ -24,9 +24,26 @@ _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 def _opening_entry_enabled() -> bool:
     """Entry-redesign rollout flag (default OFF). When ON, premarket decides pre-open and submits
-    opening-auction (OPG) orders so the fill is the day's open, and intraday runs management-only.
+    opening orders so the fill is the day's open, and intraday runs management-only.
     Old chase path stays intact when OFF. See design/entry-redesign-premarket-open.md."""
     return os.environ.get("OPENING_ENTRY_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _use_opg_orders() -> bool:
+    """Whether opening entries use OPG (opening-auction) orders.
+
+    OPG fills at the regular-session open, but Alpaca's PAPER environment does not simulate
+    the opening auction, so OPG orders there always expire unfilled (observed 2026-07-02).
+    On paper (the default) submit a market order at the open instead: it fills in continuous
+    trading and still enters at ~the open, which is the entry basis the backtests measured.
+    A live account uses true OPG. Force either way with USE_OPG=1 / USE_OPG=0."""
+    override = os.environ.get("USE_OPG", "").strip().lower()
+    if override in ("1", "true", "yes", "on"):
+        return True
+    if override in ("0", "false", "no", "off"):
+        return False
+    from core.alpaca import _PAPER
+    return not _PAPER
 
 
 def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_entry_premium: float = 0.0, tracer=None) -> None:
@@ -79,7 +96,8 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_e
         }).execute()
 
 
-def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on_open: bool = True) -> int:
+def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on_open: bool = True,
+                            entry_context: str | None = None) -> int:
     """
     Entry redesign (design/entry-redesign-premarket-open.md): submit market-on-open (OPG) orders
     for the decided shortlist BEFORE the ~09:28 ET auction cutoff, so the fill is the day's open —
@@ -125,7 +143,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on
                 "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
                 "open_date":       today,
                 "entry_time":      now_,
-                "entry_context":   "opening_auction" if on_open else "opening_fallback",
+                "entry_context":   entry_context or ("opening_auction" if on_open else "opening_fallback"),
                 "score_at_entry":  trade.get("score_at_entry"),
                 "alpaca_order_id": order_id,
                 "trail_order_id":  None,
@@ -341,16 +359,22 @@ def main(bypass_checks: bool = False) -> None:
         # after 9:30 with live data. (To trade premarket, move the data client to the SIP
         # feed and run the pipeline here instead of deferring.)
         if now_t < _MARKET_OPEN and _opening_entry_enabled():
-            # Entry redesign: decide pre-open and submit opening-auction (OPG) orders so the fill is
-            # the day's open (design/entry-redesign-premarket-open.md). The funnel must produce a
-            # shortlist pre-open (scanner-conviction gate); the post-open watchdog backfills the real
-            # open fill and attaches the trailing stop. No chase; no staleness/chase gate.
+            # Entry redesign: decide pre-open and submit opening orders so the fill is the day's open
+            # (design/entry-redesign-premarket-open.md). The funnel must produce a shortlist pre-open
+            # (scanner-conviction gate); the post-open watchdog backfills the real open fill and
+            # attaches the trailing stop. No chase; no staleness/chase gate. On paper we use a
+            # market-at-open order (OPG is not filled in Alpaca paper); live uses true OPG.
             result   = run_premarket_pipeline(tracer, params)
             result.pop("_v2_market_report", {})
             trades   = result.get("trades", [])
             terminal = result["session_meta"]["terminal_reason"]
-            submitted = _execute_opening_orders(trades, session_id, tracer=tracer) if trades else 0
-            print(f"[premarket] Opening-entry mode: {submitted} OPG order(s) submitted for the 9:30 open.")
+            use_opg  = _use_opg_orders()
+            submitted = _execute_opening_orders(
+                trades, session_id, tracer=tracer, on_open=use_opg,
+                entry_context="opening_auction" if use_opg else "opening_market",
+            ) if trades else 0
+            kind = "OPG" if use_opg else "market-at-open"
+            print(f"[premarket] Opening-entry mode: {submitted} {kind} order(s) submitted for the 9:30 open.")
             tracer.close_session(
                 terminal_reason="opening_orders_submitted" if submitted else terminal,
                 trades_proposed=len(trades),

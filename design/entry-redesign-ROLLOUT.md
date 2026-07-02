@@ -9,6 +9,17 @@ LIVE on paper via the flag `OPENING_ENTRY_ENABLED`. The old chase logic is kept 
 backup (rollback = unset the flag). Not real money (no near-term plan for it), so we run the new
 path as-is on the paper account and watch it.
 
+### Update 2026-07-02 — first live run: two fixes
+1. Crash: the pending_open insert hit a `c_positions.entry_price NOT NULL` constraint (migration
+   `make_entry_price_nullable.sql`) and the order was submitted before the insert, so a DB failure
+   orphaned a live order. Fixed: nullable `entry_price` + cancel-the-order-if-the-insert-fails.
+2. **OPG does not fill on Alpaca paper.** The V market-on-open order was accepted (9:05 ET, before
+   the cutoff) but expired unfilled at 9:31 — Alpaca's paper env does not simulate the opening
+   auction, so OPG/CLS orders always expire. On paper we now submit a **market-at-open DAY order**
+   instead (fills in continuous trading at ~the open, the same entry basis the backtests measured);
+   live uses true OPG. Controlled by `_use_opg_orders()` (default = market-at-open on paper; set
+   `USE_OPG=1` to force OPG). Paper entries are recorded with `entry_context='opening_market'`.
+
 **What changed vs the old behavior**
 - Old (flag OFF): premarket defers; intraday runs the funnel mid-morning and CHASES the ask; the
   chase + staleness gates were rejecting ~100% of entries on up-days → zero trades.

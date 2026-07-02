@@ -177,6 +177,25 @@ class TestExecuteOpeningOrders:
             _execute_opening_orders([_TRADE], _SESSION_ID)
         bracket.assert_not_called()
 
+    def test_market_at_open_path_uses_day_order_and_market_context(self, mock_supabase):
+        # paper path: on_open=False submits a DAY market order and records a distinct context
+        inserted = {}
+
+        def capture_insert(data):
+            inserted.update(data)
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture_insert
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.submit_opening_order", return_value="mkt-1") as sub:
+            n = _execute_opening_orders([_TRADE], _SESSION_ID, on_open=False,
+                                        entry_context="opening_market")
+        assert n == 1
+        assert sub.call_args.kwargs.get("on_open") is False   # DAY market order, not OPG
+        assert inserted.get("entry_context") == "opening_market"
+
 
 class TestOpeningEntryFlag:
     def test_off_by_default(self):
@@ -192,6 +211,36 @@ class TestOpeningEntryFlag:
         for val in ("true", "1", "on", "YES"):
             with patch.dict(os.environ, {"OPENING_ENTRY_ENABLED": val}):
                 assert _opening_entry_enabled() is True
+
+
+class TestUseOpgOrders:
+    """Opening orders default to market-at-open on paper (Alpaca paper never fills OPG),
+    true OPG on live; USE_OPG forces either way."""
+
+    def test_paper_defaults_to_market_at_open(self):
+        import os
+        from sessions.premarket import _use_opg_orders
+        env = {k: v for k, v in os.environ.items() if k != "USE_OPG"}
+        with patch.dict(os.environ, env, clear=True), patch("core.alpaca._PAPER", True):
+            assert _use_opg_orders() is False
+
+    def test_live_defaults_to_opg(self):
+        import os
+        from sessions.premarket import _use_opg_orders
+        env = {k: v for k, v in os.environ.items() if k != "USE_OPG"}
+        with patch.dict(os.environ, env, clear=True), patch("core.alpaca._PAPER", False):
+            assert _use_opg_orders() is True
+
+    def test_override_wins_over_paper_default(self):
+        import os
+        from sessions.premarket import _use_opg_orders
+        with patch("core.alpaca._PAPER", True):
+            for val in ("1", "true", "on"):
+                with patch.dict(os.environ, {"USE_OPG": val}):
+                    assert _use_opg_orders() is True
+            for val in ("0", "false", "off"):
+                with patch.dict(os.environ, {"USE_OPG": val}):
+                    assert _use_opg_orders() is False
 
 
 class TestExecuteTradesRejection:
