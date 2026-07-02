@@ -376,6 +376,14 @@ def main() -> None:
         print(f"[intraday] Outside poll window ({now_t}). Exiting.")
         return
 
+    from sessions.premarket import _opening_entry_enabled
+    if _opening_entry_enabled():
+        # Entry redesign: entries are placed at the open via premarket OPG orders; intraday no longer
+        # opens new positions. Position sync + trailing management run in the watchdog. Management-only.
+        print("[intraday] Opening-entry mode: entries happen at the open (premarket). No intraday "
+              "entries. Exiting.")
+        return
+
     # premarket_session_id is the day-level data key: used for all c_positions
     # reads/writes, PnL, capacity, and deferred trade metadata. It never changes
     # within a trading day. Each intraday poll gets its own session_id for traces.

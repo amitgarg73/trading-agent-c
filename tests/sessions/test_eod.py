@@ -7,6 +7,7 @@ import pytest
 
 from sessions.eod import (
     DailyPerformance,
+    _opening_entry_report,
     build_daily_summary,
     compute_performance,
     force_close_positions,
@@ -685,3 +686,23 @@ class TestReconcilePositions:
 
         mock_get_fill.assert_not_called()
         assert updates_captured.get("exit_reason") == "TARGET"
+
+
+class TestOpeningEntryReport:
+    """EOD entry-basis-vs-open proof metric (opening-entry mode)."""
+
+    def test_empty_when_flag_off(self):
+        with patch("sessions.premarket._opening_entry_enabled", return_value=False):
+            assert _opening_entry_report([{"ticker": "AAPL", "entry_price": 185.0}]) == ""
+
+    def test_reports_basis_when_flag_on(self):
+        with patch("sessions.premarket._opening_entry_enabled", return_value=True), \
+             patch("core.alpaca.get_day_open", return_value=185.0):
+            out = _opening_entry_report([{"ticker": "AAPL", "entry_price": 185.5}])
+        assert "across 1 fill" in out
+        assert "+0.27%" in out
+
+    def test_empty_when_no_entry_prices(self):
+        with patch("sessions.premarket._opening_entry_enabled", return_value=True), \
+             patch("core.alpaca.get_day_open", return_value=None):
+            assert _opening_entry_report([{"ticker": "AAPL", "entry_price": 185.0}]) == ""

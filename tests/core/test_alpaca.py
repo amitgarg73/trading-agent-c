@@ -98,6 +98,45 @@ def _mock_dclient(ticker: str, ask: float):
     return patch("core.alpaca._dclient", mc)
 
 
+class TestSubmitOpeningOrder:
+    def test_market_on_open_by_default(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.return_value = _mock_order(order_id="opg-1")
+            from core.alpaca import submit_opening_order
+            oid = submit_opening_order("AAPL", 10)
+        assert oid == "opg-1"
+        from alpaca.trading.enums import TimeInForce
+        req = mc.return_value.submit_order.call_args[0][0]
+        assert req.time_in_force == TimeInForce.OPG
+        assert getattr(req, "limit_price", None) is None  # market-on-open, no limit
+
+    def test_limit_on_open_when_price_given(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.return_value = _mock_order(order_id="opg-2")
+            from core.alpaca import submit_opening_order
+            oid = submit_opening_order("AAPL", 10, limit_price=185.257)
+        assert oid == "opg-2"
+        from alpaca.trading.enums import TimeInForce
+        req = mc.return_value.submit_order.call_args[0][0]
+        assert req.time_in_force == TimeInForce.OPG
+        assert float(req.limit_price) == pytest.approx(185.26)  # rounded to 2dp
+
+    def test_returns_none_on_exception(self):
+        with patch("core.alpaca._client") as mc:
+            mc.return_value.submit_order.side_effect = Exception("rejected")
+            from core.alpaca import submit_opening_order
+            assert submit_opening_order("AAPL", 10) is None
+
+    def test_no_chase_or_staleness_gate(self):
+        # opening orders never consult the day open — there is no gate to trip
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.get_day_open") as gdo:
+            mc.return_value.submit_order.return_value = _mock_order(order_id="opg-3")
+            from core.alpaca import submit_opening_order
+            oid = submit_opening_order("AAPL", 10)
+        assert oid == "opg-3"
+        gdo.assert_not_called()
+
+
 class TestSubmitBracketOrder:
     def test_returns_order_id_and_fill_price_on_fill(self):
         order = _mock_order(status="filled", filled_avg_price=185.20)

@@ -22,6 +22,13 @@ _PREMARKET_END   = time(10, 30) # default — overridable via c_agent_config.pre
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
+def _opening_entry_enabled() -> bool:
+    """Entry-redesign rollout flag (default OFF). When ON, premarket decides pre-open and submits
+    opening-auction (OPG) orders so the fill is the day's open, and intraday runs management-only.
+    Old chase path stays intact when OFF. See design/entry-redesign-premarket-open.md."""
+    return os.environ.get("OPENING_ENTRY_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_entry_premium: float = 0.0, tracer=None) -> None:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
     from core.alpaca import submit_bracket_order, submit_trailing_stop
@@ -70,6 +77,58 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_e
             "alpaca_order_id": order_id,
             "trail_order_id":  trail_order_id,
         }).execute()
+
+
+def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None) -> int:
+    """
+    Entry redesign (design/entry-redesign-premarket-open.md): submit market-on-open (OPG) orders
+    for the decided shortlist BEFORE the ~09:28 ET auction cutoff, so the fill is the day's open —
+    the entry basis the backtests showed is worth the whole edge. No chase or staleness gate.
+
+    OPG cannot be a bracket, so the position is written now with the opening order id and NO fill /
+    trailing stop yet; the post-open reconcile (position watchdog) backfills the real open fill and
+    attaches the trailing stop once the auction has printed. Returns the count submitted.
+    """
+    from core.alpaca import submit_opening_order
+    from core.db import get_client
+    today  = date.today().isoformat()
+    now_   = datetime.utcnow().isoformat()
+    client = get_client()
+    submitted = 0
+    for trade in trades:
+        shares = trade.get("shares") or int(trade["position_size"] / trade["entry_price"])
+        if shares <= 0:
+            continue
+        order_id = submit_opening_order(trade["ticker"], shares)  # MOO; limit-on-open optional later
+        if order_id is None:
+            print(f"  [premarket] {trade['ticker']} opening order failed — skipping")
+            if tracer:
+                tracer.log_tool_call(
+                    "orchestrator", "submit_opening_order",
+                    {"ticker": trade["ticker"], "shares": shares},
+                    {"outcome": "failed", "error": "opening order not accepted"},
+                )
+            continue
+        client.table("c_positions").insert({
+            "session_id":      session_id,
+            "ticker":          trade["ticker"],
+            "action":          "BUY",
+            "entry_price":     None,               # backfilled with the real open fill post-open
+            "target_price":    trade["target_price"],
+            "stop_loss":       trade["stop_loss"],
+            "position_size":   trade["position_size"],
+            "shares":          shares,
+            "confidence":      trade["confidence"],
+            "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
+            "open_date":       today,
+            "entry_time":      now_,
+            "entry_context":   "opening_auction",
+            "score_at_entry":  trade.get("score_at_entry"),
+            "alpaca_order_id": order_id,
+            "trail_order_id":  None,
+        }).execute()
+        submitted += 1
+    return submitted
 
 
 def _log_market_eval(session_id: str, v1: dict, v2: dict) -> None:
@@ -267,6 +326,35 @@ def main(bypass_checks: bool = False) -> None:
         # decision to the open; the intraday session runs the full research + entry pipeline
         # after 9:30 with live data. (To trade premarket, move the data client to the SIP
         # feed and run the pipeline here instead of deferring.)
+        if now_t < _MARKET_OPEN and _opening_entry_enabled():
+            # Entry redesign: decide pre-open and submit opening-auction (OPG) orders so the fill is
+            # the day's open (design/entry-redesign-premarket-open.md). The funnel must produce a
+            # shortlist pre-open (scanner-conviction gate); the post-open watchdog backfills the real
+            # open fill and attaches the trailing stop. No chase; no staleness/chase gate.
+            result   = run_premarket_pipeline(tracer, params)
+            result.pop("_v2_market_report", {})
+            trades   = result.get("trades", [])
+            terminal = result["session_meta"]["terminal_reason"]
+            submitted = _execute_opening_orders(trades, session_id, tracer=tracer) if trades else 0
+            print(f"[premarket] Opening-entry mode: {submitted} OPG order(s) submitted for the 9:30 open.")
+            tracer.close_session(
+                terminal_reason="opening_orders_submitted" if submitted else terminal,
+                trades_proposed=len(trades),
+                trades_executed=submitted,
+                result_summary=(
+                    f"{submitted} opening order(s) submitted for the open: "
+                    f"{', '.join(t['ticker'] for t in trades)}" if submitted
+                    else f"No opening orders. {terminal}"
+                ),
+            )
+            send_alert(
+                f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
+                (f"{submitted} opening order(s) submitted for the 9:30 open: "
+                 f"{', '.join(t['ticker'] for t in trades)}." if submitted
+                 else f"No opening orders ({terminal}). {candidate_count} candidates scanned."),
+            )
+            return
+
         if now_t < _MARKET_OPEN:
             print(f"[premarket] Pre-open ({now_et.strftime('%H:%M ET')}) — {candidate_count} candidates "
                   f"scanned; deferring entry decision to market open (intraday).")

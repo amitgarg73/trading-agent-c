@@ -8,6 +8,7 @@ import pytest
 from sessions.premarket import (
     _build_premarket_alert,
     _execute_trades,
+    _execute_opening_orders,
     _existing_session_guard,
     _run_news_analyst,
     _write_session_evals,
@@ -130,6 +131,60 @@ class TestExecuteTrades:
             _execute_trades([_TRADE], _SESSION_ID, 0.008)
         assert inserted.get("status") == "open"
 
+class TestExecuteOpeningOrders:
+    _OPG_OK = patch("core.alpaca.submit_opening_order", return_value="opg-1")
+
+    def test_submits_and_writes_pending_open(self, mock_supabase):
+        inserted = {}
+
+        def capture_insert(data):
+            inserted.update(data)
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture_insert
+        mock_supabase.table.return_value = q
+
+        with self._OPG_OK:
+            n = _execute_opening_orders([_TRADE], _SESSION_ID)
+        assert n == 1
+        assert inserted.get("status") == "pending_open"        # post-open reconcile flips to open
+        assert inserted.get("entry_price") is None             # backfilled with the real open fill
+        assert inserted.get("entry_context") == "opening_auction"
+        assert inserted.get("trail_order_id") is None          # trailing stop attached post-open
+        assert inserted.get("alpaca_order_id") == "opg-1"
+
+    def test_skips_when_opening_order_fails(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        with patch("core.alpaca.submit_opening_order", return_value=None):
+            n = _execute_opening_orders([_TRADE], _SESSION_ID)
+        assert n == 0
+
+    def test_no_bracket_or_staleness_gate_used(self, mock_supabase):
+        # opening-order path must not call the gated bracket submitter
+        mock_supabase.table.return_value = make_query([])
+        with self._OPG_OK, patch("core.alpaca.submit_bracket_order") as bracket:
+            _execute_opening_orders([_TRADE], _SESSION_ID)
+        bracket.assert_not_called()
+
+
+class TestOpeningEntryFlag:
+    def test_off_by_default(self):
+        import os
+        from sessions.premarket import _opening_entry_enabled
+        env = {k: v for k, v in os.environ.items() if k != "OPENING_ENTRY_ENABLED"}
+        with patch.dict(os.environ, env, clear=True):
+            assert _opening_entry_enabled() is False
+
+    def test_on_when_truthy(self):
+        import os
+        from sessions.premarket import _opening_entry_enabled
+        for val in ("true", "1", "on", "YES"):
+            with patch.dict(os.environ, {"OPENING_ENTRY_ENABLED": val}):
+                assert _opening_entry_enabled() is True
+
+
+class TestExecuteTradesRejection:
     def test_skips_rejected_order(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):

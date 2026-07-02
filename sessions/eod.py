@@ -333,6 +333,33 @@ def build_daily_summary(
     return "\n".join(lines)
 
 
+def _opening_entry_report(trades: list[dict]) -> str:
+    """Proof metric for the entry redesign (design/entry-redesign-premarket-open.md): average entry
+    price vs the day's open across today's fills. In opening-entry mode every entry is an opening
+    auction, so the basis should trend to ~0 (chasing ran ~+1.6%). Returns '' when the flag is off or
+    no basis can be computed. Best-effort; never blocks the EOD alert."""
+    try:
+        from sessions.premarket import _opening_entry_enabled
+        if not _opening_entry_enabled():
+            return ""
+        from core.alpaca import get_day_open
+        bases = []
+        for t in trades:
+            ep = t.get("entry_price")
+            if not ep:
+                continue
+            op = get_day_open(t["ticker"])
+            if op:
+                bases.append(float(ep) / op - 1.0)
+        if not bases:
+            return ""
+        avg = sum(bases) / len(bases)
+        return (f"\n\nEntry basis vs open: {avg * 100:+.2f}% across {len(bases)} fill(s)  "
+                f"[target ~0; the old chase ran ~+1.6% above open]")
+    except Exception as e:
+        return f"\n\n(entry-basis report unavailable: {e})"
+
+
 def main() -> None:
     from agents.learning_agent import run_learning_agent
 
@@ -443,7 +470,7 @@ def main() -> None:
         f"{alert_prefix}Strategy C — EOD {now_et.strftime('%Y-%m-%d')} "
         f"({pnl_sign}${perf.realized_pnl:.2f})"
     )
-    send_alert(subject, build_daily_summary(perf, trades, learnings))
+    send_alert(subject, build_daily_summary(perf, trades, learnings) + _opening_entry_report(trades))
 
     # Finalize session
     pnl_sign = "+" if perf.realized_pnl >= 0 else ""
