@@ -50,7 +50,7 @@ def _reconcile_opening_orders(trail_pct: float) -> int:
     position is not re-touched. Returns the count reconciled.
     """
     from core.db import get_client
-    from core.alpaca import get_bracket_status, submit_trailing_stop
+    from core.alpaca import get_bracket_status, submit_trailing_stop, get_day_open
     client = get_client()
     rows = (
         client.table("c_positions").select("*")
@@ -70,7 +70,9 @@ def _reconcile_opening_orders(trail_pct: float) -> int:
         client.table("c_positions").update(
             {"entry_price": fill, "status": "open", "trail_order_id": trail_id}
         ).eq("id", pos["id"]).execute()
-        print(f"[watchdog] {pos['ticker']} opening fill ${fill:.2f} — position open, trail attached.")
+        op = get_day_open(pos["ticker"])
+        basis = f" ({(fill / op - 1) * 100:+.2f}% vs open)" if op else ""
+        print(f"[watchdog] {pos['ticker']} opening fill ${fill:.2f}{basis} — position open, trail attached.")
         reconciled += 1
     return reconciled
 
