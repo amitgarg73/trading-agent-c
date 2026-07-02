@@ -38,6 +38,24 @@ _WORKFLOW_ID  = _load_env_var("WORKFLOW_ID")
 _ARGUS_URL    = _load_env_var("ARGUS_URL").rstrip("/")
 _ARGUS_API_KEY = _load_env_var("ARGUS_API_KEY")
 
+
+def _emit_enabled() -> bool:
+    """Whether telemetry may be sent to Provy.
+
+    Requires ARGUS_URL + ARGUS_API_KEY AND an explicit opt-in, so a local or
+    agent-driven run never writes to production Provy just because a .env carries
+    prod credentials. Opt-in is PROVY_EMIT (truthy). GitHub Actions is treated as
+    an automatic opt-in so the scheduled prod workflows keep reporting with no
+    extra config. Default off: dev and ad-hoc runs stay silent.
+    """
+    if not (_ARGUS_URL and _ARGUS_API_KEY):
+        return False
+    if os.environ.get("PROVY_EMIT", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    if os.environ.get("GITHUB_ACTIONS", "").strip().lower() == "true":
+        return True
+    return False
+
 # Token cost per million tokens (Anthropic pricing, mid-2026)
 _COST_PER_MTOK: dict[str, dict[str, float]] = {
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cache_read": 0.08,  "cache_write": 1.00},
@@ -63,14 +81,14 @@ def _estimate_cost(
 
 def _ingest_post(path: str, payload: dict) -> None:
     """Fire-and-forget POST to Argus ingest API. Non-fatal on any error."""
-    if not _ARGUS_URL or not _ARGUS_API_KEY:
+    if not _emit_enabled():
         return
     _ingest_post_raw(path, json.dumps(payload).encode())
 
 
 def _ingest_post_raw(path: str, data: bytes) -> None:
     """Fire-and-forget POST with pre-encoded bytes. Non-fatal on any error."""
-    if not _ARGUS_URL or not _ARGUS_API_KEY:
+    if not _emit_enabled():
         return
     try:
         req = urllib.request.Request(
@@ -86,7 +104,7 @@ def _ingest_post_raw(path: str, data: bytes) -> None:
 
 def _ingest_patch(path: str, payload: dict) -> None:
     """Fire-and-forget PATCH to Argus ingest API. Non-fatal on any error."""
-    if not _ARGUS_URL or not _ARGUS_API_KEY:
+    if not _emit_enabled():
         return
     try:
         data = json.dumps(payload).encode()
@@ -103,7 +121,7 @@ def _ingest_patch(path: str, payload: dict) -> None:
 
 def _ingest_get(path: str, params: dict) -> dict:
     """GET from Argus ingest API. Returns parsed JSON or {} on any error."""
-    if not _ARGUS_URL or not _ARGUS_API_KEY:
+    if not _emit_enabled():
         return {}
     try:
         from urllib.parse import urlencode
@@ -151,7 +169,7 @@ class TraceLogger:
         # don't bleed across concurrent sessions.
         from trace.otel_exporter import ArgusExporter
         self._otel_provider = TracerProvider()
-        if _ARGUS_URL and _ARGUS_API_KEY:
+        if _emit_enabled():
             self._otel_provider.add_span_processor(
                 SimpleSpanProcessor(ArgusExporter(api_key=_ARGUS_API_KEY, endpoint=_ARGUS_URL))
             )
