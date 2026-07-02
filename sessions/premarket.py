@@ -22,6 +22,13 @@ _PREMARKET_END   = time(10, 30) # default — overridable via c_agent_config.pre
 _MARKET_OPEN     = time(9, 30)  # orders only submitted after market opens
 
 
+def _opening_entry_enabled() -> bool:
+    """Entry-redesign rollout flag (default OFF). When ON, premarket decides pre-open and submits
+    opening-auction (OPG) orders so the fill is the day's open, and intraday runs management-only.
+    Old chase path stays intact when OFF. See design/entry-redesign-premarket-open.md."""
+    return os.environ.get("OPENING_ENTRY_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_entry_premium: float = 0.0, tracer=None) -> None:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
     from core.alpaca import submit_bracket_order, submit_trailing_stop
@@ -319,6 +326,35 @@ def main(bypass_checks: bool = False) -> None:
         # decision to the open; the intraday session runs the full research + entry pipeline
         # after 9:30 with live data. (To trade premarket, move the data client to the SIP
         # feed and run the pipeline here instead of deferring.)
+        if now_t < _MARKET_OPEN and _opening_entry_enabled():
+            # Entry redesign: decide pre-open and submit opening-auction (OPG) orders so the fill is
+            # the day's open (design/entry-redesign-premarket-open.md). The funnel must produce a
+            # shortlist pre-open (scanner-conviction gate); the post-open watchdog backfills the real
+            # open fill and attaches the trailing stop. No chase; no staleness/chase gate.
+            result   = run_premarket_pipeline(tracer, params)
+            result.pop("_v2_market_report", {})
+            trades   = result.get("trades", [])
+            terminal = result["session_meta"]["terminal_reason"]
+            submitted = _execute_opening_orders(trades, session_id, tracer=tracer) if trades else 0
+            print(f"[premarket] Opening-entry mode: {submitted} OPG order(s) submitted for the 9:30 open.")
+            tracer.close_session(
+                terminal_reason="opening_orders_submitted" if submitted else terminal,
+                trades_proposed=len(trades),
+                trades_executed=submitted,
+                result_summary=(
+                    f"{submitted} opening order(s) submitted for the open: "
+                    f"{', '.join(t['ticker'] for t in trades)}" if submitted
+                    else f"No opening orders. {terminal}"
+                ),
+            )
+            send_alert(
+                f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
+                (f"{submitted} opening order(s) submitted for the 9:30 open: "
+                 f"{', '.join(t['ticker'] for t in trades)}." if submitted
+                 else f"No opening orders ({terminal}). {candidate_count} candidates scanned."),
+            )
+            return
+
         if now_t < _MARKET_OPEN:
             print(f"[premarket] Pre-open ({now_et.strftime('%H:%M ET')}) — {candidate_count} candidates "
                   f"scanned; deferring entry decision to market open (intraday).")

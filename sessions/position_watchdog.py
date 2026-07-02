@@ -42,6 +42,39 @@ def _execute_pending_trades(premarket_session_id: str, trail_pct: float) -> None
     ).eq("id", premarket_session_id).execute()
 
 
+def _reconcile_opening_orders(trail_pct: float) -> int:
+    """
+    Post-open reconcile for opening-auction (OPG) entries. For each 'pending_open' position, read the
+    real open fill, backfill entry_price, attach the trailing stop, and flip status to 'open'. Runs
+    only in opening-entry mode. Idempotent: an unfilled order is retried next cycle; an already-open
+    position is not re-touched. Returns the count reconciled.
+    """
+    from core.db import get_client
+    from core.alpaca import get_bracket_status, submit_trailing_stop
+    client = get_client()
+    rows = (
+        client.table("c_positions").select("*")
+        .eq("status", "pending_open").eq("open_date", date.today().isoformat())
+        .execute().data
+    ) or []
+    reconciled = 0
+    for pos in rows:
+        oid = pos.get("alpaca_order_id")
+        if not oid:
+            continue
+        fill = get_bracket_status(oid).get("entry_price")
+        if not fill:
+            print(f"[watchdog] {pos['ticker']} opening order not filled yet — retry next cycle.")
+            continue
+        trail_id = submit_trailing_stop(pos["ticker"], pos["shares"], trail_pct)
+        client.table("c_positions").update(
+            {"entry_price": fill, "status": "open", "trail_order_id": trail_id}
+        ).eq("id", pos["id"]).execute()
+        print(f"[watchdog] {pos['ticker']} opening fill ${fill:.2f} — position open, trail attached.")
+        reconciled += 1
+    return reconciled
+
+
 def main() -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
@@ -67,8 +100,14 @@ def main() -> None:
 
     params = load_params()
 
-    # Execute any premarket trades deferred until 9:45 AM (opening volatility settled)
-    if now_t >= time(9, 45):
+    from sessions.premarket import _opening_entry_enabled
+    if _opening_entry_enabled():
+        # Opening-entry mode: backfill OPG fills + attach trailing stops. No deferred chase execution.
+        n = _reconcile_opening_orders(params.trail_pct)
+        if n:
+            print(f"[watchdog] Reconciled {n} opening position(s).")
+    elif now_t >= time(9, 45):
+        # Old path: execute premarket trades deferred until 9:45 AM (opening volatility settled).
         _execute_pending_trades(premarket_session_id, params.trail_pct)
 
     _sync_positions(premarket_session_id, params.trail_pct)

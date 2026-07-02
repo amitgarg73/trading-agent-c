@@ -168,6 +168,22 @@ class TestExecuteOpeningOrders:
         bracket.assert_not_called()
 
 
+class TestOpeningEntryFlag:
+    def test_off_by_default(self):
+        import os
+        from sessions.premarket import _opening_entry_enabled
+        env = {k: v for k, v in os.environ.items() if k != "OPENING_ENTRY_ENABLED"}
+        with patch.dict(os.environ, env, clear=True):
+            assert _opening_entry_enabled() is False
+
+    def test_on_when_truthy(self):
+        import os
+        from sessions.premarket import _opening_entry_enabled
+        for val in ("true", "1", "on", "YES"):
+            with patch.dict(os.environ, {"OPENING_ENTRY_ENABLED": val}):
+                assert _opening_entry_enabled() is True
+
+
 class TestExecuteTradesRejection:
     def test_skips_rejected_order(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])

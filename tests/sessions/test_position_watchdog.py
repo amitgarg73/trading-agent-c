@@ -109,3 +109,45 @@ class TestExecutePendingTrades:
             _execute_pending_trades("sess-001", 0.025)
 
         mock_exec.assert_not_called()
+
+
+class TestReconcileOpeningOrders:
+    """position_watchdog._reconcile_opening_orders — backfill OPG fills + attach trailing stops."""
+
+    def test_backfills_fill_attaches_trail_flips_open(self, mock_supabase):
+        from tests.conftest import make_query
+        pending = {"id": "p1", "ticker": "AAPL", "shares": 10,
+                   "alpaca_order_id": "opg-1", "status": "pending_open"}
+        updated = {}
+
+        def capture_update(data):
+            updated.update(data)
+            return make_query([])
+
+        q = make_query([pending])
+        q.update.side_effect = capture_update
+        mock_supabase.table.return_value = q
+
+        with patch("core.alpaca.get_bracket_status", return_value={"entry_price": 185.2}), \
+             patch("core.alpaca.submit_trailing_stop", return_value="trail-1"):
+            from sessions.position_watchdog import _reconcile_opening_orders
+            n = _reconcile_opening_orders(0.015)
+
+        assert n == 1
+        assert updated.get("status") == "open"
+        assert updated.get("entry_price") == 185.2
+        assert updated.get("trail_order_id") == "trail-1"
+
+    def test_skips_unfilled_order(self, mock_supabase):
+        from tests.conftest import make_query
+        pending = {"id": "p1", "ticker": "AAPL", "shares": 10,
+                   "alpaca_order_id": "opg-1", "status": "pending_open"}
+        mock_supabase.table.return_value = make_query([pending])
+
+        with patch("core.alpaca.get_bracket_status", return_value={"entry_price": None}), \
+             patch("core.alpaca.submit_trailing_stop") as trail:
+            from sessions.position_watchdog import _reconcile_opening_orders
+            n = _reconcile_opening_orders(0.015)
+
+        assert n == 0
+        trail.assert_not_called()
