@@ -225,9 +225,9 @@ describe("runNewsAnalyst", () => {
     const spans: OtelSpan[] = spanLines.map((l) =>
       JSON.parse(l.replace("OTEL_SPAN: ", "")) as OtelSpan
     );
-    const sessionSpan = spans.find((s) => s.name === "news_analyst.session");
+    const sessionSpan = spans.find((s) => s.name === "news.session");
     expect(sessionSpan).toBeDefined();
-    expect(sessionSpan!.attributes["agent.name"]).toBe("news_analyst");
+    expect(sessionSpan!.attributes["agent.name"]).toBe("news");
     expect(sessionSpan!.attributes["agent.language"]).toBe("typescript");
     expect(sessionSpan!.attributes["session.id"]).toBe(_SESSION_ID);
   });
@@ -243,7 +243,7 @@ describe("runNewsAnalyst", () => {
     const spans: OtelSpan[] = spanLines.map((l) =>
       JSON.parse(l.replace("OTEL_SPAN: ", "")) as OtelSpan
     );
-    const toolSpan = spans.find((s) => s.name === "news_analyst.get_ticker_news");
+    const toolSpan = spans.find((s) => s.name === "news.get_ticker_news");
     expect(toolSpan).toBeDefined();
     expect(toolSpan!.attributes["tool.input.ticker"]).toBe("AAPL");
   });
@@ -297,7 +297,7 @@ describe("runNewsAnalyst", () => {
     const spans: OtelSpan[] = spanLines.map((l) =>
       JSON.parse(l.replace("OTEL_SPAN: ", "")) as OtelSpan
     );
-    const toolSpan = spans.find((s) => s.name === "news_analyst.get_ticker_news");
+    const toolSpan = spans.find((s) => s.name === "news.get_ticker_news");
     expect(toolSpan!.status.code).toBe(2);
   });
 
@@ -383,7 +383,7 @@ describe("runNewsAnalyst", () => {
     const spans: OtelSpan[] = spanLines.map((l) =>
       JSON.parse(l.replace("OTEL_SPAN: ", "")) as OtelSpan
     );
-    const sessionSpan = spans.find((s) => s.name === "news_analyst.session");
+    const sessionSpan = spans.find((s) => s.name === "news.session");
     expect(sessionSpan!.attributes["tokens.input"]).toBe(300);
     expect(sessionSpan!.attributes["tokens.output"]).toBe(250);
   });
