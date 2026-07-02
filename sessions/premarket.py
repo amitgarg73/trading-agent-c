@@ -79,7 +79,7 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_e
         }).execute()
 
 
-def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None) -> int:
+def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on_open: bool = True) -> int:
     """
     Entry redesign (design/entry-redesign-premarket-open.md): submit market-on-open (OPG) orders
     for the decided shortlist BEFORE the ~09:28 ET auction cutoff, so the fill is the day's open —
@@ -99,7 +99,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None) ->
         shares = trade.get("shares") or int(trade["position_size"] / trade["entry_price"])
         if shares <= 0:
             continue
-        order_id = submit_opening_order(trade["ticker"], shares)  # MOO; limit-on-open optional later
+        order_id = submit_opening_order(trade["ticker"], shares, on_open=on_open)  # MOO at open, else near-open market
         if order_id is None:
             print(f"  [premarket] {trade['ticker']} opening order failed — skipping")
             if tracer:
@@ -122,7 +122,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None) ->
             "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
             "open_date":       today,
             "entry_time":      now_,
-            "entry_context":   "opening_auction",
+            "entry_context":   "opening_auction" if on_open else "opening_fallback",
             "score_at_entry":  trade.get("score_at_entry"),
             "alpaca_order_id": order_id,
             "trail_order_id":  None,

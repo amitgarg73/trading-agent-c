@@ -32,6 +32,10 @@ FIRST MINUTE, so we hit the exact open (OPG), not a near-open compromise. Eviden
 - `sessions/position_watchdog._reconcile_opening_orders(...)` — post-open: read the open fill,
   backfill `entry_price`, attach the trailing stop, flip `pending_open → open`. Idempotent.
 - `sessions/intraday.main()` — flag-ON: management-only, exits immediately (no new entries).
+- `sessions/position_watchdog._maybe_opening_fallback(...)` — near-open recovery: ONLY 09:30-09:45 ET
+  and ONLY when premarket produced no session, run the funnel once and enter at market (`on_open=False`,
+  entry_context `opening_fallback`) so a premarket miss does not cost the day. Hard window gate = never a
+  mid-morning chase. Relies on the watchdog cron firing in the 9:30-9:45 window (it runs every ~15 min).
 - `sessions/eod._opening_entry_report(...)` — appends "Entry basis vs open" to the daily alert.
 - Flag helper: `sessions/premarket._opening_entry_enabled()` reads env `OPENING_ENTRY_ENABLED`.
 

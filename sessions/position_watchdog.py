@@ -77,6 +77,42 @@ def _reconcile_opening_orders(trail_pct: float) -> int:
     return reconciled
 
 
+def _maybe_opening_fallback(now_t: time, params) -> bool:
+    """
+    Near-open recovery. When premarket produced NO session today (it failed or did not run) and we are
+    still in the 09:30-09:45 ET window, run the funnel once and enter at market so a premarket miss does
+    not cost the whole day. Hard window gate: it can never become a mid-morning chase. Only fires in
+    opening-entry mode (caller gates on the flag). Creates the day's session, so it runs at most once.
+    Returns True if it ran.
+    """
+    if not (time(9, 30) <= now_t <= time(9, 45)):
+        return False
+    if get_premarket_session_id():
+        return False  # premarket ran (whatever it decided) — do not second-guess it
+    from uuid import uuid4
+    from trace.logger import TraceLogger
+    from agents.orchestrator import run_premarket_pipeline
+    from sessions.premarket import _execute_opening_orders
+    print("[watchdog] Premarket missing — near-open fallback: funnel + market entry (9:30-9:45 window).")
+    session_id = str(uuid4())
+    tracer = TraceLogger(session_id, session_type="premarket")
+    try:
+        result = run_premarket_pipeline(tracer, params)
+        result.pop("_v2_market_report", {})
+        trades = result.get("trades", [])
+        n = _execute_opening_orders(trades, session_id, tracer=tracer, on_open=False) if trades else 0
+        tracer.close_session(
+            terminal_reason="opening_fallback" if n else result["session_meta"]["terminal_reason"],
+            trades_proposed=len(trades), trades_executed=n,
+            result_summary=f"Near-open fallback: {n} market entry(ies).",
+        )
+        print(f"[watchdog] Fallback placed {n} near-open market entry(ies).")
+    except Exception as e:
+        tracer.close_session(terminal_reason="error", result_summary=f"fallback error: {e}")
+        print(f"[watchdog] fallback error: {e}")
+    return True
+
+
 def main() -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
@@ -90,21 +126,26 @@ def main() -> None:
         print(f"[watchdog] Outside poll window ({now_t}). Exiting.")
         return
 
-    premarket_session_id = get_premarket_session_id()
-    if not premarket_session_id:
-        print("[watchdog] No premarket session today. Exiting.")
-        return
-
     protection = check_protection_status()
     if protection.suspended:
         print(f"[watchdog] Protection suspended: {protection.reason}")
         return
 
     params = load_params()
-
     from sessions.premarket import _opening_entry_enabled
-    if _opening_entry_enabled():
-        # Opening-entry mode: backfill OPG fills + attach trailing stops. No deferred chase execution.
+    opening = _opening_entry_enabled()
+
+    premarket_session_id = get_premarket_session_id()
+    if not premarket_session_id:
+        # Opening-entry mode: try the near-open fallback (it creates the day's session on success).
+        if opening and _maybe_opening_fallback(now_t, params):
+            premarket_session_id = get_premarket_session_id()
+        if not premarket_session_id:
+            print("[watchdog] No premarket session today. Exiting.")
+            return
+
+    if opening:
+        # Opening-entry mode: backfill OPG/fallback fills + attach trailing stops. No deferred chase.
         n = _reconcile_opening_orders(params.trail_pct)
         if n:
             print(f"[watchdog] Reconciled {n} opening position(s).")
