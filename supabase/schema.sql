@@ -66,7 +66,7 @@ CREATE TABLE c_positions (
   session_id       UUID NOT NULL,
   ticker           TEXT NOT NULL,
   action           TEXT NOT NULL DEFAULT 'BUY',
-  entry_price      FLOAT NOT NULL,
+  entry_price      FLOAT,                          -- NULL while status='pending_open'; watchdog backfills the real open fill
   target_price     FLOAT NOT NULL,
   stop_loss        FLOAT NOT NULL,
   position_size    FLOAT NOT NULL,

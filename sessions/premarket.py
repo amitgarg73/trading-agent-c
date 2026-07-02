@@ -89,7 +89,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on
     trailing stop yet; the post-open reconcile (position watchdog) backfills the real open fill and
     attaches the trailing stop once the auction has printed. Returns the count submitted.
     """
-    from core.alpaca import submit_opening_order
+    from core.alpaca import submit_opening_order, cancel_order
     from core.db import get_client
     today  = date.today().isoformat()
     now_   = datetime.utcnow().isoformat()
@@ -109,24 +109,38 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on
                     {"outcome": "failed", "error": "opening order not accepted"},
                 )
             continue
-        client.table("c_positions").insert({
-            "session_id":      session_id,
-            "ticker":          trade["ticker"],
-            "action":          "BUY",
-            "entry_price":     None,               # backfilled with the real open fill post-open
-            "target_price":    trade["target_price"],
-            "stop_loss":       trade["stop_loss"],
-            "position_size":   trade["position_size"],
-            "shares":          shares,
-            "confidence":      trade["confidence"],
-            "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
-            "open_date":       today,
-            "entry_time":      now_,
-            "entry_context":   "opening_auction" if on_open else "opening_fallback",
-            "score_at_entry":  trade.get("score_at_entry"),
-            "alpaca_order_id": order_id,
-            "trail_order_id":  None,
-        }).execute()
+        # The order is now live at Alpaca. Record the tracking row so the watchdog can adopt it.
+        # If the insert fails, cancel the order rather than leave a live, untracked position.
+        try:
+            client.table("c_positions").insert({
+                "session_id":      session_id,
+                "ticker":          trade["ticker"],
+                "action":          "BUY",
+                "entry_price":     None,               # backfilled with the real open fill post-open
+                "target_price":    trade["target_price"],
+                "stop_loss":       trade["stop_loss"],
+                "position_size":   trade["position_size"],
+                "shares":          shares,
+                "confidence":      trade["confidence"],
+                "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
+                "open_date":       today,
+                "entry_time":      now_,
+                "entry_context":   "opening_auction" if on_open else "opening_fallback",
+                "score_at_entry":  trade.get("score_at_entry"),
+                "alpaca_order_id": order_id,
+                "trail_order_id":  None,
+            }).execute()
+        except Exception as exc:
+            cancelled = cancel_order(order_id)
+            print(f"  [premarket] {trade['ticker']} position insert failed ({exc}); "
+                  f"cancelled opening order {order_id} (ok={cancelled})")
+            if tracer:
+                tracer.log_tool_call(
+                    "orchestrator", "submit_opening_order",
+                    {"ticker": trade["ticker"], "shares": shares, "order_id": order_id},
+                    {"outcome": "cancelled", "error": f"position insert failed: {exc}"},
+                )
+            continue
         submitted += 1
     return submitted
 
