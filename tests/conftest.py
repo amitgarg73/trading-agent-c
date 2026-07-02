@@ -71,8 +71,13 @@ class RecordingExporter:
 def mock_argus_exporter():
     """Replaces ArgusExporter with RecordingExporter so test can inspect exported spans."""
     recorder = RecordingExporter()
-    # Patch the source module — ArgusExporter is imported inside __init__
-    with patch("trace.otel_exporter.ArgusExporter", return_value=recorder):
+    # Patch the source module — ArgusExporter is imported inside __init__.
+    # Also force the export-gate vars truthy: TraceLogger only wires the span
+    # processor when _ARGUS_URL and _ARGUS_API_KEY are set (correct prod behavior),
+    # so on a runner with no creds (CI) the recorder would never receive spans.
+    with patch("trace.otel_exporter.ArgusExporter", return_value=recorder), \
+         patch("trace.logger._ARGUS_URL", "http://argus.test"), \
+         patch("trace.logger._ARGUS_API_KEY", "test-key"):
         yield recorder
 
 
