@@ -334,6 +334,9 @@ def main(bypass_checks: bool = False) -> None:
     print(f"[premarket] Session {session_id} — {now_et.strftime('%Y-%m-%d %H:%M ET')}")
 
     try:
+        # Guards terminal_reason: once the session is closed successfully, a later failure
+        # (a post-close side-effect) must never re-close it as "error" (Provy #288 mislabel).
+        session_closed = False
         from scanner.scanner import run_scanner
         print("[premarket] Running scanner...")
         candidate_count = run_scanner(scan_date=date.today())
@@ -345,6 +348,7 @@ def main(bypass_checks: bool = False) -> None:
                 terminal_reason="no_candidates",
                 result_summary="Scanner returned 0 candidates. No pipeline run.",
             )
+            session_closed = True
             send_alert(
                 f"Strategy C — No Candidates {now_et.strftime('%Y-%m-%d')}",
                 "Scanner returned 0 results. Market data issue or all tickers filtered.",
@@ -385,6 +389,7 @@ def main(bypass_checks: bool = False) -> None:
                     else f"No opening orders. {terminal}"
                 ),
             )
+            session_closed = True
             send_alert(
                 f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
                 (f"{submitted} opening order(s) submitted for the 9:30 open: "
@@ -403,6 +408,7 @@ def main(bypass_checks: bool = False) -> None:
                     "intraday runs research with live data."
                 ),
             )
+            session_closed = True
             send_alert(
                 f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
                 f"{candidate_count} candidates scanned. Entries deferred to market open — intraday "
@@ -454,16 +460,25 @@ def main(bypass_checks: bool = False) -> None:
             retry_triggered=result["session_meta"].get("retry_triggered", False),
             result_summary=summary,
         )
-        # After close (so terminal_reason is set for the ledger skip-exclusion), trigger the
-        # canonical server judge: per-ticker L4 quality + Outcome Ledger predictions.
-        from evals.outcomes import trigger_server_judge
-        trigger_server_judge(session_id)
-        subject, body = _build_premarket_alert(result, session_id, now_et)
-        send_alert(subject, body)
+        session_closed = True
+        # After close (so terminal_reason is set for the ledger skip-exclusion), run the post-close
+        # side-effects: the canonical server judge and the alert. The session is already closed, so a
+        # failure here must not re-close it or flip terminal_reason to "error" (Provy #288).
+        try:
+            from evals.outcomes import trigger_server_judge
+            trigger_server_judge(session_id)
+            subject, body = _build_premarket_alert(result, session_id, now_et)
+            send_alert(subject, body)
+        except Exception as e:
+            print(f"  [premarket] Post-close side-effect failed (non-fatal, session already closed): {e}")
 
     except Exception as e:
         tracer.log_error("orchestrator", str(e))
-        tracer.close_session(terminal_reason="error", result_summary=f"Error: {e}")
+        # Only mark the session errored if it was not already closed successfully. A failure after a
+        # good close (e.g. a post-close side-effect) must never overwrite a valid terminal_reason
+        # such as skip_propagated with "error" (Provy #288).
+        if not session_closed:
+            tracer.close_session(terminal_reason="error", result_summary=f"Error: {e}")
         send_alert("Strategy C — Premarket Error", str(e))
         raise
 

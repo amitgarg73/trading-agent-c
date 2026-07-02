@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from sessions.premarket import (
+    main,
     _build_premarket_alert,
     _execute_trades,
     _execute_opening_orders,
@@ -63,6 +64,27 @@ _RESULT_NO_TRADES = {
         "retry_triggered": False,
     },
 }
+
+
+class TestPostCloseSideEffectGuard:
+    """A failure in a post-close side-effect (alert / server judge) must never re-close the
+    session or overwrite a valid terminal_reason with 'error' (Provy #288 mislabel)."""
+
+    def test_alert_failure_does_not_overwrite_terminal_reason(self):
+        tracer = MagicMock()
+        # send_alert raises on the success alert, then succeeds for the error alert.
+        with patch("sessions.premarket.load_params", return_value=MagicMock()), \
+             patch("sessions.premarket.uuid4", return_value="sess-guard-1"), \
+             patch("sessions.premarket.TraceLogger", return_value=tracer), \
+             patch("scanner.scanner.run_scanner", return_value=0), \
+             patch("sessions.premarket.send_alert", side_effect=[RuntimeError("alert down"), None]):
+            with pytest.raises(RuntimeError):
+                main(bypass_checks=True)
+
+        # The session was closed once, as no_candidates — never re-closed as "error".
+        reasons = [c.kwargs.get("terminal_reason") for c in tracer.close_session.call_args_list]
+        assert reasons == ["no_candidates"]
+        assert "error" not in reasons
 
 
 class TestRunNewsAnalyst:
