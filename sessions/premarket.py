@@ -72,6 +72,58 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_e
         }).execute()
 
 
+def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None) -> int:
+    """
+    Entry redesign (design/entry-redesign-premarket-open.md): submit market-on-open (OPG) orders
+    for the decided shortlist BEFORE the ~09:28 ET auction cutoff, so the fill is the day's open —
+    the entry basis the backtests showed is worth the whole edge. No chase or staleness gate.
+
+    OPG cannot be a bracket, so the position is written now with the opening order id and NO fill /
+    trailing stop yet; the post-open reconcile (position watchdog) backfills the real open fill and
+    attaches the trailing stop once the auction has printed. Returns the count submitted.
+    """
+    from core.alpaca import submit_opening_order
+    from core.db import get_client
+    today  = date.today().isoformat()
+    now_   = datetime.utcnow().isoformat()
+    client = get_client()
+    submitted = 0
+    for trade in trades:
+        shares = trade.get("shares") or int(trade["position_size"] / trade["entry_price"])
+        if shares <= 0:
+            continue
+        order_id = submit_opening_order(trade["ticker"], shares)  # MOO; limit-on-open optional later
+        if order_id is None:
+            print(f"  [premarket] {trade['ticker']} opening order failed — skipping")
+            if tracer:
+                tracer.log_tool_call(
+                    "orchestrator", "submit_opening_order",
+                    {"ticker": trade["ticker"], "shares": shares},
+                    {"outcome": "failed", "error": "opening order not accepted"},
+                )
+            continue
+        client.table("c_positions").insert({
+            "session_id":      session_id,
+            "ticker":          trade["ticker"],
+            "action":          "BUY",
+            "entry_price":     None,               # backfilled with the real open fill post-open
+            "target_price":    trade["target_price"],
+            "stop_loss":       trade["stop_loss"],
+            "position_size":   trade["position_size"],
+            "shares":          shares,
+            "confidence":      trade["confidence"],
+            "status":          "pending_open",     # post-open reconcile flips to open + attaches trail
+            "open_date":       today,
+            "entry_time":      now_,
+            "entry_context":   "opening_auction",
+            "score_at_entry":  trade.get("score_at_entry"),
+            "alpaca_order_id": order_id,
+            "trail_order_id":  None,
+        }).execute()
+        submitted += 1
+    return submitted
+
+
 def _log_market_eval(session_id: str, v1: dict, v2: dict) -> None:
     """Persist side-by-side V1 (baseline) vs V2 (shadow) market agent results."""
     from core.db import get_client
