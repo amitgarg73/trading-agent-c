@@ -160,6 +160,16 @@ class TestExecuteOpeningOrders:
             n = _execute_opening_orders([_TRADE], _SESSION_ID)
         assert n == 0
 
+    def test_cancels_order_when_position_insert_fails(self, mock_supabase):
+        # A DB failure after the order is live must cancel it, never leave an untracked position.
+        q = make_query([])
+        q.execute.side_effect = Exception('null value in column "entry_price"')
+        mock_supabase.table.return_value = q
+        with self._OPG_OK, patch("core.alpaca.cancel_order", return_value=True) as cancel:
+            n = _execute_opening_orders([_TRADE], _SESSION_ID)
+        assert n == 0
+        cancel.assert_called_once_with("opg-1")
+
     def test_no_bracket_or_staleness_gate_used(self, mock_supabase):
         # opening-order path must not call the gated bracket submitter
         mock_supabase.table.return_value = make_query([])
