@@ -83,7 +83,7 @@ PROPOSAL RULES:
   stop_pct = max(atr_pct * 0.8, 0.5) / 100
   stop_loss = round(entry_price * (1 - stop_pct), 2)
   (0.8× ATR, minimum 0.5% floor — survives normal intraday noise)
-- position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
+- position_size: $3,000 for every proposal (FLAT — confidence does NOT change size)
 
 Return JSON only — no prose:
 {

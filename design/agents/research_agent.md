@@ -79,9 +79,7 @@ entry_price    = live_price if fetched, else current_price from get_candidates
 target_price   = round(entry_price * 1.04, 2)   — +4% ceiling
 stop_loss      = round(entry_price * 0.9933, 2)  — -0.67% floor
 position_size:
-  HIGH   = 3500
-  MEDIUM = 3000
-  LOW    = 2500
+  $3,000 flat for every proposal (confidence does NOT scale size)
 shares         = floor(position_size / entry_price)
 
 CONFIDENCE ASSIGNMENT:

@@ -89,7 +89,7 @@ You decide which tools to call per ticker. Not all are always needed.
 PROPOSAL RULES
 - target_price = round(entry_price * 1.04, 2)
 - stop_loss = round(entry_price * 0.9933, 2)
-- position_size: HIGH=$3,500  MEDIUM=$3,000  LOW=$2,500
+- position_size: $3,000 flat (confidence does not change size)
 - confidence HIGH: score ≥7, above_vwap, rs_vs_spy ≥1.5
 - confidence MEDIUM: score 5-6, or above_vwap with rs_vs_spy ≥0.8
 - confidence LOW: score 5-6, mixed signals
