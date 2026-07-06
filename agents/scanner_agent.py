@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import time
+
 import anthropic
 
-from agents.base import parse_json_response, run_tool_loop
+from agents.base import parse_json_response
 from agents.tools.scanner_tools import (
     filter_and_rank,
     get_gap_ups,
@@ -13,204 +15,186 @@ from agents.tools.scanner_tools import (
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
-_MODEL = "claude-haiku-4-5-20251001"
-_MAX_TURNS        = 12
-_WALL_CLOCK_S     = 90
+# ── Design (Option B, 2026-07-06) ──────────────────────────────────────────────
+# The scanner's data path is deterministic quant screening, so it runs in plain Python:
+# gather (DB + Alpaca reads) -> merge/enrich/dedup -> filter_and_rank. That path cannot time
+# out and costs no tokens. An LLM is used for exactly one thing it is good at: a final
+# qualitative pick of the best thesis setups from the pre-ranked shortlist, plus a rationale.
+# The LLM call is NON-CRITICAL — any failure falls back to the deterministic ranking, so a slow
+# or failed model can never kill the trading day. This replaces the old 5-tool Haiku loop that
+# spent ~90s hand-merging ~125 candidates and timed out (see git history / ce539d9).
+
+_MODEL              = "claude-haiku-4-5-20251001"
+_SELECT_MAX_TOKENS  = 1024
+_MIN_SCORE_FLOOR    = 5     # regime rules never scan below score 5; floor bounds the universe
+_SCAN_TOP_N         = 40    # cap the ranked-input set the merge/rank works over
+_SNAPSHOT_CAP       = 40    # cap premarket enrichment breadth
+_LLM_SHORTLIST      = 15    # how many pre-ranked candidates the LLM chooses among
 
 
-_SYSTEM = """
-You are the Scanner Agent for an intraday trading system. Your job is to select
-the best candidate tickers from today's universe scan for deeper investigation.
+_SELECT_SYSTEM = """
+You are the selection step of a trading scanner. You are given a pre-screened, pre-ranked
+shortlist of candidate tickers plus the market regime and today's leading sectors. The data
+work (screening, enrichment, ranking) is already done.
 
-TOOL SEQUENCE (call all 5 in order):
-1. get_scan_results(min_score)        — read today's scored universe from DB
-2. get_premarket_snapshot(tickers)    — enrich candidates with Alpaca premarket quotes
-3. get_gap_ups(min_gap_pct)          — get additional gap-up movers from Alpaca screener
-4. get_sector_leaders(n=5)           — sector context for bias-aware selection
-5. filter_and_rank(candidates, ...)   — apply quality threshold and dynamic N
+Your job: pick the best thesis setups from the shortlist — never more than max_n — and say why
+in one or two sentences. Prefer names aligned with the leading sectors and the market bias, and
+favour real premarket momentum over a bare technical score. You may return fewer than max_n if
+only a few are genuinely worth investigating.
 
-REGIME RULES (apply based on vix_level in session_params):
-- LOW vix (<15):      momentum regime. min_score=5, max_n=25. Prefer volume surge.
-- ELEVATED vix (15-25): neutral regime. min_score=5, max_n=20. Balanced selection.
-- HIGH vix (>25):     defensive regime. min_score=7, max_n=15. High-quality only.
-- CAUTION decision:   override all — caution_mode=true, max_n=15 regardless of VIX.
-
-MERGE LOGIC (before calling filter_and_rank):
-- Start with scan_results (all tickers from get_scan_results).
-- Enrich with premarket_change_pct from get_premarket_snapshot (match by ticker).
-- Add gap-up movers from get_gap_ups that are NOT already in scan_results (assign
-  technical_score=6 for gap-up-only tickers).
-- Deduplicate by ticker.
-- Pass the merged list to filter_and_rank.
-
-Return JSON only — no prose before or after:
+Rules:
+- Choose ONLY from the shortlist tickers. Never invent a ticker.
+- Return JSON only, no prose before or after:
 {
-  "candidates": [
-    {
-      "ticker": str,
-      "technical_score": int,
-      "premarket_change_pct": float,
-      "price": float | null,
-      "sector": str | null
-    }
-  ],
-  "n_returned": int,
-  "scan_rationale": str,
-  "signals_used": [str],
-  "regime": "low_vix" | "elevated_vix" | "high_vix" | "caution",
-  "dropped_count": int
+  "selected": [str, ...],          // tickers from the shortlist, best first, <= max_n
+  "scan_rationale": str,           // 1-2 sentences on what drove the selection
+  "signals_used": [str, ...]       // e.g. ["technical_score", "premarket_momentum", "sector_rotation"]
 }
-
-ALL SIX TOP-LEVEL FIELDS ARE REQUIRED. Never omit any:
-- regime: set from vix_level in session_params ("low_vix", "elevated_vix", "high_vix", or "caution" if caution_mode)
-- scan_rationale: 1-2 sentences explaining what signals drove selection (e.g. "High premarket momentum stocks in leading sectors; dropped 14 low-score tickers.")
-- dropped_count: total candidates removed by filter_and_rank (the tool returns this value directly)
-Omitting these fields fails downstream quality checks and breaks the audit trail.
 """.strip()
 
 
-_TOOL_SCHEMAS: list[dict] = [
-    {
-        "name": "get_scan_results",
-        "description": (
-            "Read today's technical scores from c_scan_results. "
-            "Call first — provides the base universe ranked by score."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "min_score": {
-                    "type":        "integer",
-                    "description": "Minimum technical score to include (1-10). Default 1 to get all.",
-                }
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "get_premarket_snapshot",
-        "description": (
-            "Batch-fetch Alpaca premarket quote data for the given tickers. "
-            "Returns premarket_change_pct and premarket_price. Call after get_scan_results."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "tickers": {
-                    "type":        "array",
-                    "items":       {"type": "string"},
-                    "description": "List of ticker symbols from scan_results.",
-                }
-            },
-            "required": ["tickers"],
-        },
-    },
-    {
-        "name": "get_gap_ups",
-        "description": (
-            "Fetch Alpaca market screener movers gapping >= min_gap_pct. "
-            "Universe-filtered. Add these to the candidate list if not already present."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "min_gap_pct": {
-                    "type":        "number",
-                    "description": "Minimum gap % (e.g. 2.0). Use 1.5 on CAUTION days.",
-                }
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "get_sector_leaders",
-        "description": "Return top N sector ETFs by 1-day performance for regime context.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "n": {
-                    "type":        "integer",
-                    "description": "Number of top sectors to return. Default 5.",
-                }
-            },
-            "required": [],
-        },
-    },
-    {
-        "name": "filter_and_rank",
-        "description": (
-            "Apply quality threshold and dynamic N to the merged candidate list. "
-            "Call last, after merging scan + gap-up candidates with premarket data. "
-            "Returns final {candidates[], n_returned, dropped_count}."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "candidates": {
-                    "type":        "array",
-                    "description": "Merged, enriched candidate list.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "ticker":               {"type": "string"},
-                            "technical_score":      {"type": "number"},
-                            "premarket_change_pct": {"type": "number"},
-                            "price":                {"type": ["number", "null"]},
-                            "sector":               {"type": ["string", "null"]},
-                        },
-                        "required": ["ticker"],
-                    },
-                },
-                "max_n": {
-                    "type":        "integer",
-                    "description": "Maximum candidates to return. Regime-dependent.",
-                },
-                "min_score": {
-                    "type":        "integer",
-                    "description": "Minimum technical_score. Use 7 for HIGH VIX or CAUTION.",
-                },
-                "caution_mode": {
-                    "type":        "boolean",
-                    "description": "True when market decision is CAUTION. Overrides to min_score=7, max_n=15.",
-                },
-            },
-            "required": ["candidates", "max_n", "min_score", "caution_mode"],
-        },
-    },
-]
+def _regime_bounds(market_report: dict) -> tuple[int, int, bool, str]:
+    """
+    Deterministic regime -> (min_score, max_n, caution_mode, regime_label), mirroring the old
+    prompt's REGIME RULES. Drives both the screening thresholds and the ranking.
+    """
+    if (market_report.get("decision") or "").upper() == "CAUTION":
+        return 7, 15, True, "caution"
+    level = (market_report.get("vix_level") or "ELEVATED").upper()
+    if level == "HIGH":
+        return 7, 15, False, "high_vix"
+    if level == "LOW":
+        return 5, 25, False, "low_vix"
+    return 5, 20, False, "elevated_vix"
 
 
-def _dispatch(name: str, inp: dict) -> dict | list:
-    if name == "get_scan_results":
-        return get_scan_results(inp.get("min_score", 1))
-    if name == "get_premarket_snapshot":
-        return get_premarket_snapshot(inp.get("tickers", []))
-    if name == "get_gap_ups":
-        return get_gap_ups(inp.get("min_gap_pct", 2.0))
-    if name == "get_sector_leaders":
-        return get_sector_leaders(inp.get("n", 5))
-    if name == "filter_and_rank":
-        return filter_and_rank(
-            candidates=inp.get("candidates", []),
-            max_n=inp.get("max_n", 25),
-            min_score=inp.get("min_score", 5),
-            caution_mode=inp.get("caution_mode", False),
-        )
-    return {"error": f"unknown tool: {name}"}
+def _timed(tracer: TraceLogger, name: str, inp: dict, fn):
+    """Call a data tool and log it as a scanner tool_call so the trace stays informative."""
+    t0 = time.monotonic()
+    res = fn()
+    tracer.log_tool_call("scanner", name, inp, res, latency_ms=int((time.monotonic() - t0) * 1000))
+    return res
 
 
-def _build_message(market_report: dict, params: StrategyParams) -> str:
-    vix   = market_report.get("vix_value") or "unknown"
-    level = market_report.get("vix_level") or "ELEVATED"
-    dec   = market_report.get("decision", "GO")
-    bias  = market_report.get("bias", "NEUTRAL")
-    max_p = market_report.get("max_positions", params.max_positions)
-    return (
-        f"Session params:\n"
-        f"  decision={dec}, vix={vix} ({level}), bias={bias}, max_positions={max_p}\n"
-        f"  strategy_min_score={params.strategy_min_score}\n\n"
-        "Call all 5 tools in order, then return the JSON candidate list."
+def _gather_and_rank(tracer: TraceLogger, market_report: dict) -> dict:
+    """
+    The deterministic critical path: gather the universe, enrich with premarket + gap-ups,
+    merge/dedup, and rank. No LLM, no unbounded loop. Returns the ranked candidate list plus
+    the regime bounds and the sector context for the selection step.
+    """
+    min_score, max_n, caution, regime = _regime_bounds(market_report)
+
+    scan = _timed(tracer, "get_scan_results", {"min_score": min_score},
+                  lambda: get_scan_results(min_score))[:_SCAN_TOP_N]
+    tickers = [c["ticker"] for c in scan][:_SNAPSHOT_CAP]
+    premarket = _timed(tracer, "get_premarket_snapshot", {"tickers": tickers},
+                       lambda: get_premarket_snapshot(tickers))
+    pm = {p["ticker"]: p for p in premarket if isinstance(p, dict) and p.get("ticker")}
+
+    min_gap = 1.5 if caution else 2.0
+    gaps = _timed(tracer, "get_gap_ups", {"min_gap_pct": min_gap},
+                  lambda: get_gap_ups(min_gap))
+    sectors = _timed(tracer, "get_sector_leaders", {"n": 5}, lambda: get_sector_leaders(5))
+
+    # Merge: start with the scored universe, enrich with premarket by ticker, add gap-up movers
+    # not already present (assign technical_score=6), dedup by ticker.
+    merged: dict[str, dict] = {}
+    for c in scan:
+        tk = c.get("ticker")
+        if not tk:
+            continue
+        merged[tk] = {
+            "ticker":               tk,
+            "technical_score":      c.get("technical_score", 0),
+            "premarket_change_pct": (pm.get(tk) or {}).get("premarket_change_pct") or 0.0,
+            "price":                c.get("price"),
+            "sector":               c.get("sector"),
+        }
+    for g in gaps:
+        tk = g.get("ticker") if isinstance(g, dict) else None
+        if tk and tk not in merged:
+            merged[tk] = {
+                "ticker":               tk,
+                "technical_score":      6,
+                "premarket_change_pct": g.get("gap_pct") or 0.0,
+                "price":                g.get("price"),
+                "sector":               g.get("sector"),
+            }
+
+    ranked = filter_and_rank(
+        candidates=list(merged.values()), max_n=max_n, min_score=min_score, caution_mode=caution,
     )
+    return {
+        "ranked":   ranked["candidates"],
+        "dropped":  ranked.get("dropped_count", 0),
+        "regime":   regime,
+        "max_n":    max_n,
+        "sectors":  sectors,
+    }
+
+
+def _select_message(shortlist: list[dict], sectors: list[dict], market_report: dict,
+                    regime: str, max_n: int) -> str:
+    lines = "\n".join(
+        f"  {c['ticker']:6s} score={c.get('technical_score', 0)} "
+        f"premkt={c.get('premarket_change_pct', 0.0):+.2f}% sector={c.get('sector') or '?'}"
+        for c in shortlist
+    )
+    sect = ", ".join(
+        f"{s.get('etf', '?')} {s.get('change_pct', 0):+.2f}%"
+        for s in sectors if isinstance(s, dict)
+    ) or "n/a"
+    return (
+        f"Market: decision={market_report.get('decision', 'GO')}, "
+        f"bias={market_report.get('bias', 'NEUTRAL')}, regime={regime}, max_n={max_n}\n"
+        f"Leading sectors: {sect}\n\n"
+        f"Shortlist (pre-ranked, best first):\n{lines}\n\n"
+        "Pick the best thesis setups (<= max_n) and return the JSON."
+    )
+
+
+def _llm_select(client: anthropic.Anthropic, tracer: TraceLogger, ranked: list[dict],
+                sectors: list[dict], market_report: dict, regime: str, max_n: int) -> dict:
+    """One bounded LLM call: qualitative pick + rationale over the pre-ranked shortlist."""
+    shortlist = ranked[:_LLM_SHORTLIST]
+    t0 = time.monotonic()
+    resp = client.messages.create(
+        model=_MODEL,
+        max_tokens=_SELECT_MAX_TOKENS,
+        system=_SELECT_SYSTEM,
+        messages=[{"role": "user", "content": _select_message(shortlist, sectors, market_report, regime, max_n)}],
+    )
+    latency = int((time.monotonic() - t0) * 1000)
+    tracer.log_tokens("scanner", resp.usage)
+    text = next((b.text for b in resp.content if hasattr(b, "text")), "")
+    tracer.log_agent_message(
+        "scanner", text, "completed",
+        tokens_input=resp.usage.input_tokens, tokens_output=resp.usage.output_tokens,
+        model=_MODEL, latency_ms=latency,
+    )
+    parsed = parse_json_response(text)
+    return {
+        "selected":  [t for t in (parsed.get("selected") or []) if isinstance(t, str)],
+        "rationale": parsed.get("scan_rationale") or "",
+        "signals":   [s for s in (parsed.get("signals_used") or []) if isinstance(s, str)],
+    }
+
+
+def _default_rationale(regime: str, n: int) -> str:
+    return (f"Selected {n} top-ranked candidate(s) for the {regime} regime by technical score and "
+            f"premarket momentum.")
+
+
+def _empty_result(rationale: str, regime: str, status: str) -> dict:
+    return {
+        "candidates":     [],
+        "n_returned":     0,
+        "scan_rationale": rationale,
+        "signals_used":   [],
+        "regime":         regime,
+        "dropped_count":  0,
+        "scanner_status": status,
+    }
 
 
 def run_scanner_agent(
@@ -219,48 +203,64 @@ def run_scanner_agent(
     params: StrategyParams,
 ) -> dict:
     """
-    Run the Scanner Agent (claude-haiku-4-5).
-    Returns {candidates[], n_returned, scan_rationale, signals_used, regime, dropped_count}.
-    On any failure returns an empty candidates dict so the pipeline exits cleanly.
+    Run the Scanner (Option B: deterministic screening + one qualitative LLM pick).
+    Returns {candidates[], n_returned, scan_rationale, signals_used, regime, dropped_count,
+    scanner_status}. scanner_status: 'ok' (LLM pick used), 'llm_fallback' (deterministic ranking
+    used because the LLM pick failed), 'error' (the deterministic data path itself failed).
     """
     client = anthropic.Anthropic()
     tracer.start_agent_span("scanner")
 
+    # 1. Deterministic gather + rank — the critical path. Cannot time out; no tokens.
     try:
-        text = run_tool_loop(
-            client=client,
-            model=_MODEL,
-            system=_SYSTEM,
-            tools=_TOOL_SCHEMAS,
-            initial_message=_build_message(market_report, params),
-            dispatch=_dispatch,
-            tracer=tracer,
-            agent_name="scanner",
-            max_turns=_MAX_TURNS,
-            wall_clock_timeout_s=_WALL_CLOCK_S,
-        )
-        result = parse_json_response(text)
-        n = result.get("n_returned", len(result.get("candidates", [])))
-        tracer.log_decision(
-            "scanner",
-            "candidates_selected" if n > 0 else "low_quality_halt",
-            detail={
-                "n_returned":    n,
-                "regime":        result.get("regime"),
-                "dropped_count": result.get("dropped_count", 0),
-                "scan_rationale": result.get("scan_rationale"),
-                "signals_used":   result.get("signals_used"),
-            },
-        )
-        return result
-
+        g = _gather_and_rank(tracer, market_report)
     except Exception as e:
-        tracer.log_error("scanner", str(e))
-        return {
-            "candidates":    [],
-            "n_returned":    0,
-            "scan_rationale": f"scanner_agent error: {e}",
-            "signals_used":  [],
-            "regime":        "unknown",
-            "dropped_count": 0,
-        }
+        tracer.log_error("scanner", f"scan/rank failed: {e}")
+        return _empty_result(f"scanner scan/rank error: {e}", "unknown", "error")
+
+    ranked, regime, max_n = g["ranked"], g["regime"], g["max_n"]
+    if not ranked:
+        tracer.log_decision(
+            "scanner", "low_quality_halt",
+            detail={"n_returned": 0, "regime": regime, "dropped_count": g["dropped"]},
+        )
+        return _empty_result("No candidates passed screening.", regime, "ok")
+
+    # 2. Qualitative LLM pick — non-critical. Any failure falls back to the deterministic ranking,
+    # so a slow or failed model can never kill the day.
+    by_ticker = {c["ticker"]: c for c in ranked}
+    try:
+        pick     = _llm_select(client, tracer, ranked, g["sectors"], market_report, regime, max_n)
+        selected = [by_ticker[t] for t in pick["selected"] if t in by_ticker][:max_n]
+        if not selected:
+            raise ValueError("LLM selected no valid tickers")
+        rationale = pick["rationale"] or _default_rationale(regime, len(selected))
+        signals   = pick["signals"] or ["technical_score", "premarket_momentum"]
+        status    = "ok"
+    except Exception as e:
+        tracer.log_error("scanner", f"LLM selection failed, using deterministic ranking: {e}")
+        selected  = ranked[:max_n]
+        rationale = _default_rationale(regime, len(selected))
+        signals   = ["technical_score", "premarket_momentum"]
+        status    = "llm_fallback"
+
+    tracer.log_decision(
+        "scanner", "candidates_selected",
+        detail={
+            "n_returned":     len(selected),
+            "regime":         regime,
+            "dropped_count":  g["dropped"],
+            "scan_rationale": rationale,
+            "signals_used":   signals,
+            "scanner_status": status,
+        },
+    )
+    return {
+        "candidates":     selected,
+        "n_returned":     len(selected),
+        "scan_rationale": rationale,
+        "signals_used":   signals,
+        "regime":         regime,
+        "dropped_count":  g["dropped"],
+        "scanner_status": status,
+    }

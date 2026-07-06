@@ -25,7 +25,7 @@ def write_premarket_outcome_evals(
     """
     if not os.environ.get("TENANT_ID"):
         return
-    if terminal_reason in ("skip_propagated", "no_candidates", "no_viable_candidates"):
+    if terminal_reason in ("skip_propagated", "no_candidates", "no_viable_candidates", "scanner_error"):
         return
 
     metrics: list[dict] = [

@@ -331,6 +331,31 @@ class TestRunPremarketPipeline:
         assert result["trades"] == []
         assert result["session_meta"]["terminal_reason"] == "no_viable_candidates"
 
+    def test_scanner_error_records_scanner_error_not_benign_skip(self, tracer):
+        # A scanner failure with no recovered candidates must read as scanner_error, not the
+        # benign no_viable_candidates (the mislabel that hid three weeks of scanner timeouts).
+        errored = {**_SCANNER_EMPTY, "scanner_status": "error"}
+        with patch("agents.orchestrator.run_scanner_agent", return_value=errored), \
+             patch("agents.orchestrator.run_market_agent", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent") as mock_res, \
+             patch("agents.orchestrator.run_risk_agent") as mock_risk, \
+             patch("agents.orchestrator.anthropic.Anthropic"):
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        mock_res.assert_not_called()
+        mock_risk.assert_not_called()
+        assert result["session_meta"]["terminal_reason"] == "scanner_error"
+
+    def test_scanner_ok_with_no_candidates_stays_benign(self, tracer):
+        # scanner ran fine and genuinely found nothing — still a benign skip.
+        ok_empty = {**_SCANNER_EMPTY, "scanner_status": "ok"}
+        with patch("agents.orchestrator.run_scanner_agent", return_value=ok_empty), \
+             patch("agents.orchestrator.run_market_agent", return_value=_MARKET_REPORT), \
+             patch("agents.orchestrator.run_research_agent"), \
+             patch("agents.orchestrator.run_risk_agent"), \
+             patch("agents.orchestrator.anthropic.Anthropic"):
+            result = run_premarket_pipeline(tracer, StrategyParams())
+        assert result["session_meta"]["terminal_reason"] == "no_viable_candidates"
+
     def test_scanner_called_with_market_report_and_params(self, tracer):
         client = self._mock_synthesis(_FINAL_CONVERGED)
         params = StrategyParams()

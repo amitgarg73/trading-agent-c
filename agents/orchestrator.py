@@ -205,17 +205,25 @@ def run_premarket_pipeline(
         _fire_news_analyst([c["ticker"] for c in scanner_candidates], tracer.session_id)
 
     if not scanner_candidates:
+        # A scanner that errored is a real failure, not the benign "nothing to trade" routing.
+        # Record it honestly so the session does not read as a clean skip (the mislabel that hid
+        # three weeks of scanner timeouts). scanner_status is set by run_scanner_agent.
+        scanner_failed = scanner_result.get("scanner_status") == "error"
+        reason    = "scanner_error" if scanner_failed else "no_viable_candidates"
+        skip_type = "error" if scanner_failed else "design"
         tracer.log_decision(
-            "orchestrator", "no_viable_candidates",
+            "orchestrator", reason,
             detail={
                 "scanner_rationale": scanner_result.get("scan_rationale", ""),
                 "regime":            scanner_result.get("regime"),
+                "scanner_status":    scanner_result.get("scanner_status"),
             },
         )
-        # No candidates — news, research, risk all skipped by design (expected routing)
+        # Downstream agents did not run. Propagate the failure type: a scanner error marks the
+        # skipped agents as error-caused, not skipped-by-design.
         for agent in ("news", "research", "risk"):
-            tracer.log_skip(agent, reason="no_candidates", skip_type="design")
-        out = _empty_session_output(market_report, "no_viable_candidates")
+            tracer.log_skip(agent, reason=reason, skip_type=skip_type)
+        out = _empty_session_output(market_report, reason)
         out["_v2_market_report"] = market_report
         return out
 
