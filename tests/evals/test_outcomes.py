@@ -214,3 +214,34 @@ class TestTriggerServerJudge:
              patch("urllib.request.urlopen") as uo:
             trigger_server_judge("sess-y")
             uo.assert_not_called()
+
+    def test_backfill_posts_without_session_id(self):
+        # The EOD safety net judges recent sessions with a no-session-id call.
+        from evals.outcomes import backfill_server_judge
+        captured = {}
+        def fake_urlopen(req, timeout=None):
+            captured["url"] = req.full_url
+            captured["body"] = req.data
+            captured["timeout"] = timeout
+            return MagicMock()
+        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            backfill_server_judge()
+        assert captured["url"].endswith("/api/compute/judge")
+        assert captured["body"] == b"{}"          # no session_id -> judges recent closed sessions
+        assert captured["timeout"] == 120
+
+    def test_backfill_failure_is_non_fatal(self):
+        from evals.outcomes import backfill_server_judge
+        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=RuntimeError("down")):
+            backfill_server_judge()  # must not raise
+
+    def test_backfill_noop_without_argus_url(self):
+        from evals.outcomes import backfill_server_judge
+        with patch("trace.logger._ARGUS_URL", ""), \
+             patch("urllib.request.urlopen") as uo:
+            backfill_server_judge()
+            uo.assert_not_called()

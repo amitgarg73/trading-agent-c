@@ -481,6 +481,17 @@ def main() -> None:
     )
     tracer.log_decision("orchestrator", "eod_complete",
                         detail={"pnl": perf.realized_pnl, "trades": perf.trades_total})
+
+    # Safety net: judge the day's sessions server-side. trigger_server_judge only fires on the
+    # premarket / intraday-entry close paths, so EOD and stand-down sessions would otherwise never
+    # get L4 quality scored (this silently dropped quality coverage after the open-entry redesign).
+    # Idempotent and best-effort; a failure must not affect EOD.
+    try:
+        from evals.outcomes import backfill_server_judge
+        backfill_server_judge()
+    except Exception as e:
+        print(f"[eod] server judge backfill error (continuing): {e}")
+
     print(f"[eod] Complete. P&L=${pnl_sign}{perf.realized_pnl:.2f}, "
           f"{perf.trades_total} trade(s).")
 

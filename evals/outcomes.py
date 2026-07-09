@@ -101,6 +101,33 @@ def trigger_server_judge(session_id: str) -> None:
         print(f"[outcomes] server judge trigger failed for {session_id[:8]}: {e}")
 
 
+def backfill_server_judge() -> None:
+    """EOD safety net: judge the workflow's most recent closed sessions server-side.
+
+    trigger_server_judge fires per-session only on the premarket / intraday-entry close paths, so
+    sessions that close another way (EOD, a premarket stand-down, an intraday with no entries) never
+    get their L4 quality scored. A no-session-id call judges the last closed sessions in one shot
+    (idempotent server-side — already-scored pairs are skipped), so quality coverage no longer
+    depends on any single close path. Best-effort: a failure never affects the trading session.
+    """
+    try:
+        import json
+        import urllib.request
+        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY
+
+        if not _ARGUS_URL:
+            return
+        req = urllib.request.Request(
+            f"{_ARGUS_URL}/api/compute/judge",
+            data=json.dumps({}).encode(),
+            headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY or ""},
+            method="POST",
+        )
+        urllib.request.urlopen(req, timeout=120)
+    except Exception as e:
+        print(f"[outcomes] server judge backfill failed: {e}")
+
+
 # Exit reasons that mean no real trade happened, so there is no outcome to reconcile.
 _NO_TRADE_EXITS = {"unfilled", "test_cleanup"}
 
