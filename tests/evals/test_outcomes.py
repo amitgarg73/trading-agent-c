@@ -38,16 +38,38 @@ def _make_client(evals_scores: list[float] | None = None, insert_ok: bool = True
 
 # ── happy path ───────────────────────────────────────────────────────────────
 
-def test_writes_three_rows(env_tenant):
+def test_writes_pnl_and_risk_rows(env_tenant):
     client = _make_client(evals_scores=[0.80, 0.90])
     with patch("core.db.get_client", return_value=client):
         from evals.outcomes import write_eod_outcome_metrics
         write_eod_outcome_metrics("sess-1", 125.50, 0.6, 5)
 
     inserted = client.table.return_value.insert.call_args[0][0]
-    assert len(inserted) == 3
+    assert len(inserted) == 6
     names = {r["metric_name"] for r in inserted}
-    assert names == {"realized_pnl", "win_rate", "trades_total"}
+    assert names == {
+        "realized_pnl", "win_rate", "trades_total",
+        "max_drawdown_pct", "within_limits", "max_single_trade_loss_pct",
+    }
+
+
+def test_risk_metrics_from_trades(env_tenant, monkeypatch):
+    monkeypatch.setenv("TOTAL_CAPITAL", "10000")
+    client = _make_client(evals_scores=[])
+    trades = [
+        {"realized_pnl":  300.0, "close_time": "2026-06-24T14:00:00"},
+        {"realized_pnl": -500.0, "close_time": "2026-06-24T15:00:00"},  # cum 300 -> -200, dd 500
+        {"realized_pnl":  100.0, "close_time": "2026-06-24T16:00:00"},
+    ]
+    with patch("core.db.get_client", return_value=client), \
+         patch("evals.outcomes._max_positions", return_value=10):
+        from evals.outcomes import write_eod_outcome_metrics
+        write_eod_outcome_metrics("s", 0.0, 0.5, 3, trades=trades, largest_loss=-500.0)
+
+    rows = {r["metric_name"]: r["metric_value"] for r in client.table.return_value.insert.call_args[0][0]}
+    assert rows["max_drawdown_pct"] == 5.0          # 500 / 10000 * 100
+    assert rows["max_single_trade_loss_pct"] == 5.0  # 500 / 10000 * 100
+    assert rows["within_limits"] == 1.0              # 3 trades <= 10
 
 
 def test_metric_values_correct(env_tenant):
@@ -141,6 +163,51 @@ def test_handles_insert_error_gracefully(env_tenant, capsys):
 
     out = capsys.readouterr().out
     assert "Failed" in out
+
+
+class TestComputeRiskMetrics:
+    """Pure derivation of the contract's drawdown / limits / single-trade-loss signals."""
+
+    def _m(self, **kw):
+        from evals.outcomes import compute_risk_metrics
+        return compute_risk_metrics(**kw)
+
+    def test_no_trades_is_clean(self):
+        m = self._m(trades=[], largest_loss=0.0, trades_total=0, max_positions=10, total_capital=50000)
+        assert m == {"max_drawdown_pct": 0.0, "within_limits": 1.0, "max_single_trade_loss_pct": 0.0}
+
+    def test_drawdown_is_peak_to_trough(self):
+        trades = [
+            {"realized_pnl":  200.0, "close_time": "t1"},
+            {"realized_pnl": -350.0, "close_time": "t2"},  # cum 200 -> -150; dd from peak 200 = 350
+            {"realized_pnl":   50.0, "close_time": "t3"},
+        ]
+        m = self._m(trades=trades, largest_loss=-350.0, trades_total=3, max_positions=10, total_capital=10000)
+        assert m["max_drawdown_pct"] == 3.5   # 350 / 10000 * 100
+
+    def test_all_winners_zero_drawdown(self):
+        trades = [{"realized_pnl": 100.0, "close_time": "t1"}, {"realized_pnl": 40.0, "close_time": "t2"}]
+        m = self._m(trades=trades, largest_loss=0.0, trades_total=2, max_positions=10, total_capital=10000)
+        assert m["max_drawdown_pct"] == 0.0
+
+    def test_within_limits_breach(self):
+        m = self._m(trades=[], largest_loss=0.0, trades_total=12, max_positions=10, total_capital=50000)
+        assert m["within_limits"] == 0.0
+
+    def test_single_trade_loss_pct(self):
+        m = self._m(trades=[], largest_loss=-250.0, trades_total=1, max_positions=10, total_capital=5000)
+        assert m["max_single_trade_loss_pct"] == 5.0  # 250 / 5000 * 100
+
+    def test_zero_capital_safe(self):
+        m = self._m(trades=[{"realized_pnl": -100.0, "close_time": "t1"}],
+                    largest_loss=-100.0, trades_total=1, max_positions=10, total_capital=0)
+        assert m["max_drawdown_pct"] == 0.0 and m["max_single_trade_loss_pct"] == 0.0
+
+    def test_ignores_trades_without_close_time(self):
+        # Unclosed trades carry no realized drawdown contribution.
+        trades = [{"realized_pnl": -900.0, "close_time": None}, {"realized_pnl": 100.0, "close_time": "t1"}]
+        m = self._m(trades=trades, largest_loss=0.0, trades_total=2, max_positions=10, total_capital=10000)
+        assert m["max_drawdown_pct"] == 0.0
 
 
 class TestPushTradeOutcomes:
