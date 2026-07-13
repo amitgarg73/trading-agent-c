@@ -17,6 +17,7 @@ from sessions.eod import (
     reconcile_positions,
     save_performance,
 )
+from core.protection import ProtectionStatus
 from tests.conftest import make_query
 
 _SESSION_ID = "sess-eod-0001"
@@ -388,7 +389,6 @@ class TestEodMain:
              patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
              patch("sessions.eod.check_protection_status",
                    return_value=self._mock_protection()), \
-             patch("sessions.eod.record_protection_event"), \
              patch("sessions.eod.update_goal_progress"), \
              patch("sessions.eod.record_goal_snapshots"), \
              patch("agents.learning_agent.run_learning_agent",
@@ -461,6 +461,12 @@ class TestEodMain:
     def test_sends_alert_on_protection_tier_4(self, mock_supabase):
         perf = self._default_perf()
         perf.protection_tier = 4
+        # Real ProtectionStatus (not a MagicMock): it has no `event_date`, so this also
+        # guards the regression where EOD tried to re-record it and crashed. See
+        # test_protection_tier_does_not_recrash.
+        status = ProtectionStatus(
+            suspended=True, tier=4, reason="drawdown", action="suspended_24h",
+        )
         with patch("sessions.eod.is_trading_day", return_value=True), \
              patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
              patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": False}), \
@@ -472,9 +478,7 @@ class TestEodMain:
              patch("sessions.eod.compute_performance", return_value=perf), \
              patch("sessions.eod.save_performance"), \
              patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
-             patch("sessions.eod.check_protection_status",
-                   return_value=self._mock_protection(tier=4, reason="drawdown")), \
-             patch("sessions.eod.record_protection_event") as mock_rec, \
+             patch("sessions.eod.check_protection_status", return_value=status), \
              patch("sessions.eod.update_goal_progress"), \
              patch("sessions.eod.record_goal_snapshots"), \
              patch("sessions.eod.send_alert") as mock_alert, \
@@ -482,9 +486,44 @@ class TestEodMain:
             mock_tracer_cls.return_value = MagicMock()
             from sessions.eod import main
             main()
-        mock_rec.assert_called_once()
         alert_subjects = [c[0][0] for c in mock_alert.call_args_list]
         assert any("ALERT" in s for s in alert_subjects)
+
+    def test_protection_tier_does_not_recrash(self, mock_supabase):
+        """Regression: a triggered tier returns a real ProtectionStatus (no `event_date`).
+        EOD must act on it without re-recording — the recording already happened inside
+        check_protection_status(). Previously EOD called record_protection_event(status)
+        and crashed with AttributeError: 'ProtectionStatus' object has no attribute
+        'event_date'."""
+        perf = self._default_perf()
+        status = ProtectionStatus(
+            suspended=True, tier=2, reason="Daily loss limit hit: $-600.00",
+            action="stopped_day",
+        )
+        mock_tracer = MagicMock()
+        with patch("sessions.eod.is_trading_day", return_value=True), \
+             patch("sessions.eod.get_today_session_id", return_value=_SESSION_ID), \
+             patch("sessions.eod.load_agent_config", return_value={"enable_learning_agent": False}), \
+             patch("sessions.eod.load_params"), \
+             patch("sessions.eod.reconcile_positions",
+                   return_value={"entry_updated": 0, "exits_synced": 0, "errors": 0}), \
+             patch("sessions.eod.force_close_positions", return_value=0), \
+             patch("sessions.eod.get_today_trades", return_value=_TRADES), \
+             patch("sessions.eod.compute_performance", return_value=perf), \
+             patch("sessions.eod.save_performance"), \
+             patch("core.scoring.score_trades", return_value={"trades_scored": 0}), \
+             patch("sessions.eod.check_protection_status", return_value=status), \
+             patch("sessions.eod.update_goal_progress") as mock_goal, \
+             patch("sessions.eod.record_goal_snapshots"), \
+             patch("sessions.eod.send_alert"), \
+             patch("sessions.eod.TraceLogger", return_value=mock_tracer):
+            from sessions.eod import main
+            main()  # must NOT raise AttributeError
+        # EOD continued past the protection block to the goal update.
+        mock_goal.assert_called_once()
+        # The tier trigger was logged as a decision.
+        decision_names = [c[0][1] for c in mock_tracer.log_decision.call_args_list]
+        assert "tier_2_triggered" in decision_names
 
     def test_learning_agent_error_does_not_abort(self, mock_supabase):
         perf = self._default_perf()

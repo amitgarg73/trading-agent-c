@@ -10,7 +10,7 @@ from core.agent_config import is_trading_day, load_agent_config
 from core.alerts import send_alert
 from core.goals import evaluate_goals, record_goal_snapshots, update_goal_progress
 from core.params import load_params
-from core.protection import check_protection_status, record_protection_event
+from core.protection import check_protection_status
 from trace.logger import TraceLogger
 
 _ET = pytz.timezone("America/New_York")
@@ -423,9 +423,10 @@ def main() -> None:
         tracer.log_decision("orchestrator", "ledger_outcomes_pushed", detail={"count": pushed})
 
     # Principal protection check
+    # check_protection_status() records its own event internally when a tier fires,
+    # so EOD only acts on the returned status — do not re-record it here.
     protection = check_protection_status()
     if protection.tier and protection.tier > 0:
-        record_protection_event(protection)
         tracer.log_decision("orchestrator", f"tier_{protection.tier}_triggered",
                             detail={"reason": protection.reason})
         if protection.tier >= 4:
