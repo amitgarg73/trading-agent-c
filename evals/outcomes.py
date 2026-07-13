@@ -166,9 +166,9 @@ def trigger_server_judge(session_id: str) -> None:
     try:
         import json
         import urllib.request
-        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY
+        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY, _emit_enabled
 
-        if not _ARGUS_URL:
+        if not _emit_enabled():
             return
         req = urllib.request.Request(
             f"{_ARGUS_URL}/api/compute/judge",
@@ -193,9 +193,9 @@ def backfill_server_judge() -> None:
     try:
         import json
         import urllib.request
-        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY
+        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY, _emit_enabled
 
-        if not _ARGUS_URL:
+        if not _emit_enabled():
             return
         req = urllib.request.Request(
             f"{_ARGUS_URL}/api/compute/judge",

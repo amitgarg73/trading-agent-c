@@ -265,7 +265,8 @@ class TestTriggerServerJudge:
             captured["body"] = req.data
             captured["timeout"] = timeout
             return MagicMock()
-        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
              patch("trace.logger._ARGUS_API_KEY", "k"), \
              patch("urllib.request.urlopen", side_effect=fake_urlopen):
             trigger_server_judge("sess-abc")
@@ -275,7 +276,8 @@ class TestTriggerServerJudge:
 
     def test_failure_is_non_fatal(self):
         from evals.outcomes import trigger_server_judge
-        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
              patch("trace.logger._ARGUS_API_KEY", "k"), \
              patch("urllib.request.urlopen", side_effect=RuntimeError("down")):
             trigger_server_judge("sess-x")  # must not raise
@@ -296,7 +298,8 @@ class TestTriggerServerJudge:
             captured["body"] = req.data
             captured["timeout"] = timeout
             return MagicMock()
-        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
              patch("trace.logger._ARGUS_API_KEY", "k"), \
              patch("urllib.request.urlopen", side_effect=fake_urlopen):
             backfill_server_judge()
@@ -306,7 +309,8 @@ class TestTriggerServerJudge:
 
     def test_backfill_failure_is_non_fatal(self):
         from evals.outcomes import backfill_server_judge
-        with patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
              patch("trace.logger._ARGUS_API_KEY", "k"), \
              patch("urllib.request.urlopen", side_effect=RuntimeError("down")):
             backfill_server_judge()  # must not raise
@@ -314,6 +318,26 @@ class TestTriggerServerJudge:
     def test_backfill_noop_without_argus_url(self):
         from evals.outcomes import backfill_server_judge
         with patch("trace.logger._ARGUS_URL", ""), \
+             patch("urllib.request.urlopen") as uo:
+            backfill_server_judge()
+            uo.assert_not_called()
+
+    def test_trigger_noop_when_emit_disabled(self):
+        # Credentials present, but no opt-in (PROVY_EMIT unset, not in GitHub Actions):
+        # the server judge must NOT hit the network. Guards the local EOD hang.
+        from evals.outcomes import trigger_server_judge
+        with patch.dict("os.environ", {"PROVY_EMIT": "", "GITHUB_ACTIONS": ""}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
+             patch("urllib.request.urlopen") as uo:
+            trigger_server_judge("sess-z")
+            uo.assert_not_called()
+
+    def test_backfill_noop_when_emit_disabled(self):
+        from evals.outcomes import backfill_server_judge
+        with patch.dict("os.environ", {"PROVY_EMIT": "", "GITHUB_ACTIONS": ""}), \
+             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
+             patch("trace.logger._ARGUS_API_KEY", "k"), \
              patch("urllib.request.urlopen") as uo:
             backfill_server_judge()
             uo.assert_not_called()
