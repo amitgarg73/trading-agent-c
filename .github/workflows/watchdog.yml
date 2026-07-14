@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 5
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      OPENING_ENTRY_ENABLED: "true"   # entry redesign: buy at the open (rollback = set false)
+      OPENING_ENTRY_ENABLED: "false"  # entry redesign OFF, rolled back 2026-07-14 (set "true" to re-enable)
 
     steps:
       - uses: actions/checkout@v4
