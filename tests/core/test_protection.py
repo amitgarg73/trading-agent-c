@@ -188,7 +188,8 @@ class TestCheckProtectionStatus:
 
         assert status.tier == 5  # -22% triggers tier 5 before tier 4
 
-    def test_tier6_five_consecutive_losses_suspends(self):
+    def test_tier6_removed_five_consecutive_does_not_suspend(self):
+        # Tier 6 removed 2026-07-15: consecutive losing days no longer suspends.
         with (
             patch("core.protection._check_active_suspension", return_value=None),
             patch("core.protection._get_daily_pnl",              return_value=-100.0),
@@ -199,9 +200,8 @@ class TestCheckProtectionStatus:
         ):
             status = check_protection_status()
 
-        assert status.suspended is True
-        assert status.tier == 6
-        assert status.action == "suspended_human_required"
+        assert status.suspended is False
+        assert status.tier == 0
 
     def test_tier6_four_consecutive_does_not_trigger(self):
         with (

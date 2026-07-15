@@ -17,7 +17,7 @@ TIER_THRESHOLDS = {
     3: -1000.0,  # rolling 3-day — halve max_positions for 2 days
     4: -0.10,    # 10% account drawdown — suspend 24h
     5: -0.20,    # 20% account drawdown — suspend 7 days, human unlock
-    6: 5,        # consecutive losing days — suspend, human review
+    # tier 6 (consecutive losing days) removed 2026-07-15, see check_protection_status
 }
 
 
@@ -103,28 +103,12 @@ def check_protection_status() -> ProtectionStatus:
             max_positions_override=reduced,
         )
 
-    # Tier 6: consecutive losing days
-    consecutive = _get_consecutive_losing_days()
-    if consecutive >= TIER_THRESHOLDS[6]:
-        suspended_until = datetime.now(pytz.utc) + timedelta(days=7)
-        event = ProtectionEvent(
-            event_date=today,
-            tier=6,
-            trigger_field="consecutive_losing_days",
-            trigger_value=float(consecutive),
-            threshold=float(TIER_THRESHOLDS[6]),
-            action="suspended_human_required",
-            description=f"{consecutive} consecutive losing days — suspended, human review required",
-            suspended_until=suspended_until,
-        )
-        record_protection_event(event)
-        return ProtectionStatus(
-            suspended=True,
-            tier=6,
-            reason=f"{consecutive} consecutive losing days",
-            action="suspended_human_required",
-            resume_at=suspended_until,
-        )
+    # Tier 6 (consecutive losing days) REMOVED 2026-07-15. It was count-based and
+    # magnitude-blind, and its "human review" suspension trapped the paper agent in a
+    # re-fire loop: a suspended day writes no performance row, so the losing streak froze
+    # and re-locked on every run. The dollar/drawdown tiers 2/3/4/5 remain.
+    # _get_consecutive_losing_days is kept (now unused here) so existing tests and any
+    # external caller still resolve.
 
     # Tiers 4 and 5: account drawdown (5 before 4 — more severe wins)
     drawdown_pct = _get_account_drawdown_pct()
