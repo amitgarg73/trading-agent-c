@@ -14,7 +14,7 @@ PARAM_DEFAULTS: dict[str, float] = {
     "caution_min_score":           7.0,
     "max_sector_concentration":    0.35,
     "trail_pct":                   0.015,
-    "max_entry_premium":           0.005,
+    "max_entry_premium":           0.02,
 }
 
 
@@ -30,7 +30,7 @@ class StrategyParams:
     caution_min_score: int = 7
     max_sector_concentration: float = 0.35
     trail_pct: float = 0.015
-    max_entry_premium: float = 0.005  # skip an entry already > this fraction above the day's open (chase guard)
+    max_entry_premium: float = 0.02  # skip an entry already > this fraction above the day's open (chase guard). 2% since 2026-07-21: 0.5% was calibrated for the buy-at-open path and rejected ~every intraday entry once that path was rolled back; the 4% proposal-staleness gate in submit_bracket_order remains the outer bound.
 
 
 @dataclass

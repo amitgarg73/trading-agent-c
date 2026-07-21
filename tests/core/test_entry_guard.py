@@ -75,3 +75,25 @@ def test_realistic_observed_late_entry_is_blocked():
 def test_realistic_near_open_entry_is_allowed():
     # entering near the open (the fix's goal) is allowed
     assert is_chasing_entry(100.4, 100.0, 0.005) is False
+
+
+# ── live default threshold (recalibrated 2026-07-21: 0.5% → 2%) ───────────────
+
+def test_default_max_entry_premium_is_two_percent():
+    # 0.5% was calibrated for the buy-at-open path; once that was rolled back it
+    # rejected ~every intraday entry. The live default is 2%.
+    from core.params import PARAM_DEFAULTS, StrategyParams
+    assert PARAM_DEFAULTS["max_entry_premium"] == 0.02
+    assert StrategyParams().max_entry_premium == 0.02
+
+
+def test_normal_intraday_entry_allowed_at_two_percent():
+    # the +1.0-1.8% off-open picks we observed being rejected at 0.5% are now allowed
+    assert is_chasing_entry(101.1, 100.0, 0.02) is False   # NET +1.1%
+    assert is_chasing_entry(101.7, 100.0, 0.02) is False   # UPS +1.7%
+
+
+def test_runaway_still_blocked_at_two_percent():
+    # names that already ran >2% off the open are still refused (no wild chasing)
+    assert is_chasing_entry(104.2, 100.0, 0.02) is True    # +4.2%
+    assert is_chasing_entry(108.5, 100.0, 0.02) is True    # +8.5%

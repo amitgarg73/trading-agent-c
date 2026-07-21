@@ -22,6 +22,14 @@ _ENTRY_CLOSE = time(13, 0)
 _SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected", "intraday_entries_placed"}
 
 
+def _entry_outcome(count: int) -> str:
+    """Honest terminal_reason for the intraday entry step. If every approved pick was
+    skipped at the order gate (chase / staleness), the session placed nothing, so it is
+    'all rejected' — not 'entries placed'. Both are in _SCAN_OUTCOMES and treated alike
+    downstream; this only stops a zero-fill run from reading as if it traded."""
+    return "intraday_entries_placed" if count > 0 else "intraday_all_rejected"
+
+
 def get_premarket_session_id() -> Optional[str]:
     """Return today's premarket session_id from ag_sessions, or None."""
     from core.db import get_client
@@ -297,7 +305,7 @@ def _place_intraday_trades(
     approved_tickers: set[str],
     session_id: str,
     trail_pct: float,
-    max_entry_premium: float = 0.005,
+    max_entry_premium: float = 0.02,
     today_tickers: set[str] | None = None,
     tracer=None,
 ) -> int:
@@ -510,12 +518,18 @@ def main() -> None:
             today_tickers=today_tickers,
             tracer=tracer,
         )
-        tracer.log_decision("orchestrator", "intraday_entries_placed", detail={"count": count})
+        outcome = _entry_outcome(count)
+        tracer.log_decision("orchestrator", outcome, detail={"count": count})
         tracer.close_session(
-            "intraday_entries_placed",
+            outcome,
             trades_proposed=len(proposals.get("proposals", [])),
             trades_executed=count,
-            result_summary=f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}",
+            result_summary=(
+                f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}"
+                if count > 0
+                else f"All {len(approved)} approved pick(s) skipped at entry gate: "
+                     f"{', '.join(v['ticker'] for v in approved)}"
+            ),
         )
         # After close (terminal_reason set), trigger the canonical server judge: per-ticker
         # L4 quality + Outcome Ledger predictions for this intraday session.

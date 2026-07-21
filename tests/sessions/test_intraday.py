@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sessions.intraday import (
+    _entry_outcome,
     classify_exit,
     count_open_positions,
     get_daily_pnl,
@@ -20,6 +21,18 @@ from tests.conftest import make_query
 _SESSION_ID    = "sess-pre-0001"
 _INTRA_ID_1    = "sess-intra-0001"
 _INTRA_ID_2    = "sess-intra-0002"
+
+
+class TestEntryOutcome:
+    """A zero-fill run (every approved pick skipped at the order gate) must not
+    report as 'intraday_entries_placed' — it placed nothing."""
+
+    def test_zero_fills_reads_as_all_rejected(self):
+        assert _entry_outcome(0) == "intraday_all_rejected"
+
+    def test_some_fills_reads_as_entries_placed(self):
+        assert _entry_outcome(1) == "intraday_entries_placed"
+        assert _entry_outcome(3) == "intraday_entries_placed"
 
 
 class TestGetPremarketSessionId:
