@@ -71,9 +71,10 @@ plausible cause is not a verified one.
 ## Why it matters beyond the ledger looking untidy
 
 Provy's Behavioral Attribution engine correlates agent decision patterns against per-work-item
-outcomes. It has 463 decisions on production and produces zero findings. Restricted to work
-items whose outcome actually settled, it has **28 analysable items across 12 sessions**. That
-is too thin for the engine's `minSample` of 8 and `minLift` of 1.3 to say much.
+outcomes. It has 463 decisions on production, covering 395 work items, and produces zero
+findings. Of those 395, **51 have an outcome to correlate against** once the settled ledger rows
+are counted (23 were already analysable through session-grained evaluations; the settled ledger
+adds 28). That is still thin for the engine's `minSample` of 8 and `minLift` of 1.3.
 
 The settlement rate is the binding constraint on that feature. Raising it is worth more than
 any change on the Provy side. (Provy has a separate, smaller defect where the engine reads the
