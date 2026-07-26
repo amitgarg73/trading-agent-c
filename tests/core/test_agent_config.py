@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from postgrest.exceptions import APIError
 
 from core.agent_config import _DEFAULTS, get_config, is_trading_day, load_agent_config
 from tests.conftest import make_query
@@ -123,3 +124,54 @@ class TestIsTradingDay:
         assert is_trading_day("WED") is True
         assert is_trading_day("TUE") is False
         assert is_trading_day("THU") is False
+
+
+class TestConfigReadResilience:
+    """
+    2026-07-24: a Cloudflare 525 in front of Supabase killed premarket on this exact read, before
+    the session could even decide whether it was a trading day. See
+    design/incident-2026-07-24-premarket-config-retry.md.
+    """
+
+    def test_survives_the_transient_failure_that_killed_premarket(self, mock_supabase, monkeypatch):
+        monkeypatch.setattr("core.db._time.sleep", lambda _s: None)
+        q = make_query([{"config_key": "phase", "config_value": "paper"}])
+        result = q.execute.return_value
+        q.execute.side_effect = [
+            APIError({"message": "JSON could not be generated", "code": 525,
+                      "hint": "", "details": "<!DOCTYPE html>"}),
+            result,
+        ]
+        mock_supabase.table.return_value = q
+        assert load_agent_config()["phase"] == "paper"
+        assert q.execute.call_count == 2
+
+    def test_is_trading_day_survives_a_transient_failure(self, mock_supabase, monkeypatch):
+        monkeypatch.setattr("core.db._time.sleep", lambda _s: None)
+        q = make_query([])
+        result = q.execute.return_value
+        q.execute.side_effect = [APIError({"message": "x", "code": 503, "hint": "", "details": ""}), result]
+        mock_supabase.table.return_value = q
+        assert is_trading_day("FRI") is True
+
+    def test_does_NOT_silently_fall_back_to_defaults_when_the_db_is_unreachable(
+        self, mock_supabase, monkeypatch
+    ):
+        # The defaults describe a suspended system (phase=simulation, intraday entries off).
+        # Substituting them on a network error would run a live trading day on the wrong config.
+        # Failing loudly is the correct behaviour for a financial system.
+        monkeypatch.setattr("core.db._time.sleep", lambda _s: None)
+        q = make_query([])
+        q.execute.side_effect = APIError({"message": "x", "code": 525, "hint": "", "details": ""})
+        mock_supabase.table.return_value = q
+        with pytest.raises(APIError):
+            load_agent_config()
+
+    def test_a_permission_error_is_not_retried(self, mock_supabase):
+        q = make_query([])
+        q.execute.side_effect = APIError({"message": "permission denied", "code": "42501",
+                                          "hint": "", "details": ""})
+        mock_supabase.table.return_value = q
+        with pytest.raises(APIError):
+            load_agent_config()
+        assert q.execute.call_count == 1

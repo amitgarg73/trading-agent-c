@@ -23,14 +23,24 @@ def load_agent_config() -> dict[str, Any]:
     Load all active config rows from c_agent_config.
     Returns a flat dict: config_key -> Python value (JSONB already parsed by Supabase).
     Falls back to _DEFAULTS for any key not in the DB.
+
+    This is the first statement every session runs, so a blip here kills the whole session before
+    it does anything (2026-07-24: a Cloudflare 525 in front of Supabase took out premarket). The
+    read is therefore retried on transient infrastructure errors.
+
+    It does NOT fall back to _DEFAULTS when the database is unreachable, and that is deliberate.
+    The defaults describe a suspended system (phase=simulation, intraday entries off, standard
+    trading days and windows). Substituting them on a network error would silently run a live
+    trading day on the wrong configuration every time Supabase hiccups. Failing loudly is correct
+    here: the fallback covers a key missing from a SUCCESSFUL read, nothing more.
     """
-    from core.db import get_client
-    result = (
+    from core.db import execute_with_retry, get_client
+    result = execute_with_retry(
         get_client()
         .table("c_agent_config")
         .select("config_key,config_value")
-        .eq("is_active", True)
-        .execute()
+        .eq("is_active", True),
+        description="c_agent_config read",
     )
     config = dict(_DEFAULTS)
     for row in (result.data or []):
