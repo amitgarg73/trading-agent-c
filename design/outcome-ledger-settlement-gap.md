@@ -81,14 +81,25 @@ P&L, and their ledger row still never settled. Two causes, both now fixed:
    `400 entity_id is required` as production. A stale `ARGUS_URL` therefore fails in exactly
    this shape. The CI secret was write-only and unverifiable until it was reset on 2026-07-26.
 
-2. **The outcome was not pinned to its own prediction.** The push omitted `session_id`, so
-   `reconcileOutcome` fell back to "the most recent unanswered row for this entity", ordered by
-   `predicted_at`. On a fleet that sees the same ticker on many days, an outcome could answer
-   the wrong day's prediction, or answer one that a later push then could not.
+2. **The outcome is not pinned to its own prediction.** The push omits `session_id`, so
+   `reconcileOutcome` falls back to "the most recent unanswered row for this entity", ordered by
+   `predicted_at`. On a fleet that sees the same ticker on many days, an outcome can answer the
+   wrong day's prediction.
 
-Both are fixed. The transport now returns whether the POST was accepted, prints a line when it
-was not, and the EOD trace records `reportable` and `dropped` alongside `count`, so a shortfall
-shows up in the run rather than in the ledger weeks later.
+Defect 1 is fixed. The transport now returns whether the POST was accepted, prints a line when
+it was not, and the EOD trace records `reportable` and `dropped` alongside `count`, so a
+shortfall shows up in the run rather than in the ledger weeks later.
+
+**Defect 2 is NOT fixed, and the obvious fix is wrong.** Pinning EOD's `session_id` was tried
+and reverted before it ever ran. Argus writes the ledger prediction from whichever session
+judged the ticker: **45 of 288 rows on production belong to intraday sessions, and 21 of the 29
+rows that have ever settled are among them.** `get_today_session_id()` returns the PREMARKET
+session, so pinning it would have missed exactly the rows that currently reconcile. The loose
+fallback is load-bearing today.
+
+The correct fix is on the Argus side: match the outcome on entity plus business date rather
+than "most recent unanswered row". The fleet cannot pin what it does not know, and it has no
+way to learn which session Argus attributed a prediction to.
 
 ## Why it matters beyond the ledger looking untidy
 

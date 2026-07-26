@@ -418,9 +418,14 @@ def main() -> None:
     )
     # Push each closed trade's realized P&L to the Argus Outcome Ledger so the trace-based
     # prediction for that ticker reconciles against the real result.
-    # session_id pins each outcome to that session's own prediction instead of letting Argus
-    # guess at the most recent unanswered row for the ticker.
-    pushed = push_trade_outcomes(today_trades, session_id=session_id)
+    # Deliberately NOT pinning session_id. It looks like the safer call and it is not: Argus
+    # writes ledger predictions from whichever session judged the ticker, and 45 of 288 rows
+    # on production belong to INTRADAY sessions, including 21 of the 29 that have ever
+    # settled. `session_id` here is today's PREMARKET session, so pinning it would fail to
+    # find precisely the rows that currently reconcile. The server's fallback (most recent
+    # unanswered row for the entity) is load-bearing until Argus matches on entity plus
+    # business date instead.
+    pushed = push_trade_outcomes(today_trades)
     reportable = sum(
         1 for t in today_trades
         if (t.get("exit_reason") or "") not in _NO_TRADE_EXITS and t.get("realized_pnl") is not None
