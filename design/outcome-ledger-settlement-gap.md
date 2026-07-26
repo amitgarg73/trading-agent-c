@@ -54,19 +54,41 @@ true and it is not the main story. **137 of the 228 unresolved rows were PROPOSE
 larger share is tickers the agents actively proposed and which still produced no reported
 outcome.
 
-## What is not yet known
+## What the investigation established (2026-07-26)
 
-The measurement above is solid. The cause is not. A PROPOSE can fail to become a closed trade
-through at least these paths, and this document does not claim which dominates:
+The proposals were counted against `c_positions`. Ledger rows live in Provy production
+(`eckthcvacrkfjihluubt`); `c_positions` lives in `fpuyabfxtrzwciehfetk`, so this was a join
+done outside the database.
 
-- vetoed downstream by risk or the orchestrator before an order was placed
-- an order was placed and never filled (`exit_reason = "unfilled"`, explicitly excluded)
-- blocked by the chase gate (loosened 0.5% to 2% recently, so the mix may have shifted)
-- still open at end of day, so no `realized_pnl` yet
+**93% of the gap is not a bug. It is a grain mismatch.** Of the 228 unresolved rows, **213 had
+no position opened that day at all**. Provy writes a ledger prediction for every ticker the
+agents evaluate; the fleet trades a handful. From 2026-07-09 onward the watchlist grew to
+22 to 29 predictions a day against 0 to 5 closed trades. Before that it was 6 to 10 predictions
+against 1 to 7 trades, which is why the early days settled and the later ones did not. Nothing
+broke. The denominator moved.
 
-Working that out means counting proposals against `c_positions` per session. It has not been
-done. Do not act on a guess here: the whole point of the Provy work this feeds is that a
-plausible cause is not a verified one.
+**The remaining 15 are a real defect.** Those had a genuinely closed position with a realized
+P&L, and their ledger row still never settled. Two causes, both now fixed:
+
+1. **The transport could not say no.** `trace/logger.py:_ingest_post_raw` ended in
+   `except Exception: pass` and returned nothing. `push_trade_outcomes` counted its own loop
+   iterations, so it reported deliveries it had not made and `tracer.log_decision(
+   "ledger_outcomes_pushed")` recorded a number that proved nothing. A day where every push
+   was dropped logged identically to a day where every push landed.
+
+   This is not hypothetical. The retired `argusobs.vercel.app` still answers 200 and still
+   accepts the fleet's ingest key: probed on 2026-07-26, it returned the same
+   `400 entity_id is required` as production. A stale `ARGUS_URL` therefore fails in exactly
+   this shape. The CI secret was write-only and unverifiable until it was reset on 2026-07-26.
+
+2. **The outcome was not pinned to its own prediction.** The push omitted `session_id`, so
+   `reconcileOutcome` fell back to "the most recent unanswered row for this entity", ordered by
+   `predicted_at`. On a fleet that sees the same ticker on many days, an outcome could answer
+   the wrong day's prediction, or answer one that a later push then could not.
+
+Both are fixed. The transport now returns whether the POST was accepted, prints a line when it
+was not, and the EOD trace records `reportable` and `dropped` alongside `count`, so a shortfall
+shows up in the run rather than in the ledger weeks later.
 
 ## Why it matters beyond the ledger looking untidy
 
@@ -79,6 +101,19 @@ adds 28). That is still thin for the engine's `minSample` of 8 and `minLift` of 
 The settlement rate is the binding constraint on that feature. Raising it is worth more than
 any change on the Provy side. (Provy has a separate, smaller defect where the engine reads the
 wrong outcome table entirely: amitgarg73/argus#433.)
+
+## Status
+
+**Fixed 2026-07-26:** the two defects above, covering the 15. Delivery is now verified rather
+than assumed, and outcomes are pinned to their own session.
+
+**Still open, and the whole 93%:** what a work item that never traded should report. That is
+option 1 below and it needs a product decision, not a code change.
+
+**Not done:** backfilling the 15 already-missed outcomes. The P&L for those trades is known and
+sitting in `c_positions`, so it can be replayed through `/api/ingest/outcome`. It writes real
+business outcomes into the production ledger and moves the trust score, so it needs an explicit
+go-ahead rather than being folded into a fix.
 
 ## Options, none chosen
 

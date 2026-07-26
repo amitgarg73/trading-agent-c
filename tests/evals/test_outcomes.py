@@ -219,11 +219,18 @@ class TestPushTradeOutcomes:
     """Each closed trade's realized P&L is pushed to the Argus Outcome Ledger so the
     trace-based prediction for that ticker reconciles against the real result."""
 
-    def _run(self, trades):
+    def _run(self, trades, accepted=True, session_id=None):
+        """accepted mirrors what the transport reports back. A push that was attempted but
+        not accepted must not be counted, so the stub returns that verdict explicitly."""
         posted = []
-        with patch("trace.logger._ingest_post", side_effect=lambda path, payload: posted.append((path, payload))):
+
+        def fake_post(path, payload):
+            posted.append((path, payload))
+            return accepted
+
+        with patch("trace.logger._ingest_post", side_effect=fake_post):
             from evals.outcomes import push_trade_outcomes
-            n = push_trade_outcomes(trades)
+            n = push_trade_outcomes(trades, session_id=session_id)
         return n, posted
 
     def test_posts_one_outcome_per_filled_trade(self):
@@ -251,6 +258,39 @@ class TestPushTradeOutcomes:
             {"ticker": "Y",  "realized_pnl": None, "exit_reason": "eod_forced"},
         ])
         assert n == 0
+
+    def test_counts_deliveries_not_attempts(self):
+        """A push the server never accepted is not an outcome the fleet reported.
+
+        This is the defect that let the ledger fill with unanswered predictions: the count
+        came from the loop, not from the transport, so a day where nothing landed logged
+        identically to a day where everything did.
+        """
+        trades = [
+            {"ticker": "CAT", "realized_pnl": 214.0, "exit_reason": "NATIVE_TRAIL", "close_time": "t"},
+            {"ticker": "GE",  "realized_pnl": -50.0, "exit_reason": "eod_forced",   "close_time": "t"},
+        ]
+        n, posted = self._run(trades, accepted=False)
+        assert len(posted) == 2, "both were attempted"
+        assert n == 0, "neither was accepted, so neither counts"
+
+    def test_pins_the_outcome_to_its_own_session(self):
+        """Without session_id the server settles the most recent unanswered row for the
+        ticker, which on a fleet that sees the same ticker repeatedly can answer the wrong
+        day's prediction."""
+        n, posted = self._run(
+            [{"ticker": "CAT", "realized_pnl": 1.0, "exit_reason": "eod_forced", "close_time": "t"}],
+            session_id="sess-today",
+        )
+        assert n == 1
+        assert posted[0][1]["session_id"] == "sess-today"
+
+    def test_omits_session_id_when_not_given(self):
+        n, posted = self._run(
+            [{"ticker": "CAT", "realized_pnl": 1.0, "exit_reason": "eod_forced", "close_time": "t"}],
+        )
+        assert n == 1
+        assert "session_id" not in posted[0][1]
 
 
 class TestTriggerServerJudge:

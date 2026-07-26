@@ -410,7 +410,7 @@ def main() -> None:
     tracer.log_decision("orchestrator", "trades_scored", detail=scoring)
 
     # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
-    from evals.outcomes import write_eod_outcome_metrics, push_trade_outcomes
+    from evals.outcomes import write_eod_outcome_metrics, push_trade_outcomes, _NO_TRADE_EXITS
     today_trades = get_today_trades(session_id)
     write_eod_outcome_metrics(
         session_id, perf.realized_pnl, perf.win_rate, perf.trades_total,
@@ -418,9 +418,19 @@ def main() -> None:
     )
     # Push each closed trade's realized P&L to the Argus Outcome Ledger so the trace-based
     # prediction for that ticker reconciles against the real result.
-    pushed = push_trade_outcomes(today_trades)
-    if pushed:
-        tracer.log_decision("orchestrator", "ledger_outcomes_pushed", detail={"count": pushed})
+    # session_id pins each outcome to that session's own prediction instead of letting Argus
+    # guess at the most recent unanswered row for the ticker.
+    pushed = push_trade_outcomes(today_trades, session_id=session_id)
+    reportable = sum(
+        1 for t in today_trades
+        if (t.get("exit_reason") or "") not in _NO_TRADE_EXITS and t.get("realized_pnl") is not None
+    )
+    # Record what was accepted AND what was owed, so a shortfall is visible in the trace
+    # rather than only in the ledger weeks later.
+    if reportable or pushed:
+        tracer.log_decision("orchestrator", "ledger_outcomes_pushed",
+                            detail={"count": pushed, "reportable": reportable,
+                                    "dropped": reportable - pushed})
 
     # Principal protection check
     # check_protection_status() records its own event internally when a tier fires,

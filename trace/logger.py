@@ -79,17 +79,28 @@ def _estimate_cost(
     ) / 1_000_000
 
 
-def _ingest_post(path: str, payload: dict) -> None:
-    """Fire-and-forget POST to Argus ingest API. Non-fatal on any error."""
+def _ingest_post(path: str, payload: dict) -> bool:
+    """POST to Argus ingest API. Non-fatal on any error.
+
+    Returns True only if the request was actually accepted. Callers that merely
+    emit telemetry can keep ignoring this; callers that report a business outcome
+    must not, because a dropped outcome is a fact the fleet loses silently.
+    """
     if not _emit_enabled():
-        return
-    _ingest_post_raw(path, json.dumps(payload).encode())
+        return False
+    return _ingest_post_raw(path, json.dumps(payload).encode())
 
 
-def _ingest_post_raw(path: str, data: bytes) -> None:
-    """Fire-and-forget POST with pre-encoded bytes. Non-fatal on any error."""
+def _ingest_post_raw(path: str, data: bytes) -> bool:
+    """POST with pre-encoded bytes. Non-fatal on any error. True if accepted.
+
+    This used to swallow every exception and return nothing, so a caller counting
+    its own loop iterations reported deliveries it never made. The retired
+    argusobs host still answers 200, so a stale ARGUS_URL fails this way too:
+    quietly, and looking exactly like success.
+    """
     if not _emit_enabled():
-        return
+        return False
     try:
         req = urllib.request.Request(
             f"{_ARGUS_URL}{path}",
@@ -97,9 +108,11 @@ def _ingest_post_raw(path: str, data: bytes) -> None:
             headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY},
             method="POST",
         )
-        urllib.request.urlopen(req, timeout=10)
-    except Exception:
-        pass
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return 200 <= r.status < 300
+    except Exception as e:
+        print(f"[argus] POST {path} failed: {e}")
+        return False
 
 
 def _ingest_patch(path: str, payload: dict) -> None:

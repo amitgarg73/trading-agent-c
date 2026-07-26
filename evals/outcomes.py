@@ -212,18 +212,27 @@ def backfill_server_judge() -> None:
 _NO_TRADE_EXITS = {"unfilled", "test_cleanup"}
 
 
-def push_trade_outcomes(trades: list[dict]) -> int:
+def push_trade_outcomes(trades: list[dict], session_id: str | None = None) -> int:
     """Push each closed trade's realized P&L to the Argus Outcome Ledger, keyed on ticker.
 
     Argus reconciles each against the trace-based prediction it made for that ticker
     (matched / diverged). This is the tenant side of the Ledger: we own the outcome (P&L)
     and report it to Argus like any external customer would. Orders that never filled are
     skipped (no real outcome). Best-effort: a failure never affects the trading session.
-    Returns the number of outcomes posted.
+
+    Returns the number of outcomes Argus actually ACCEPTED, not the number attempted.
+    The two used to be the same number by construction, because the transport swallowed
+    every error, so a day where nothing landed logged exactly like a day where everything
+    did. That is how the ledger accumulated predictions nobody ever answered.
+
+    session_id pins the outcome to the prediction made in that session. Without it Argus
+    falls back to the most recent unanswered row for the ticker, which on a fleet that sees
+    the same ticker on many days can settle the wrong day's prediction.
     """
     from trace.logger import _ingest_post
 
     sent = 0
+    attempted = 0
     for t in trades or []:
         if (t.get("exit_reason") or "") in _NO_TRADE_EXITS:
             continue
@@ -231,14 +240,22 @@ def push_trade_outcomes(trades: list[dict]) -> int:
         pnl = t.get("realized_pnl")
         if not ticker or pnl is None:
             continue
+        attempted += 1
+        payload = {
+            "entity_id":   ticker,
+            "value":       float(pnl),
+            "source":      "confirmed",
+            "occurred_at": t.get("close_time"),
+        }
+        if session_id:
+            payload["session_id"] = session_id
         try:
-            _ingest_post("/api/ingest/outcome", {
-                "entity_id":   ticker,
-                "value":       float(pnl),
-                "source":      "confirmed",
-                "occurred_at": t.get("close_time"),
-            })
-            sent += 1
+            if _ingest_post("/api/ingest/outcome", payload):
+                sent += 1
+            else:
+                print(f"[outcomes] ledger push NOT accepted for {ticker}")
         except Exception as e:
             print(f"[outcomes] ledger push failed for {ticker}: {e}")
+    if attempted != sent:
+        print(f"[outcomes] WARNING: {attempted - sent} of {attempted} trade outcomes did not reach Argus")
     return sent
