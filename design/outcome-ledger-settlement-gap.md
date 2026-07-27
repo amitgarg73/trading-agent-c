@@ -1,5 +1,31 @@
 # Outcome ledger settlement gap: 228 of 288 per-ticker predictions never settle
 
+> **CORRECTION 2026-07-27. The central conclusion below is WRONG and is kept only for the record.**
+>
+> This file concluded that 213 of 228 unresolved rows "had no position opened that day", and called
+> that a grain mismatch rather than a bug: Provy predicting on every ticker while the fleet trades a
+> handful.
+>
+> That is not what happened. **Provy dated every prediction with the day the JUDGE ran, not the day
+> the work happened** (`writeLedgerPredictions` stamped `businessDate(now())`). The upsert key is
+> `(tenant, workflow, entity, business_date)`, so every re-run of `/api/compute/judge` over an old
+> session minted a NEW prediction dated today for work that only ever happened once. This fleet calls
+> `backfill_server_judge`, so it fired constantly.
+>
+> On production **233 of 288 ledger rows are artifacts of that**, and **188 of the 228 "unresolved"
+> rows are among them**. One premarket session that ran once on 9 July carried nine predictions.
+> Of course no position was opened on those days: no work happened. **The fleet was never the
+> problem here.**
+>
+> Fixed in argus #438 (predictions now dated from `ag_sessions.started_at`). The real work-item count
+> on production is 84, not 288.
+>
+> What survives from this document: the delivery-verification defect (the transport could not report
+> a failed push) was real and is fixed. The "93% is a product decision, not a bug" framing built on
+> top of the grain-mismatch conclusion is **not** to be relied on until re-measured against a clean
+> ledger.
+
+
 Filed 2026-07-26. Status: open, not yet actioned.
 
 GitHub issues are disabled on this repo, so this file plus its commit is the change record.
