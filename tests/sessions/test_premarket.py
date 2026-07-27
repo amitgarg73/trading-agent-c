@@ -374,6 +374,29 @@ class TestExistingSessionGuard:
             skip, msg = _existing_session_guard("2026-06-01")
         assert skip is True
 
+    def test_offset_aware_timestamp_still_blocks_a_concurrent_run(self):
+        """
+        The run record stores started_at as timestamptz, so Postgres returns '+00:00'. The old
+        guard stripped a trailing 'Z' and subtracted the result from a naive utcnow(); against an
+        offset-aware value that raises TypeError, which was caught and turned into "no session
+        today". A concurrency guard that fails open lets the day's trades be placed twice.
+        """
+        started = (datetime.now(timezone.utc) - timedelta(seconds=300)).isoformat()
+        row = {"id": "aaaa-bbbb-cccc-dddd-eeee", "terminal_reason": "in_progress",
+               "status": "in_progress", "started_at": started}
+        with self._patch_db([row]):
+            skip, msg = _existing_session_guard("2026-06-01")
+        assert skip is True
+        assert "in_progress" in msg
+
+    def test_offset_aware_stale_run_does_not_block(self):
+        started = (datetime.now(timezone.utc) - timedelta(seconds=4000)).isoformat()
+        row = {"id": "aaaa-bbbb-cccc-dddd-eeee", "terminal_reason": "in_progress",
+               "status": "in_progress", "started_at": started}
+        with self._patch_db([row]):
+            skip, _ = _existing_session_guard("2026-06-01")
+        assert skip is False
+
 
 class TestPremarketMain:
     def _mock_protection(self, suspended=False, tier=0, reason="", resume_at=None):

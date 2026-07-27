@@ -43,23 +43,13 @@ def read_today_trades() -> list[dict[str, Any]]:
 
 
 def read_session_context(session_id: str) -> dict[str, Any]:
-    """Fetch the session row for market context. Sessions live in ag_sessions
-    (TraceLogger migrated off c_sessions); market context is in the metadata JSONB,
-    which we flatten so the agent sees it alongside the session fields."""
+    """Fetch the run row for market context, from the agent's own record. Market context is in
+    the metadata JSONB, which we flatten so the agent sees it alongside the run fields."""
     try:
-        from core.db import get_client
-        rows = (
-            get_client()
-            .table("ag_sessions")
-            .select("id,session_type,status,terminal_reason,result_summary,metadata,started_at,ended_at")
-            .eq("id", session_id)
-            .limit(1)
-            .execute()
-            .data
-        )
-        if not rows:
+        from core import run_state
+        r = run_state.read_run(session_id)
+        if not r:
             return {"error": "session not found"}
-        r = rows[0]
         meta = r.get("metadata") or {}
         return {**(meta if isinstance(meta, dict) else {}), **{k: v for k, v in r.items() if k != "metadata"}}
     except Exception as e:

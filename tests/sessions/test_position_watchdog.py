@@ -79,32 +79,31 @@ class TestPositionWatchdogMain:
 
 
 class TestExecutePendingTrades:
-    """_execute_pending_trades clears pending_trades metadata after execution."""
+    """
+    _execute_pending_trades places trades premarket deferred past the opening bell, then clears
+    them. Both halves now read and write the agent's own run record rather than Provy's session
+    table: these trades are real orders waiting to happen, and they must not become unreachable
+    because the observability platform moved.
+    """
 
     def test_executes_and_clears_pending(self, mock_supabase):
         from tests.conftest import make_query
         pending = [{"ticker": "AAPL", "entry_price": 200.0}]
-        meta    = {"pending_trades": pending, "other_key": "preserved"}
+        q = make_query([{"id": "sess-001", "pending_trades": pending}])
+        mock_supabase.table.return_value = q
 
-        calls_iter = iter([
-            make_query([{"metadata": meta}]),  # first call: fetch session metadata
-            make_query([]),                      # second call: update session metadata
-        ])
-        mock_supabase.table.side_effect = lambda _: next(calls_iter)
-
-        with patch("sessions.premarket._execute_trades") as mock_exec, \
-             patch("core.db.get_client", return_value=mock_supabase):
+        with patch("sessions.premarket._execute_trades") as mock_exec:
             from sessions.position_watchdog import _execute_pending_trades
             _execute_pending_trades("sess-001", 0.025)
 
         mock_exec.assert_called_once_with(pending, "sess-001", 0.025)
+        assert q.update.call_args[0][0] == {"pending_trades": []}
 
     def test_no_execution_when_no_pending(self, mock_supabase):
         from tests.conftest import make_query
-        mock_supabase.table.return_value = make_query([{"metadata": {}}])
+        mock_supabase.table.return_value = make_query([{"id": "sess-001", "pending_trades": []}])
 
-        with patch("sessions.premarket._execute_trades") as mock_exec, \
-             patch("core.db.get_client", return_value=mock_supabase):
+        with patch("sessions.premarket._execute_trades") as mock_exec:
             from sessions.position_watchdog import _execute_pending_trades
             _execute_pending_trades("sess-001", 0.025)
 

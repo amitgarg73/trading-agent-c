@@ -31,22 +31,9 @@ def _entry_outcome(count: int) -> str:
 
 
 def get_premarket_session_id() -> Optional[str]:
-    """Return today's premarket session_id from ag_sessions, or None."""
-    from core.db import get_client
-    workflow_id = os.environ.get("WORKFLOW_ID", "")
-    rows = (
-        get_client()
-        .table("ag_sessions")
-        .select("id")
-        .eq("workflow_id", workflow_id)
-        .eq("session_type", "premarket")
-        .gte("started_at", date.today().isoformat())
-        .order("started_at", desc=True)
-        .limit(1)
-        .execute()
-        .data
-    )
-    return rows[0]["id"] if rows else None
+    """Return today's premarket session_id from the agent's own run record, or None."""
+    from core import run_state
+    return run_state.today_premarket_run_id()
 
 
 # Backwards-compatible alias — remove after all callers updated
@@ -117,42 +104,17 @@ def get_open_positions(session_id: str) -> list[dict]:
 
 
 def get_last_entry_scan_time(premarket_session_id: str) -> Optional[datetime]:
-    """Return UTC datetime of the last intraday scan decision, or None.
+    """Return the aware-UTC time of the last intraday entry scan, or None.
 
-    Queries ag_sessions for all intraday sessions that are children of the
-    premarket session, then finds the most recent scan-outcome decision in
-    ag_traces across those sessions. This handles multiple intraday polls
-    per day, each with its own session_id.
+    This used to reconstruct the answer from Provy: find every intraday session whose parent was
+    today's premarket session, then search their trace rows for the most recent scan-outcome
+    decision. Two queries against the observability platform to answer a question about the
+    agent's own pacing, which is why an outage there let the rate limit lapse.
+
+    The agent now stamps the time on its own run record when it scans, so this is one local read.
     """
-    from core.db import get_client
-    db = get_client()
-    intraday_rows = (
-        db.table("ag_sessions")
-        .select("id")
-        .eq("parent_session_id", premarket_session_id)
-        .eq("session_type", "intraday")
-        .execute()
-        .data
-    ) or []
-    if not intraday_rows:
-        return None
-    intraday_ids = [r["id"] for r in intraday_rows]
-    rows = (
-        db.table("ag_traces")
-        .select("created_at, outcome")
-        .in_("session_id", intraday_ids)
-        .eq("step_type", "decision")
-        .order("created_at", desc=True)
-        .execute()
-        .data
-    ) or []
-    for row in rows:
-        if row.get("outcome") in _SCAN_OUTCOMES:
-            ts = row["created_at"]
-            if isinstance(ts, str):
-                return datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
-            return ts
-    return None
+    from core import run_state
+    return run_state.last_entry_scan_at(premarket_session_id)
 
 
 def classify_exit(fill_details: dict) -> str:
@@ -438,7 +400,9 @@ def main() -> None:
     min_interval = config.get("intraday_entry_min_interval_mins", 55)
     last_scan = get_last_entry_scan_time(premarket_session_id)
     if last_scan is not None:
-        elapsed_mins = (datetime.utcnow() - last_scan).total_seconds() / 60
+        # Aware UTC on both sides: the run record hands back an offset-aware timestamp, and
+        # subtracting a naive utcnow() from it raises rather than returning a wrong number.
+        elapsed_mins = (datetime.now(timezone.utc) - last_scan).total_seconds() / 60
         if elapsed_mins < min_interval:
             print(f"[intraday] Entry scan too recent ({elapsed_mins:.0f}m ago, min {min_interval}m). Skipping.")
             return
@@ -457,6 +421,11 @@ def main() -> None:
     # Pass-through exits (past entry window, scan too recent, no capacity, etc.)
     # produce no agent output and pollute quality metrics if traced.
     intraday_session_id = str(uuid4())
+    # Stamp the pacing clock here rather than after the scan finishes. This is the point past
+    # every pass-through exit, so it is the point an entry scan genuinely begins; stamping now
+    # also means a run that dies mid-scan still holds the rate limit instead of freeing it.
+    from core import run_state
+    run_state.stamp_entry_scan(premarket_session_id)
     tracer = TraceLogger(
         intraday_session_id,
         session_type="intraday",

@@ -54,12 +54,10 @@ else:
 
 session_id = str(uuid4())
 params     = load_params()
-tracer     = TraceLogger(session_id, session_type="premarket")
-
-# Tag as simulated so the session guard and live dashboards ignore it
-get_client().table("ag_sessions").update(
-    {"is_simulated": True}
-).eq("id", session_id).execute()
+# Tagged simulated at open, so the session guard and live dashboards ignore it. This used to be
+# an update issued after the run had already been opened, which left a window where a real
+# premarket firing at the same moment would see an unflagged run and stand down.
+tracer     = TraceLogger(session_id, session_type="premarket", is_simulated=True)
 
 print(f"\n[validate] Session {session_id} (is_simulated=True)")
 print("[validate] Running premarket pipeline...\n")

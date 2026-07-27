@@ -2,6 +2,11 @@ name: Strategy C — Premarket
 
 on:
   workflow_dispatch:
+    inputs:
+      bypass_window:
+        description: "Run the pipeline outside the 06:00-10:30 ET premarket window (paper account only)"
+        type: boolean
+        default: false
 
 concurrency:
   group: premarket
@@ -38,7 +43,7 @@ jobs:
       #   working-directory: agents/ts
 
       - name: Run premarket session
-        run: python sessions/premarket.py
+        run: python sessions/premarket.py ${{ inputs.bypass_window && '--bypass-checks' || '' }}
         env:
           PYTHONPATH: ${{ github.workspace }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
@@ -77,24 +82,31 @@ jobs:
               print(f"Non-trading day ({now_et.strftime('%A')}) — skipping session assertion.")
               sys.exit(0)
 
+          # Assert on the agent's OWN run record, not on Provy's session table.
+          #
+          # This used to read ag_sessions in this same database. That worked only while Provy and
+          # the agent shared one database. Provy split them on 2026-07-25, telemetry moved to
+          # Provy production, and this assertion became unfalsifiable here -- it would fail every
+          # day no matter how healthy the run was. The run record is also the thing that actually
+          # matters: without it the watchdog cannot find today's session and will not manage
+          # positions.
           sb = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-          tenant_id   = os.environ["TENANT_ID"]
           workflow_id = os.environ["WORKFLOW_ID"]
           today_start = date.today().isoformat() + "T00:00:00"
           rows = (
-              sb.table("ag_sessions")
-              .select("id,status,terminal_reason")
-              .eq("tenant_id", tenant_id)
+              sb.table("c_sessions")
+              .select("id,status,terminal_reason,session_type")
               .eq("workflow_id", workflow_id)
+              .eq("session_type", "premarket")
+              .eq("is_simulated", False)
               .gte("started_at", today_start)
-              .neq("terminal_reason", "simulated")
               .execute()
               .data
           )
           if not rows:
-              print(f"ASSERTION FAILED: no real premarket session in ag_sessions for {date.today().isoformat()}")
+              print(f"ASSERTION FAILED: the agent has no premarket run recorded for {date.today().isoformat()}")
               sys.exit(1)
-          print(f"Assertion passed: {len(rows)} session(s) found for {date.today().isoformat()}")
+          print(f"Assertion passed: {len(rows)} run(s) recorded for {date.today().isoformat()}")
           for r in rows:
               print(f"  id={r['id']} status={r['status']} reason={r['terminal_reason']}")
           PY

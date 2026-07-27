@@ -19,27 +19,14 @@ _ET = pytz.timezone("America/New_York")
 
 def _execute_pending_trades(premarket_session_id: str, trail_pct: float) -> None:
     """Execute any premarket trades deferred until after market open volatility settles."""
-    from core.db import get_client
-    rows = (
-        get_client()
-        .table("ag_sessions")
-        .select("metadata")
-        .eq("id", premarket_session_id)
-        .limit(1)
-        .execute()
-        .data
-    ) or []
-    meta    = (rows[0].get("metadata") or {}) if rows else {}
-    pending = meta.get("pending_trades") or []
+    from core import run_state
+    pending = run_state.get_pending_trades(premarket_session_id)
     if not pending:
         return
     print(f"[watchdog] Executing {len(pending)} deferred premarket trade(s)...")
     from sessions.premarket import _execute_trades
     _execute_trades(pending, premarket_session_id, trail_pct)
-    meta.pop("pending_trades", None)
-    get_client().table("ag_sessions").update(
-        {"metadata": meta}
-    ).eq("id", premarket_session_id).execute()
+    run_state.clear_pending_trades(premarket_session_id)
 
 
 def _reconcile_opening_orders(trail_pct: float) -> int:

@@ -123,48 +123,36 @@ class TestGetOpenPositions:
 
 
 class TestGetLastEntryScanTime:
-    """get_last_entry_scan_time takes the premarket_session_id, queries ag_sessions
-    for child intraday sessions, then queries ag_traces for scan-outcome decisions."""
+    """
+    Entry pacing now reads a timestamp the agent stamped on its own run record.
 
-    def _setup_two_queries(self, mock_supabase, intraday_ids: list[str], trace_rows: list[dict]):
-        """Return different query results for the two DB calls:
-        first call → ag_sessions (intraday children), second call → ag_traces."""
-        calls = iter([
-            make_query([{"id": sid} for sid in intraday_ids]),
-            make_query(trace_rows),
-        ])
-        mock_supabase.table.side_effect = lambda _: next(calls)
+    It used to be reconstructed from Provy: find every intraday session whose parent was today's
+    premarket session, then search their trace rows for the most recent scan-outcome decision.
+    Two cross-system queries to answer a question about the agent's own pacing, which is why the
+    July 2026 database split let the rate limit lapse along with everything else.
+    """
 
-    def test_returns_none_when_no_intraday_sessions(self, mock_supabase):
-        self._setup_two_queries(mock_supabase, [], [])
+    def test_returns_none_when_never_scanned(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([{"id": _SESSION_ID, "last_entry_scan_at": None}])
         assert get_last_entry_scan_time(_SESSION_ID) is None
 
-    def test_returns_none_when_no_scan_decisions(self, mock_supabase):
-        trace_rows = [{"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"}]
-        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], trace_rows)
+    def test_returns_none_when_run_is_missing(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
         assert get_last_entry_scan_time(_SESSION_ID) is None
 
-    def test_returns_datetime_for_scan_outcome(self, mock_supabase):
-        trace_rows = [
-            {"created_at": "2026-05-27T14:30:00", "outcome": "intraday_entries_placed"},
-            {"created_at": "2026-05-27T14:00:00", "outcome": "lock_in_mode"},
-        ]
-        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], trace_rows)
-        result = get_last_entry_scan_time(_SESSION_ID)
-        assert result == datetime(2026, 5, 27, 14, 30, 0)
+    def test_returns_the_stamped_time(self, mock_supabase):
+        mock_supabase.table.return_value = make_query(
+            [{"id": _SESSION_ID, "last_entry_scan_at": "2026-05-27T14:30:00+00:00"}]
+        )
+        assert get_last_entry_scan_time(_SESSION_ID) == datetime(2026, 5, 27, 14, 30, tzinfo=timezone.utc)
 
-    def test_returns_most_recent_scan_outcome_across_sessions(self, mock_supabase):
-        trace_rows = [
-            {"created_at": "2026-05-27T15:00:00", "outcome": "no_intraday_candidates"},
-            {"created_at": "2026-05-27T14:00:00", "outcome": "intraday_all_rejected"},
-        ]
-        self._setup_two_queries(mock_supabase, [_INTRA_ID_1, _INTRA_ID_2], trace_rows)
-        result = get_last_entry_scan_time(_SESSION_ID)
-        assert result == datetime(2026, 5, 27, 15, 0, 0)
-
-    def test_returns_none_when_no_trace_rows(self, mock_supabase):
-        self._setup_two_queries(mock_supabase, [_INTRA_ID_1], [])
-        assert get_last_entry_scan_time(_SESSION_ID) is None
+    def test_result_is_aware_so_the_caller_can_subtract_it_from_now(self, mock_supabase):
+        """main() computes elapsed minutes against an aware now. A naive value raises TypeError."""
+        mock_supabase.table.return_value = make_query(
+            [{"id": _SESSION_ID, "last_entry_scan_at": "2026-05-27T14:30:00+00:00"}]
+        )
+        got = get_last_entry_scan_time(_SESSION_ID)
+        assert got is not None and got.tzinfo is not None
 
 
 class TestClassifyExit:
@@ -818,7 +806,10 @@ class TestIntradayMain:
         from datetime import timedelta
         _ET = pytz.timezone("America/New_York")
         fake_now = datetime(2026, 5, 27, 10, 30, tzinfo=_ET)
-        recent_scan = datetime.utcnow() - timedelta(minutes=20)
+        # Aware on both sides. The pacing check subtracts the stamped scan time from an aware
+        # now; a naive value here would raise TypeError instead of exercising the rate limit.
+        real_utc_now = datetime.now(timezone.utc)
+        recent_scan = real_utc_now - timedelta(minutes=20)
         with patch("sessions.intraday.is_trading_day", return_value=True), \
              patch("sessions.intraday.datetime") as mock_dt, \
              patch("sessions.intraday.get_premarket_session_id", return_value=_SESSION_ID), \
@@ -832,7 +823,9 @@ class TestIntradayMain:
              patch("sessions.intraday.evaluate_goals", return_value=self._mock_goal()), \
              patch("sessions.intraday.get_last_entry_scan_time", return_value=recent_scan), \
              patch("sessions.intraday.TraceLogger") as mock_tracer_cls:
-            mock_dt.now.return_value = fake_now
+            # main() asks for two clocks: the ET wall clock for its trading windows, and UTC for
+            # the pacing arithmetic. Answer each in its own timezone.
+            mock_dt.now.side_effect = lambda tz=None: real_utc_now if tz is timezone.utc else fake_now
             mock_dt.utcnow.return_value = datetime.utcnow()
             mock_dt.side_effect = lambda *a, **kw: datetime(*a, **kw)
             mock_tracer_cls.return_value = MagicMock()

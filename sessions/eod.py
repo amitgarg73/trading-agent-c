@@ -34,23 +34,9 @@ class DailyPerformance:
 
 
 def get_today_session_id() -> Optional[str]:
-    """Return today's premarket session_id from ag_sessions, or None."""
-    import os
-    from core.db import get_client
-    workflow_id = os.environ.get("WORKFLOW_ID", "")
-    req = (
-        get_client()
-        .table("ag_sessions")
-        .select("id")
-        .eq("session_type", "premarket")
-        .gte("started_at", date.today().isoformat())
-        .order("started_at", desc=True)
-        .limit(1)
-    )
-    if workflow_id:
-        req = req.eq("workflow_id", workflow_id)
-    rows = req.execute().data
-    return rows[0]["id"] if rows else None
+    """Return today's premarket session_id from the agent's own run record, or None."""
+    from core import run_state
+    return run_state.today_premarket_run_id()
 
 
 def get_today_trades(session_id: str) -> list[dict]:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timezone
 from uuid import uuid4
 
 import pytz
@@ -248,25 +248,13 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     Returns (should_skip, reason_msg).
     Skip if today already has a completed premarket session or one in_progress started < 60 min ago.
     Prevents concurrent runs when the cron fires twice or intraday triggers premarket.
-    Reads ag_sessions (TraceLogger migrated from c_sessions in commit a93d5bf).
+    Reads the agent's own run record, so a second run is still prevented when Provy is
+    unreachable -- the guard failing open would place the day's trades twice.
     """
-    from core.db import get_client
-    workflow_id = os.environ.get("WORKFLOW_ID", "")
-    rows = (
-        get_client()
-        .table("ag_sessions")
-        .select("id,terminal_reason,started_at,status")
-        .eq("workflow_id", workflow_id)
-        .eq("session_type", "premarket")
-        .gte("started_at", today)
-        .order("started_at", desc=True)
-        .limit(1)
-        .execute()
-        .data or []
-    )
-    if not rows:
+    from core import run_state
+    sess = run_state.today_premarket_run(today)
+    if not sess:
         return False, ""
-    sess   = rows[0]
     term   = sess.get("terminal_reason") or ""
     status = sess.get("status") or ""
     sid    = sess["id"]
@@ -278,17 +266,18 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     if term in _COMPLETE or status == "completed":
         return True, f"Session {sid[:8]} already completed ({term}). Skipping."
     if status == "in_progress" or term in ("in_progress", ""):
-        try:
-            started = sess.get("started_at") or ""
-            if started:
-                age_s = (datetime.utcnow() - datetime.fromisoformat(started.replace("Z", ""))).total_seconds()
-                if age_s < 3600:
-                    return True, (
-                        f"Session {sid[:8]} in_progress ({int(age_s / 60)}m old). "
-                        "Skipping concurrent run."
-                    )
-        except (ValueError, TypeError):
-            pass
+        # Both sides aware UTC. The old code stripped a trailing "Z" and subtracted from a naive
+        # utcnow(); against an offset-aware timestamp that raises TypeError, which the except
+        # below swallowed into "no existing session" -- a concurrency guard that fails OPEN and
+        # lets the day's trades be placed twice. parse_ts normalises instead.
+        started = run_state.parse_ts(sess.get("started_at"))
+        if started:
+            age_s = (datetime.now(timezone.utc) - started).total_seconds()
+            if age_s < 3600:
+                return True, (
+                    f"Session {sid[:8]} in_progress ({int(age_s / 60)}m old). "
+                    "Skipping concurrent run."
+                )
     return False, ""
 
 

@@ -168,6 +168,7 @@ class TraceLogger:
         workflow_id: Optional[str] = None,
         session_type: Optional[str] = None,
         parent_session_id: Optional[str] = None,
+        is_simulated: bool = False,
     ):
         self.session_id = session_id
         self._workflow_id = workflow_id or _WORKFLOW_ID or None
@@ -177,6 +178,20 @@ class TraceLogger:
         self._tokens: dict[str, dict[str, int]] = {}
         self._pending_trades: list = []
         self._started_at = datetime.utcnow()
+
+        # The agent's own record of this run, in its own database, written before any telemetry
+        # leaves the process. Synchronous and allowed to raise: if the agent cannot remember that
+        # it started a run, it must not go on to place trades it will later fail to recognise.
+        # The ingest POST below is the opposite -- fire-and-forget, because a dropped trace costs
+        # a dashboard row, not a position. Control flow reads this record and never reads Provy.
+        from core import run_state
+        run_state.open_run(
+            session_id,
+            session_type or "premarket",
+            parent_run_id=parent_session_id,
+            workflow_id=self._workflow_id,
+            is_simulated=is_simulated,
+        )
 
         # OTel setup — each TraceLogger gets its own provider so session spans
         # don't bleed across concurrent sessions.
@@ -402,6 +417,26 @@ class TraceLogger:
         }
         if self._pending_trades:
             metadata["pending_trades"] = self._pending_trades
+
+        # Close the agent's own record first. Premarket's concurrency guard reads this to tell a
+        # finished run from one still in flight, and the watchdog reads pending_trades from it to
+        # place entries deferred past the opening bell. Both must survive Provy being unreachable.
+        from core import run_state
+        run_state.close_run(
+            self.session_id,
+            terminal_reason,
+            result_summary=result_summary,
+            trades_proposed=trades_proposed,
+            trades_approved=trades_approved,
+            trades_executed=trades_executed,
+            risk_rejections=risk_rejections,
+            agents_invoked=agents_invoked,
+            loop_iterations=loop_iterations,
+            retry_triggered=retry_triggered,
+            total_steps=self._sequence,
+        )
+        if self._pending_trades:
+            run_state.set_pending_trades(self.session_id, self._pending_trades)
 
         body: dict[str, Any] = {
             "session_id":     self.session_id,
