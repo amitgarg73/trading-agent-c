@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   watchdog:
-    name: Close orphaned sessions
+    name: Close orphaned sessions and check the day's work happened
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
@@ -35,3 +35,39 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL_C }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY_C }}
+          WORKFLOW_ID: ${{ secrets.WORKFLOW_ID_C }}
+          # Alert credentials. This job had none, so for three days in July 2026 it was the only
+          # scheduled job that could not tell anyone anything.
+          NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+
+      - name: Notify on failure
+        if: failure()
+        env:
+          GMAIL_USER:         ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL:        amit.thirdeyetrading@gmail.com
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          from email.message import EmailMessage
+          user = os.environ.get("GMAIL_USER")
+          pw   = os.environ.get("GMAIL_APP_PASSWORD")
+          to   = os.environ.get("ALERT_EMAIL")
+          if not (user and pw and to):
+              raise SystemExit(0)
+          m = EmailMessage()
+          m["Subject"] = "[Strategy C] session watchdog FAILED"
+          m["From"], m["To"] = user, to
+          m.set_content(
+              "Strategy C session watchdog FAILED. This job either crashed or found that the "
+              "day's expected work did not happen. Logs: "
+              "https://github.com/amitgarg73/trading-agent-c/actions"
+          )
+          with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+              s.login(user, pw)
+              s.send_message(m)
+          print("Failure alert sent.")
+          PY

@@ -101,6 +101,31 @@ def _maybe_opening_fallback(now_t: time, params) -> bool:
 
 
 def main() -> None:
+    """
+    Poll positions. Wrapped so that every exit path -- including the no-op ones -- reports a
+    heartbeat.
+
+    This job writes nothing when there is nothing to do, which makes "ran and had nothing to do"
+    look identical to "did not run at all". That ambiguity is why three days of total outage went
+    unnoticed in July 2026. The session watchdog reads this heartbeat to tell the two apart.
+    """
+    status, detail = "ok", None
+    try:
+        _poll()
+    except Exception as e:
+        status, detail = "error", str(e)[:500]
+        raise
+    finally:
+        try:
+            from core import run_state
+            run_state.record_heartbeat("position_watchdog", status, detail)
+        except Exception as hb:
+            # Never let bookkeeping take down the job that manages open positions. A missing
+            # heartbeat makes the session watchdog alert, which is the safe direction to fail.
+            print(f"[watchdog] heartbeat write failed: {hb}")
+
+
+def _poll() -> None:
     now_et  = datetime.now(_ET)
     weekday = now_et.strftime("%a").upper()[:3]
     now_t   = now_et.time()

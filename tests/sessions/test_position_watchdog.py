@@ -78,6 +78,101 @@ class TestPositionWatchdogMain:
         mock_pending.assert_not_called()
 
 
+class TestPositionWatchdogHeartbeat:
+    """
+    This job writes nothing when there is nothing to do, so "ran and had nothing to do" and "did
+    not run" look identical from outside. That ambiguity is why three days of total outage went
+    unnoticed in July 2026. The heartbeat is what the session watchdog reads to tell them apart,
+    and it must be stamped on EVERY exit path -- including the ones that do no work.
+    """
+
+    def _run_main(self, weekday=_TRADING_WEEKDAY, now_t=_POLL_TIME, session_id="sess-001",
+                  sync_raises=None):
+        protection = MagicMock()
+        protection.suspended = False
+        params = MagicMock()
+        params.trail_pct = 0.025
+
+        def mock_now(_tz):
+            dt = MagicMock()
+            dt.strftime.return_value = weekday
+            dt.time.return_value = now_t
+            return dt
+
+        sync = MagicMock(side_effect=sync_raises) if sync_raises else MagicMock()
+
+        with patch("sessions.position_watchdog.datetime") as mock_dt, \
+             patch("sessions.position_watchdog.is_trading_day", return_value=(weekday != "SAT")), \
+             patch("sessions.position_watchdog.get_premarket_session_id", return_value=session_id), \
+             patch("sessions.position_watchdog.check_protection_status", return_value=protection), \
+             patch("sessions.position_watchdog.load_params", return_value=params), \
+             patch("sessions.position_watchdog._sync_positions", sync), \
+             patch("sessions.position_watchdog._execute_pending_trades"), \
+             patch("core.run_state.record_heartbeat") as hb:
+            mock_dt.now.side_effect = mock_now
+            from sessions.position_watchdog import main
+            if sync_raises:
+                with pytest.raises(type(sync_raises)):
+                    main()
+            else:
+                main()
+        return hb
+
+    def test_records_heartbeat_after_a_normal_poll(self):
+        hb = self._run_main()
+        hb.assert_called_once()
+        assert hb.call_args[0][0] == "position_watchdog"
+        assert hb.call_args[0][1] == "ok"
+
+    def test_records_heartbeat_on_a_non_trading_day(self):
+        """Saturday is a healthy no-op, not a dead job."""
+        hb = self._run_main(weekday="SAT")
+        hb.assert_called_once()
+        assert hb.call_args[0][1] == "ok"
+
+    def test_records_heartbeat_outside_the_poll_window(self):
+        hb = self._run_main(now_t=_OUTSIDE_TIME)
+        hb.assert_called_once()
+
+    def test_records_heartbeat_when_there_is_no_premarket_session(self):
+        hb = self._run_main(session_id=None)
+        hb.assert_called_once()
+
+    def test_records_error_status_and_still_raises(self):
+        hb = self._run_main(sync_raises=RuntimeError("alpaca down"))
+        hb.assert_called_once()
+        assert hb.call_args[0][1] == "error"
+        assert "alpaca down" in hb.call_args[0][2]
+
+    def test_a_failed_heartbeat_never_takes_down_the_poll(self, capsys):
+        """Managing open positions matters more than bookkeeping about it."""
+        protection = MagicMock()
+        protection.suspended = False
+        params = MagicMock()
+        params.trail_pct = 0.025
+
+        def mock_now(_tz):
+            dt = MagicMock()
+            dt.strftime.return_value = _TRADING_WEEKDAY
+            dt.time.return_value = _POLL_TIME
+            return dt
+
+        with patch("sessions.position_watchdog.datetime") as mock_dt, \
+             patch("sessions.position_watchdog.is_trading_day", return_value=True), \
+             patch("sessions.position_watchdog.get_premarket_session_id", return_value="sess-001"), \
+             patch("sessions.position_watchdog.check_protection_status", return_value=protection), \
+             patch("sessions.position_watchdog.load_params", return_value=params), \
+             patch("sessions.position_watchdog._sync_positions") as sync, \
+             patch("sessions.position_watchdog._execute_pending_trades"), \
+             patch("core.run_state.record_heartbeat", side_effect=RuntimeError("db down")):
+            mock_dt.now.side_effect = mock_now
+            from sessions.position_watchdog import main
+            main()
+
+        sync.assert_called_once()
+        assert "heartbeat write failed" in capsys.readouterr().out
+
+
 class TestExecutePendingTrades:
     """
     _execute_pending_trades places trades premarket deferred past the opening bell, then clears

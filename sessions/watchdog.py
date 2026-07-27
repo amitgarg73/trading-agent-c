@@ -1,16 +1,40 @@
 """
-Session watchdog — close orphaned sessions that never called close_session().
+Session watchdog — two jobs.
 
-Marks sessions with terminal_reason IN ('in_progress', '') that started more
-than STALE_HOURS ago as 'watchdog_timeout'. Safe to run repeatedly (idempotent).
+1. Close orphaned sessions that never called close_session(). Idempotent.
+2. Assert the day's work actually happened, and raise the alarm when it did not.
+
+Job 2 exists because job 1 alone is unfalsifiable. Between 25 and 27 July 2026 every scheduled
+session failed for three days straight and this watchdog reported success every hour throughout,
+because "no orphaned sessions found" is exactly what a completely dead agent looks like. The
+failure was found only because the trading jobs happened to email on failure; nothing was
+watching for the absence of work.
+
+A monitor that cannot fail on the thing it watches is not a monitor. These checks are written so
+that silence means healthy and anything else alerts and exits non-zero.
 """
 from __future__ import annotations
 
+import os
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, time, timezone, timedelta
+
+import pytz
 
 
 STALE_HOURS = 1
+
+_ET = pytz.timezone("America/New_York")
+
+# When each job is late enough to be worth waking someone. Deliberately generous: the point is to
+# catch a dead agent, not to page on a slow morning.
+_PREMARKET_LATE_AFTER = time(11, 0)   # window ends 10:30 ET
+_EOD_LATE_AFTER       = time(16, 30)  # EOD runs 15:55 ET
+_POSITION_POLL_START  = time(9, 45)   # first poll is 9:15; allow one cycle to land
+_POSITION_POLL_END    = time(15, 50)
+_POSITION_STALE_MINS  = 45            # polls every 15 minutes; three misses is not a blip
+
+POSITION_WATCHDOG_JOB = "position_watchdog"
 
 
 def _parse_ts(ts: str) -> datetime:
@@ -79,7 +103,94 @@ def run_watchdog(dry_run: bool = False) -> list[str]:
     return closed
 
 
+def check_expected_work(now_et: datetime | None = None) -> list[str]:
+    """
+    Return a list of plain-language problems with today's work. Empty means healthy.
+
+    Only meaningful on trading days. Each check is time-gated so it cannot fire before the job it
+    watches was ever due.
+    """
+    from core import run_state
+    from core.agent_config import is_trading_day
+
+    now_et  = now_et or datetime.now(_ET)
+    now_t   = now_et.time()
+    weekday = now_et.strftime("%a").upper()[:3]
+    today   = now_et.date().isoformat()
+
+    if not is_trading_day(weekday):
+        return []
+
+    problems: list[str] = []
+
+    premarket = run_state.today_run("premarket", today)
+    if now_t >= _PREMARKET_LATE_AFTER:
+        if not premarket:
+            problems.append(
+                f"No premarket run recorded for {today}. The agent has not analysed the market "
+                f"today, so no trades can have been placed."
+            )
+        elif premarket.get("status") != "completed":
+            problems.append(
+                f"Premarket run {premarket['id'][:8]} started but never finished "
+                f"(status {premarket.get('status')!r}). Today's plan is incomplete."
+            )
+
+    if _POSITION_POLL_START <= now_t <= _POSITION_POLL_END:
+        age = run_state.heartbeat_age_minutes(POSITION_WATCHDOG_JOB)
+        if age is None:
+            problems.append(
+                "The position watchdog has never reported in. Open positions are not being "
+                "managed and trailing stops are not being maintained."
+            )
+        elif age > _POSITION_STALE_MINS:
+            problems.append(
+                f"The position watchdog last ran {age:.0f} minutes ago (expected every 15). "
+                f"Open positions may not be under management."
+            )
+
+    if now_t >= _EOD_LATE_AFTER:
+        eod = run_state.today_run("eod", today)
+        if not eod:
+            problems.append(
+                f"No end-of-day run recorded for {today}. Positions may not have been closed "
+                f"and today's performance was not recorded."
+            )
+
+    return problems
+
+
+def run_health_checks(now_et: datetime | None = None, alert: bool = True) -> list[str]:
+    """Run the expectation checks and alert on anything found. Returns the problems."""
+    problems = check_expected_work(now_et)
+    if not problems:
+        print("[watchdog] Expected work check: healthy.")
+        return []
+
+    for p in problems:
+        print(f"[watchdog] PROBLEM: {p}")
+
+    if not alert:
+        print("[watchdog] (dry-run) not sending an alert.")
+        return problems
+
+    from core.alerts import send_alert
+    send_alert(
+        "Strategy C — agent is not doing its work",
+        "The hourly watchdog found work that should have happened and did not:\n\n"
+        + "\n\n".join(f"- {p}" for p in problems)
+        + "\n\nThis is the watchdog reporting an ABSENCE of work, not a job that crashed. "
+          "Check the GitHub Actions runs for Premarket, Intraday Scan and Position Watchdog.",
+    )
+    return problems
+
+
 if __name__ == "__main__":
     import sys
     dry = "--dry-run" in sys.argv
     run_watchdog(dry_run=dry)
+    problems = run_health_checks(alert=not dry)
+    # Exit non-zero so the scheduled job goes red and the failure notification fires. Without
+    # this the watchdog would print its findings into a log nobody reads.
+    if problems and not dry:
+        sys.exit(1)

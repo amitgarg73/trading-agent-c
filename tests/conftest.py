@@ -39,6 +39,35 @@ def make_query(data: list) -> MagicMock:
     return q
 
 
+@pytest.fixture(autouse=True)
+def _no_real_database(monkeypatch):
+    """
+    No test may open a real database connection.
+
+    core/db.py loads .streamlit/secrets.toml when SUPABASE_URL is unset, so a local test run has
+    live production credentials sitting in the environment. Any test that forgets to mock the
+    client therefore writes to the real trading database, silently and with a passing result.
+
+    That is not hypothetical. On 2026-07-27 a heartbeat write was added to position_watchdog.main()
+    inside a finally block. The existing test mocked everything main() touched at the time, but not
+    the database client, so the suite wrote a fake heartbeat into the live table -- one that would
+    have told the watchdog the agent was healthy when it was not.
+
+    Blocking client construction turns that class of mistake into a loud failure. Tests that mock
+    core.db.get_client never reach this.
+    """
+    def _refuse(*_args, **_kwargs):
+        raise RuntimeError(
+            "This test tried to open a real Supabase connection. Local runs carry production "
+            "credentials, so the write would have hit the live trading database. Use the "
+            "mock_supabase fixture, or patch the specific function that reaches the database."
+        )
+
+    monkeypatch.setattr("core.db.create_client", _refuse)
+    # core.db caches its client; a real one built by an earlier test would otherwise be reused.
+    monkeypatch.setattr("core.db._client", None, raising=False)
+
+
 @pytest.fixture
 def mock_supabase(monkeypatch):
     """

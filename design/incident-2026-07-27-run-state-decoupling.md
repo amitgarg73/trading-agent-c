@@ -91,10 +91,55 @@ Suite: 1042 passing, up from 979.
 The premarket workflow takes a `bypass_window` input, so the pipeline can be run on demand
 outside the 06:00-10:30 ET window. Paper account only.
 
-## Still open
+## Both follow-ups closed (same day)
 
-- **The session watchdog is blind to this class of failure.** It touches only `c_*` tables, so it
-  reported success hourly through all three days of outage. A watchdog that cannot fail on the
-  thing it watches is not one.
-- **`anon` holds TRUNCATE on every `c_*` table.** The RLS migration named this hole in its own
-  header and closed it only for Provy's tables.
+**The watchdog can now fail.** It only ever closed orphaned sessions, and "no orphaned sessions
+found" is precisely what a completely dead agent looks like, which is why it reported success
+every hour for three days. It now also asserts that the day's work happened:
+
+| Check | Fires when |
+|---|---|
+| Premarket missing | past 11:00 ET on a trading day with no premarket run |
+| Premarket unfinished | a run started and never completed |
+| Position watchdog stale | during market hours, last poll over 45 minutes ago |
+| End-of-day missing | past 16:30 ET with no EOD run |
+
+Anything found is emailed and exits non-zero so the job goes red. The workflow had **no alert
+credentials and no failure notification at all** -- the one scheduled job that could not tell
+anyone anything. Both added.
+
+The position watchdog now records a heartbeat on every exit path including the no-op ones,
+because a job that writes nothing when idle is indistinguishable from a job that is dead. A
+failed heartbeat write is logged and swallowed: managing open positions matters more than
+bookkeeping about it, and a missing heartbeat makes the watchdog alert, which is the safe
+direction to fail.
+
+Verified against live data before deploying: with the heartbeat absent it correctly reported
+"the position watchdog has never reported in" while a position was open.
+
+**The public key can no longer write to the agent's tables.** All 15 `c_` tables granted `anon`
+INSERT, UPDATE, DELETE and TRUNCATE. Now SELECT only. SELECT is kept deliberately so the
+read-only Streamlit dashboard cannot break whichever key it holds; the agent's own jobs use the
+service-role key and are unaffected. Written as a loop so a table added later cannot silently
+reopen the hole.
+
+Residual, deliberately left: `anon` can still read these tables and there is no RLS on them.
+Closing that means moving the dashboard onto a service-role key first.
+
+## A test was writing to the live trading database
+
+Found while verifying the above, and worth more than the fix. The heartbeat write sits in a
+`finally` in `position_watchdog.main()`. The existing test mocked everything `main()` touched at
+the time but not the database client, and `core/db.py` loads `.streamlit/secrets.toml` when
+`SUPABASE_URL` is unset -- so a local test run carries live credentials. The suite wrote a
+fabricated heartbeat into the live table, claiming the agent was healthy when it was not, and
+passed while doing it.
+
+`tests/conftest.py` now refuses real client construction in every test, turning that whole class
+of mistake into a loud failure. The fabricated row was deleted.
+
+The repo already warned about this ("Do NOT wire SUPABASE_URL_C / SUPABASE_KEY_C into the pytest
+CI job... any test that skips mocking get_client would write real data"). The warning was correct
+and unenforced.
+
+Suite: 1063 passing.

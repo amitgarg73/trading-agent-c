@@ -173,6 +173,11 @@ def today_premarket_run(on_day: Optional[str] = None) -> Optional[dict]:
     return _latest("premarket", on_day, include_simulated=False)
 
 
+def today_run(session_type: str, on_day: Optional[str] = None) -> Optional[dict]:
+    """Today's latest run of a given type, or None. Used by the health checks."""
+    return _latest(session_type, on_day)
+
+
 def read_run(run_id: str) -> Optional[dict]:
     """One run by id, or None."""
     rows = db.execute_with_retry(
@@ -230,6 +235,53 @@ def last_entry_scan_at(premarket_run_id: str) -> Optional[datetime]:
     if not run:
         return None
     return parse_ts(run.get("last_entry_scan_at"))
+
+
+# ── Job heartbeats ────────────────────────────────────────────────────────────
+#
+# Some jobs produce no run record. The position watchdog is the important one: it polls every
+# 15 minutes to manage open positions and, by design, writes nothing when there is nothing to do.
+# That silence is indistinguishable from the job being dead, which is exactly how three days of
+# outage went unnoticed in July 2026. A heartbeat makes "ran and had nothing to do" different
+# from "did not run".
+
+_HEARTBEAT_TABLE = "c_job_heartbeat"
+
+
+def record_heartbeat(job: str, status: str = "ok", detail: Optional[str] = None) -> None:
+    """Record that a job ran to completion. Called even on no-op exits -- the job still ran."""
+    db.execute_with_retry(
+        db.get_client().table(_HEARTBEAT_TABLE).upsert(
+            {
+                "job":         job,
+                "last_run_at": _now().isoformat(),
+                "last_status": status,
+                "detail":      detail,
+            },
+            on_conflict="job",
+        ),
+        description="record_heartbeat",
+    )
+
+
+def read_heartbeat(job: str) -> Optional[dict]:
+    rows = db.execute_with_retry(
+        db.get_client().table(_HEARTBEAT_TABLE)
+        .select("job,last_run_at,last_status,detail").eq("job", job).limit(1),
+        description="read_heartbeat",
+    ).data or []
+    return rows[0] if rows else None
+
+
+def heartbeat_age_minutes(job: str) -> Optional[float]:
+    """Minutes since the job last completed, or None if it has never reported."""
+    hb = read_heartbeat(job)
+    if not hb:
+        return None
+    last = parse_ts(hb.get("last_run_at"))
+    if not last:
+        return None
+    return (_now() - last).total_seconds() / 60
 
 
 def parse_ts(raw: Any) -> Optional[datetime]:
