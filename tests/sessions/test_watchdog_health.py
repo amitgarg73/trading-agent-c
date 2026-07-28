@@ -25,21 +25,22 @@ def _at(hour: int, minute: int = 0, day: int = 27):
     return _ET.localize(datetime(2026, 7, day, hour, minute))
 
 
-def _state(premarket=None, eod=None, heartbeat_age=0.0, trading_day=True):
+def _state(premarket=None, perf=True, heartbeat_age=0.0, trading_day=True):
     """Patch everything the checks read. Defaults describe a healthy agent."""
     def _today_run(session_type, *_a, **_kw):
-        return {"premarket": premarket, "eod": eod}.get(session_type)
+        return {"premarket": premarket}.get(session_type)
 
     return (
         patch("core.run_state.today_run", side_effect=_today_run),
+        patch("core.run_state.performance_recorded", return_value=perf),
         patch("core.run_state.heartbeat_age_minutes", return_value=heartbeat_age),
         patch("core.agent_config.is_trading_day", return_value=trading_day),
     )
 
 
 def _run(now, **kw):
-    a, b, c = _state(**kw)
-    with a, b, c:
+    a, b, c, d = _state(**kw)
+    with a, b, c, d:
         return check_expected_work(now)
 
 
@@ -92,15 +93,23 @@ class TestPositionWatchdog:
 
 
 class TestEndOfDay:
-    def test_missing_eod_after_the_close_alerts(self):
-        problems = _run(_at(17, 0), premarket=_COMPLETED, eod=None, heartbeat_age=5.0)
-        assert any("No end-of-day run" in p for p in problems)
+    def test_missing_performance_after_the_close_alerts(self):
+        problems = _run(_at(17, 0), premarket=_COMPLETED, perf=False, heartbeat_age=5.0)
+        assert any("No end-of-day performance" in p for p in problems)
 
     def test_not_flagged_before_eod_is_due(self):
-        assert _run(_at(14, 0), premarket=_COMPLETED, eod=None, heartbeat_age=5.0) == []
+        assert _run(_at(14, 0), premarket=_COMPLETED, perf=False, heartbeat_age=5.0) == []
 
-    def test_present_eod_is_silent(self):
-        assert _run(_at(17, 0), premarket=_COMPLETED, eod=_COMPLETED, heartbeat_age=5.0) == []
+    def test_recorded_performance_is_silent(self):
+        assert _run(_at(17, 0), premarket=_COMPLETED, perf=True, heartbeat_age=5.0) == []
+
+    def test_a_running_eod_is_not_reported_as_missing(self):
+        """
+        The 27 July false alarm. EOD ran, closed out and emailed the P&L, but it runs under the
+        premarket session id, so there was no session_type='eod' row for the old check to find and
+        it alerted every hour from 16:30 ET onward. The performance row is what EOD really writes.
+        """
+        assert _run(_at(21, 42), premarket=_COMPLETED, perf=True, heartbeat_age=5.0) == []
 
 
 class TestNonTradingDays:
@@ -113,8 +122,8 @@ class TestNonTradingDays:
 class TestAlerting:
     def test_problems_are_alerted_and_returned(self):
         from sessions.watchdog import run_health_checks
-        a, b, c = _state(premarket=None, heartbeat_age=None)
-        with a, b, c, patch("core.alerts.send_alert") as alert:
+        a, b, c, d = _state(premarket=None, heartbeat_age=None)
+        with a, b, c, d, patch("core.alerts.send_alert") as alert:
             problems = run_health_checks(_at(11, 30))
         assert problems
         assert alert.called
@@ -124,8 +133,8 @@ class TestAlerting:
 
     def test_a_healthy_check_sends_nothing(self):
         from sessions.watchdog import run_health_checks
-        a, b, c = _state(premarket=_COMPLETED, heartbeat_age=5.0)
-        with a, b, c, patch("core.alerts.send_alert") as alert:
+        a, b, c, d = _state(premarket=_COMPLETED, heartbeat_age=5.0)
+        with a, b, c, d, patch("core.alerts.send_alert") as alert:
             problems = run_health_checks(_at(11, 30))
         assert problems == []
         assert not alert.called

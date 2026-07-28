@@ -284,6 +284,30 @@ def heartbeat_age_minutes(job: str) -> Optional[float]:
     return (_now() - last).total_seconds() / 60
 
 
+# ── Did the day's work actually land ─────────────────────────────────────────
+#
+# EOD does NOT get a run row of its own. It runs under the premarket session id (eod.py calls
+# today_premarket_run_id), and open_run upserts with ignore_duplicates, so the premarket row wins
+# and the "eod" session_type is discarded. There has never been a session_type='eod' row.
+#
+# Pinning EOD to its own session was tried and reverted (824103a) because it missed the rows that
+# reconcile, so the fix is NOT to give EOD a run record. Ask instead whether the day's outcome was
+# written: EOD computes performance and upserts one c_daily_performance row per date, which is the
+# thing "today's performance was not recorded" is actually about.
+
+_PERFORMANCE_TABLE = "c_daily_performance"
+
+
+def performance_recorded(on_day: Optional[str] = None) -> bool:
+    """True when EOD has written today's performance row. The honest end-of-day liveness signal."""
+    day = on_day or date.today().isoformat()
+    rows = db.execute_with_retry(
+        db.get_client().table(_PERFORMANCE_TABLE).select("date").eq("date", day).limit(1),
+        description="performance_recorded",
+    ).data or []
+    return bool(rows)
+
+
 def parse_ts(raw: Any) -> Optional[datetime]:
     """
     Parse a Postgres timestamp into an aware UTC datetime.

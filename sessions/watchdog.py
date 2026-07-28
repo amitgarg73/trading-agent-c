@@ -149,12 +149,15 @@ def check_expected_work(now_et: datetime | None = None) -> list[str]:
                 f"Open positions may not be under management."
             )
 
+    # Ask whether the day's outcome landed, NOT whether an "eod" run row exists. EOD deliberately
+    # runs under the premarket session id, so there is no session_type='eod' row and never has been;
+    # checking for one alerted every single evening while EOD was in fact running fine. What EOD
+    # does write, once it has closed out and computed the day, is the performance row.
     if now_t >= _EOD_LATE_AFTER:
-        eod = run_state.today_run("eod", today)
-        if not eod:
+        if not run_state.performance_recorded(today):
             problems.append(
-                f"No end-of-day run recorded for {today}. Positions may not have been closed "
-                f"and today's performance was not recorded."
+                f"No end-of-day performance recorded for {today}. Positions may not have been "
+                f"closed and the day was not scored."
             )
 
     return problems
