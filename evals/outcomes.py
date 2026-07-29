@@ -81,10 +81,17 @@ def write_eod_outcome_metrics(
 ) -> None:
     """Write EOD P&L and risk metrics to ag_outcomes, snapshotting avg L4 quality for correlation.
 
-    Beyond P&L, this emits the drawdown / limits / single-trade-loss signals the success contract
-    grades against (conditions s2, s3, f2, r1), computed from the session's closed trades. Pass
-    `trades` (the session's closed trades, each carrying position_size and realized_pnl); defaults
-    to an empty/zero session.
+    This writes to OUR OWN database (SUPABASE_URL), which is this fleet's book of record. It is NOT
+    how Provy sees these numbers and never was: ARGUS_URL points at Provy production while
+    SUPABASE_URL is our own project, so nothing written here is visible to the contract. That
+    mismatch is what made the risk conditions look wired for weeks while grading from nothing.
+
+    Provy is fed by `push_outcome_signals`, over the API, from the same `compute_risk_metrics`
+    values. Keep both: this is our record, that is the report. Do not "fix" this by pointing it at
+    Provy's database, which we do not own and cannot write to.
+
+    Pass `trades` (the session's closed trades, each carrying position_size and realized_pnl);
+    defaults to an empty/zero session.
 
     Skipped silently when TENANT_ID is unset or any DB error occurs.
     """
@@ -152,6 +159,55 @@ def write_eod_outcome_metrics(
         print(f"[outcomes] Wrote {len(rows)} outcome metrics (quality_score={quality_score})")
     except Exception as e:
         print(f"[outcomes] Failed to write outcome metrics: {e}")
+
+
+def push_outcome_signals(
+    session_id: str,
+    realized_pnl: float,
+    trades_total: int,
+    *,
+    trades: list[dict] | None = None,
+) -> bool:
+    """Report the session's settled risk signals to Provy, so the contract grades on reality.
+
+    The per-trade ledger push (push_trade_outcomes) carries a P&L number per ticker and nothing
+    else, so the only contract conditions that ever graded were the two reading realized_pnl, and
+    they graded from the AGENTS' OWN trace payloads rather than from what settled. The three risk
+    conditions (drawdown, position limits, worst single-trade loss) graded from nothing at all.
+    Measured against production on 2026-07-29: 4 of the 6 conditions had never been measured once.
+
+    These signals are per SESSION, not per trade, so they go to the session-scoped endpoint. Sending
+    them through the ledger route would need a synthetic entity_id, and Provy HOLDS an outcome for a
+    work item it never predicted, so every session would leave a permanent unreconcilable row.
+
+    Best-effort by design: Provy is never in the trade critical path, so a delivery failure is a
+    logged warning. It returns the delivery result rather than swallowing it, because a dropped
+    outcome that logs like a success is what hid this gap in the first place.
+    """
+    from trace.logger import _ingest_post
+
+    risk = compute_risk_metrics(trades or [], int(trades_total), _max_positions())
+    payload = {
+        "session_id": session_id,
+        "signals": {
+            # realized_pnl is sent here too, deliberately. It is already in the ledger as a per-ticker
+            # value, but the contract's conditions grade at session grain, and until now they read it
+            # off the agents' own traces — an estimate standing in for a settled fact.
+            "realized_pnl":               float(realized_pnl),
+            "max_drawdown_pct":           risk["max_drawdown_pct"],
+            "within_limits":              bool(risk["within_limits"]),
+            "max_single_trade_loss_pct":  risk["max_single_trade_loss_pct"],
+        },
+    }
+    try:
+        if _ingest_post("/api/ingest/outcome/signals", payload):
+            print(f"[outcomes] pushed {len(payload['signals'])} outcome signals for session {session_id}")
+            return True
+        print(f"[outcomes] WARNING: outcome signals NOT accepted for session {session_id}")
+        return False
+    except Exception as e:
+        print(f"[outcomes] outcome signal push failed for session {session_id}: {e}")
+        return False
 
 
 def trigger_server_judge(session_id: str) -> None:

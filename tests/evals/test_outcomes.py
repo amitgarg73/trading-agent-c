@@ -381,3 +381,76 @@ class TestTriggerServerJudge:
              patch("urllib.request.urlopen") as uo:
             backfill_server_judge()
             uo.assert_not_called()
+
+
+class TestPushOutcomeSignals:
+    """The session's settled risk signals go to Provy over the API.
+
+    Before this existed, the only thing reaching Provy was a per-ticker P&L number, so the two
+    conditions reading realized_pnl graded from the agents' OWN trace payloads and the three risk
+    conditions graded from nothing. Measured against production on 2026-07-29: four of the six
+    contract conditions had never been measured once.
+    """
+
+    def _run(self, *, realized_pnl=0.0, trades_total=0, trades=None, accepted=True):
+        posted = []
+
+        def fake_post(path, payload):
+            posted.append((path, payload))
+            return accepted
+
+        with patch("trace.logger._ingest_post", side_effect=fake_post):
+            from evals.outcomes import push_outcome_signals
+            ok = push_outcome_signals(
+                "sess-1", realized_pnl, trades_total, trades=trades or [],
+            )
+        return ok, posted
+
+    def test_posts_to_the_session_scoped_route_not_the_ledger(self):
+        # The ledger's grain is the work item; these signals are per session. Sending them through
+        # /api/ingest/outcome would need a synthetic entity_id, and Provy HOLDS an outcome for a work
+        # item it never predicted, so every session would leave a permanent unreconcilable row.
+        ok, posted = self._run()
+        assert ok is True
+        assert [p for p, _ in posted] == ["/api/ingest/outcome/signals"]
+        assert posted[0][1]["session_id"] == "sess-1"
+
+    def test_carries_every_signal_the_contract_grades_on(self):
+        _, posted = self._run(
+            realized_pnl=-120.0,
+            trades_total=2,
+            trades=[
+                {"ticker": "CAT", "realized_pnl": 30.0,   "position_size": 3000.0, "close_time": "2026-07-29T13:00:00"},
+                {"ticker": "GE",  "realized_pnl": -150.0, "position_size": 3000.0, "close_time": "2026-07-29T14:00:00"},
+            ],
+        )
+        signals = posted[0][1]["signals"]
+        assert set(signals) == {
+            "realized_pnl", "max_drawdown_pct", "within_limits", "max_single_trade_loss_pct",
+        }
+        assert signals["realized_pnl"] == -120.0
+        # Peak cumulative P&L was +30, trough -120, so the fall is 150 on 6000 deployed = 2.5%.
+        assert signals["max_drawdown_pct"] == pytest.approx(2.5)
+        # Worst single loss is 150 on its own 3000 position = 5%.
+        assert signals["max_single_trade_loss_pct"] == pytest.approx(5.0)
+
+    def test_within_limits_is_a_real_boolean(self):
+        # compute_risk_metrics returns 1.0/0.0. Provy records a signal's declared type at intake and
+        # a 0/1 NUMBER is not a flag there, so it must be sent as a bool or the condition grades as a
+        # number comparison against a threshold nobody set.
+        _, posted = self._run(trades_total=1)
+        assert posted[0][1]["signals"]["within_limits"] is True
+
+    def test_zero_trade_session_still_reports(self):
+        # "No drawdown, within limits" is a real result, not an absence of one. A day that reported
+        # nothing would leave the contract ungraded and look identical to a delivery failure.
+        ok, posted = self._run(realized_pnl=0.0, trades_total=0, trades=[])
+        assert ok is True
+        assert posted[0][1]["signals"]["max_drawdown_pct"] == 0.0
+        assert posted[0][1]["signals"]["within_limits"] is True
+
+    def test_reports_a_rejected_push_instead_of_claiming_success(self):
+        # A dropped outcome that logs like a success is exactly what hid this gap for weeks.
+        ok, posted = self._run(accepted=False)
+        assert ok is False
+        assert len(posted) == 1

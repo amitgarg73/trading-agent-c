@@ -396,7 +396,9 @@ def main() -> None:
     tracer.log_decision("orchestrator", "trades_scored", detail=scoring)
 
     # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
-    from evals.outcomes import write_eod_outcome_metrics, push_trade_outcomes, _NO_TRADE_EXITS
+    from evals.outcomes import (
+        write_eod_outcome_metrics, push_trade_outcomes, push_outcome_signals, _NO_TRADE_EXITS,
+    )
     today_trades = get_today_trades(session_id)
     write_eod_outcome_metrics(
         session_id, perf.realized_pnl, perf.win_rate, perf.trades_total,
@@ -422,6 +424,16 @@ def main() -> None:
         tracer.log_decision("orchestrator", "ledger_outcomes_pushed",
                             detail={"count": pushed, "reportable": reportable,
                                     "dropped": reportable - pushed})
+
+    # Report the SESSION's settled risk signals, which the per-trade push above cannot carry.
+    # Without this the contract's risk conditions grade from nothing and its P&L conditions grade
+    # from the agents' own trace payloads, i.e. from an estimate rather than from what settled.
+    # Runs on every EOD including a zero-trade day, where "no drawdown, within limits" is a real
+    # result and not an absence of one.
+    signals_ok = push_outcome_signals(
+        session_id, perf.realized_pnl, perf.trades_total, trades=today_trades,
+    )
+    tracer.log_decision("orchestrator", "outcome_signals_pushed", detail={"accepted": signals_ok})
 
     # Principal protection check
     # check_protection_status() records its own event internally when a tier fires,
