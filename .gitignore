@@ -25,3 +25,7 @@ agents/ts/dist/
 
 # macOS
 .DS_Store
+
+# Secret backups — never commit
+*.bak-*
+*.bak
