@@ -76,8 +76,69 @@ def get_account() -> dict:
 
 # ── Prices ─────────────────────────────────────────────────────────────────────
 
+# An ask more than this far above the last traded price is not believable and is
+# not used. See _credible_ask below for why this exists.
+MAX_ASK_OVER_LAST = 0.01   # 1%
+
+
+def get_last_trade(ticker: str) -> Optional[float]:
+    """Return the last traded price for a ticker, or None on failure.
+
+    A trade is a fact: somebody paid that. A quote is only an intention, and on a
+    single-venue feed it can be neither current nor real.
+    """
+    try:
+        from alpaca.data.requests import StockLatestTradeRequest
+        req    = StockLatestTradeRequest(symbol_or_symbols=[ticker])
+        trades = _dclient().get_stock_latest_trade(req)
+        t = trades.get(ticker)
+        if t:
+            px = getattr(t, "price", None)
+            if px and float(px) > 0:
+                return round(float(px), 4)
+    except Exception as e:
+        print(f"  [alpaca] get_last_trade({ticker}): {e}")
+    return None
+
+
+def _credible_ask(ticker: str, ask: float) -> float:
+    """Return `ask` if the last trade corroborates it, otherwise the last trade.
+
+    ⛔ WHY THIS EXISTS. This account is on the free market-data plan, so
+    get_stock_latest_quote returns the IEX top of book, NOT the consolidated NBBO.
+    IEX carries a small share of volume, so when nothing is resting at the top of
+    its book the quote goes wide and stale — and it does not expire, it just sits
+    there.
+
+    On 2026-07-31 TGT's ask was $149.61 at 14:31, still $149.61 at 16:31, and still
+    $149.61 at 18:59, while the stock traded between $143 and $145 all day. Live
+    spreads on the same feed that afternoon: ABNB 6.4%, DDOG 5.4%. The 4% staleness
+    gate in submit_bracket_order compared correct proposals against that fiction and
+    skipped every approved pick, on both scans, on both days. Nine of twenty-nine
+    approved picks filled over the preceding five sessions; zero of five on the 31st.
+    Every run still completed and reported success.
+
+    Full write-up: design/why-no-trades-2026-07-31.md.
+
+    If the last trade cannot be fetched the ask is returned unchanged — this guard
+    only ever replaces a quote it can prove wrong, and never makes the caller blind.
+    """
+    last = get_last_trade(ticker)
+    if not last or last <= 0:
+        return ask
+    if ask > last * (1 + MAX_ASK_OVER_LAST):
+        print(f"  [alpaca] {ticker} ask ${ask:.2f} is {(ask - last) / last:.1%} above the "
+              f"last trade ${last:.2f} — quote not believable, using the traded price")
+        return last
+    return ask
+
+
 def get_live_price(ticker: str) -> Optional[float]:
-    """Return latest ask price for a ticker, or None on failure."""
+    """Return the current price for a ticker, or None on failure.
+
+    Prefers the ask (what a buy would actually pay) but only once the last trade has
+    corroborated it, so a stale single-venue quote cannot poison every caller.
+    """
     try:
         from alpaca.data.requests import StockLatestQuoteRequest
         req    = StockLatestQuoteRequest(symbol_or_symbols=[ticker])
@@ -87,12 +148,13 @@ def get_live_price(ticker: str) -> Optional[float]:
             ask = getattr(q, "ask_price", None)
             bid = getattr(q, "bid_price", None)
             if ask and float(ask) > 0:
-                return round(float(ask), 4)
+                return round(_credible_ask(ticker, round(float(ask), 4)), 4)
             if bid and float(bid) > 0:
                 return round(float(bid), 4)
     except Exception as e:
         print(f"  [alpaca] get_live_price({ticker}): {e}")
-    return None
+    # Last resort: a trade actually happened, even if no quote is available.
+    return get_last_trade(ticker)
 
 
 def get_day_open(ticker: str) -> Optional[float]:
@@ -150,7 +212,9 @@ def submit_bracket_order(
         if q:
             raw_ask = getattr(q, "ask_price", None)
             if raw_ask and float(raw_ask) > 0:
-                ask = round(float(raw_ask), 4)
+                # Corroborate the quote against the last trade before any gate reads
+                # it. A stale IEX ask silently stopped all trading on 30-31 Jul 2026.
+                ask = round(_credible_ask(ticker, round(float(raw_ask), 4)), 4)
                 if ask > entry_price * 1.04:
                     print(f"  [alpaca] {ticker} STALENESS GATE: ask ${ask:.2f} is "
                           f"{(ask-entry_price)/entry_price:.1%} above proposal ${entry_price:.2f} — skipping order")

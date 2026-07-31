@@ -24,15 +24,25 @@ _INTRA_ID_2    = "sess-intra-0002"
 
 
 class TestEntryOutcome:
-    """A zero-fill run (every approved pick skipped at the order gate) must not
-    report as 'intraday_entries_placed' — it placed nothing."""
+    """A zero-fill run placed nothing, so it must not read as 'entries placed'. It
+    must also not read as 'all rejected', which means RISK turned the picks down."""
 
-    def test_zero_fills_reads_as_all_rejected(self):
-        assert _entry_outcome(0) == "intraday_all_rejected"
+    def test_zero_fills_blames_the_gate_not_risk(self):
+        # Regression, 2026-07-31: this returned "intraday_all_rejected", so two days
+        # of runs where risk approved every pick and a stale quote skipped them at the
+        # order gate reported as risk rejections in the daily email.
+        assert _entry_outcome(0) == "intraday_entry_gate_skipped"
+        assert _entry_outcome(0) != "intraday_all_rejected"
 
     def test_some_fills_reads_as_entries_placed(self):
         assert _entry_outcome(1) == "intraday_entries_placed"
         assert _entry_outcome(3) == "intraday_entries_placed"
+
+    def test_every_outcome_is_declared(self):
+        # A terminal_reason the rest of the system has never heard of is worse than a
+        # wrong one, so keep _entry_outcome's range inside _SCAN_OUTCOMES.
+        from sessions.intraday import _SCAN_OUTCOMES
+        assert {_entry_outcome(0), _entry_outcome(2)} <= _SCAN_OUTCOMES
 
 
 class TestGetPremarketSessionId:

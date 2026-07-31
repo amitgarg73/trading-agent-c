@@ -19,15 +19,29 @@ _POLL_START  = time(9, 15)
 _POLL_END    = time(15, 50)
 _ENTRY_CLOSE = time(13, 0)
 
-_SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected", "intraday_entries_placed"}
+_SCAN_OUTCOMES = {"no_intraday_candidates", "intraday_all_rejected",
+                  "intraday_entry_gate_skipped", "intraday_entries_placed"}
 
 
 def _entry_outcome(count: int) -> str:
-    """Honest terminal_reason for the intraday entry step. If every approved pick was
-    skipped at the order gate (chase / staleness), the session placed nothing, so it is
-    'all rejected' — not 'entries placed'. Both are in _SCAN_OUTCOMES and treated alike
-    downstream; this only stops a zero-fill run from reading as if it traded."""
-    return "intraday_entries_placed" if count > 0 else "intraday_all_rejected"
+    """Honest terminal_reason for the intraday entry step.
+
+    ⛔ These are three different failures and must not share a name:
+
+      no_intraday_candidates      research proposed nothing
+      intraday_all_rejected       RISK rejected every proposal
+      intraday_entry_gate_skipped risk APPROVED, the order gate skipped them anyway
+                                  (chase / staleness / broker rejection)
+
+    Until 2026-07-31 a zero-fill entry step returned 'intraday_all_rejected', so a run
+    where risk approved three picks and the order gate dropped all three reported as
+    though risk had turned them down. The daily email leads with terminal_reason, so it
+    blamed the risk agent for two days while the actual cause was a stale price quote.
+    The result_summary said the truth the whole time and nothing read it.
+
+    See design/why-no-trades-2026-07-31.md.
+    """
+    return "intraday_entries_placed" if count > 0 else "intraday_entry_gate_skipped"
 
 
 def get_premarket_session_id() -> Optional[str]:

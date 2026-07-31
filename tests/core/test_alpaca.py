@@ -58,11 +58,24 @@ class TestGetLivePrice:
         quote = MagicMock()
         quote.ask_price = "185.50"
         quote.bid_price = "185.40"
-        with patch("core.alpaca._dclient") as mc:
+        with patch("core.alpaca._dclient") as mc, \
+             patch("core.alpaca.get_last_trade", return_value=185.45):
             mc.return_value.get_stock_latest_quote.return_value = {"AAPL": quote}
             from core.alpaca import get_live_price
             result = get_live_price("AAPL")
         assert result == pytest.approx(185.50)
+
+    def test_stale_ask_falls_back_to_the_traded_price(self):
+        # The 2026-07-31 condition: a quote nothing has traded near.
+        quote = MagicMock()
+        quote.ask_price = "149.61"
+        quote.bid_price = "0"
+        with patch("core.alpaca._dclient") as mc, \
+             patch("core.alpaca.get_last_trade", return_value=143.24):
+            mc.return_value.get_stock_latest_quote.return_value = {"TGT": quote}
+            from core.alpaca import get_live_price
+            result = get_live_price("TGT")
+        assert result == pytest.approx(143.24)
 
     def test_falls_back_to_bid_when_ask_zero(self):
         quote = MagicMock()
@@ -74,8 +87,19 @@ class TestGetLivePrice:
             result = get_live_price("AAPL")
         assert result == pytest.approx(185.40)
 
-    def test_returns_none_on_exception(self):
-        with patch("core.alpaca._dclient") as mc:
+    def test_quote_failure_falls_back_to_the_last_trade(self):
+        # Behaviour change 2026-07-31: a failed quote used to mean no price at all.
+        # A trade that actually happened is better than nothing.
+        with patch("core.alpaca._dclient") as mc, \
+             patch("core.alpaca.get_last_trade", return_value=185.10):
+            mc.return_value.get_stock_latest_quote.side_effect = Exception("rate limit")
+            from core.alpaca import get_live_price
+            result = get_live_price("AAPL")
+        assert result == pytest.approx(185.10)
+
+    def test_returns_none_when_both_sources_fail(self):
+        with patch("core.alpaca._dclient") as mc, \
+             patch("core.alpaca.get_last_trade", return_value=None):
             mc.return_value.get_stock_latest_quote.side_effect = Exception("rate limit")
             from core.alpaca import get_live_price
             result = get_live_price("AAPL")
@@ -88,13 +112,24 @@ _MARKET_OPEN   = patch("core.alpaca._is_market_open", return_value=True)
 _MARKET_CLOSED = patch("core.alpaca._is_market_open", return_value=False)
 
 
-def _mock_dclient(ticker: str, ask: float):
-    """Return a patched _dclient that reports the given ask price."""
+def _mock_dclient(ticker: str, ask: float, last: float | None = None):
+    """Return a patched _dclient reporting the given ask, and a last trade that
+    corroborates it.
+
+    `last` defaults to the ask, i.e. a healthy quote. Pass it explicitly to simulate
+    the stale-quote condition from 2026-07-31, where the ask sat several percent above
+    anything that had actually traded. Without a last trade the guard in
+    _credible_ask cannot tell a good quote from a fictional one, and a bare MagicMock
+    reports a last trade of $1.00, which would make every ask look implausible.
+    """
     quote = MagicMock()
     quote.ask_price = str(ask)
     quote.bid_price = "0"
+    trade = MagicMock()
+    trade.price = str(ask if last is None else last)
     mc = MagicMock()
     mc.return_value.get_stock_latest_quote.return_value = {ticker: quote}
+    mc.return_value.get_stock_latest_trade.return_value = {ticker: trade}
     return patch("core.alpaca._dclient", mc)
 
 
@@ -775,3 +810,44 @@ class TestOrderPrefix:
             submit_bracket_order("MSFT", 5, 420.0, 435.0, 415.0)
         call_args = mc.return_value.submit_order.call_args[0][0]
         assert call_args.client_order_id.startswith("stratc_")
+
+
+# ── _credible_ask ──────────────────────────────────────────────────────────────
+# Regression, 2026-07-31. The free data plan returns the IEX top of book, not the
+# NBBO. TGT's ask sat at $149.61 from 14:31 to 18:59 while the stock traded
+# $143-145, so the 4% staleness gate skipped every risk-approved pick on both scans
+# on both days and every run still reported success.
+# See design/why-no-trades-2026-07-31.md.
+
+class TestCredibleAsk:
+    def test_ask_close_to_last_trade_is_kept(self):
+        from core.alpaca import _credible_ask
+        with patch("core.alpaca.get_last_trade", return_value=143.24):
+            assert _credible_ask("TGT", 143.60) == 143.60
+
+    def test_stale_ask_is_replaced_by_the_traded_price(self):
+        from core.alpaca import _credible_ask
+        # The actual numbers from the incident.
+        with patch("core.alpaca.get_last_trade", return_value=143.24):
+            assert _credible_ask("TGT", 149.61) == 143.24
+
+    def test_ask_below_the_last_trade_is_never_raised(self):
+        # The guard exists to stop the gate seeing a price that is too HIGH. A cheap
+        # ask is a real opportunity and must pass through untouched.
+        from core.alpaca import _credible_ask
+        with patch("core.alpaca.get_last_trade", return_value=143.24):
+            assert _credible_ask("TGT", 141.00) == 141.00
+
+    def test_no_last_trade_leaves_the_ask_alone(self):
+        # Never blind the caller: only replace a quote we can prove wrong.
+        from core.alpaca import _credible_ask
+        with patch("core.alpaca.get_last_trade", return_value=None):
+            assert _credible_ask("TGT", 149.61) == 149.61
+
+    def test_the_incident_would_no_longer_skip_the_order(self):
+        # The end-to-end point: with the guard, the corroborated ask sits inside the
+        # 4% staleness gate, so the order is submitted instead of silently dropped.
+        from core.alpaca import _credible_ask
+        proposal = 143.41
+        with patch("core.alpaca.get_last_trade", return_value=143.24):
+            assert _credible_ask("TGT", 149.61) <= proposal * 1.04
