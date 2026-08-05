@@ -164,13 +164,25 @@ def run_scanner(
     scan_date: date | None = None,
     tickers: list[str] | None = None,
     min_score: int = 1,
+    tracer: Any | None = None,
 ) -> int:
     """
     Score all universe tickers and write results to c_scan_results.
     Returns count of rows written (including already-scored rows from today).
     Idempotent: skips tickers already scored for scan_date.
+
+    `tracer` is optional and off by default, so backtests and ad-hoc runs are unaffected.
+    When a session passes one, the scan reports itself as the `scanner` agent.
+
+    WHY: this module replaced agents/scanner_agent.py, which emitted spans, and did not carry the
+    tracing across. The scan kept running (126 candidates a morning) and Provy saw nothing, so
+    Scanner Agent showed as a normal row with a stale grade and an empty tool strip for nine days.
+    An agent that stops reporting must not look like one that had a quiet week.
     """
     from core.db import get_client
+
+    if tracer:
+        tracer.start_agent_span("scanner")
 
     today     = scan_date or date.today()
     today_iso = today.isoformat()
@@ -188,6 +200,9 @@ def run_scanner(
     symbols = [s for s in symbols if s not in already_scored]
 
     if not symbols:
+        if tracer:
+            tracer.log_decision("scanner", "already_scored",
+                                detail={"tickers": len(already_scored), "scan_date": today_iso})
         return len(already_scored)
 
     try:
@@ -204,10 +219,14 @@ def run_scanner(
             )
             raw = _future.result(timeout=_DOWNLOAD_TIMEOUT)
     except FuturesTimeoutError:
-        print(f"[scanner] yfinance download timed out after {_DOWNLOAD_TIMEOUT}s — aborting scan")
+        print(f"[scanner] yfinance download timed out after {_DOWNLOAD_TIMEOUT}s, aborting scan")
+        if tracer:
+            tracer.log_error("scanner", f"price download timed out after {_DOWNLOAD_TIMEOUT}s")
         return 0
     except Exception as e:
         print(f"[scanner] yfinance download failed: {e}")
+        if tracer:
+            tracer.log_error("scanner", f"price download failed: {e}")
         return 0
 
     rows_written     = 0
@@ -257,4 +276,11 @@ def run_scanner(
         f"(price={filtered_price}, atr={filtered_atr}, "
         f"volume={filtered_volume}, score={filtered_score})"
     )
-    return rows_written + len(already_scored)
+    total = rows_written + len(already_scored)
+    if tracer:
+        tracer.log_decision("scanner", "candidates_scored", detail={
+            "candidates": total, "written": rows_written, "considered": len(symbols),
+            "filtered_price": filtered_price, "filtered_atr": filtered_atr,
+            "filtered_volume": filtered_volume, "filtered_score": filtered_score,
+        })
+    return total

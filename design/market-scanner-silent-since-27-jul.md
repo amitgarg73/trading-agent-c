@@ -21,7 +21,41 @@ Spans per base agent for the Strategy C workflow in Provy production
 The pipeline itself is healthy: 3 sessions a day, 44 traces today, zeros only on
 weekends. So this is not an ingest outage. Two specific agents stopped.
 
-## The likely cause, unconfirmed
+## Root cause, CONFIRMED 4 Aug 2026 — two different causes
+
+**Scanner: the work still happens, untraced.** `scanner/scanner.py` replaced `agents/scanner_agent.py`
+and did not carry the tracing across. It scans ~126 candidates every morning and emitted nothing. The
+traced module is imported by nothing but tests.
+
+**Market: the work stopped happening.** `run_market_agent` is only called from
+`run_premarket_pipeline`. Premarket now returns before that, at either the opening-entry branch or
+`deferred_to_open`. Intraday does not call it either: it hand-builds the report the agent used to
+produce, with `decision: "GO"`, `bias: "NEUTRAL"` and `skip_reason: None`. **So the macro gate, and
+the conviction-scaled `max_positions`, have not run since 27 Jul.** `check_protection_status()` is
+account-level (suspension, daily hard stop), not market conditions.
+
+**The gate was doing real work.** Downstream `skip:*` spans, emitted only by the orchestrator's
+market-SKIP branch, appear on 19 Jun, 22 Jun, 3 Jul and 6 Jul. An earlier read of this that said
+"0 skips since 18 Jun" was counting a terminal_reason label, not the behaviour.
+
+**No relaxation found in code or config.** The prompt and the three circuit breakers (VIX > 35,
+futures < -2%, all three indices < -1%) are untouched since 6 Jun, and `c_agent_config` has no market
+or VIX key at all.
+
+## Fix applied, 4 Aug 2026
+
+- **Scanner reports itself.** `run_scanner` takes an optional `tracer`, default `None`, so backtests
+  and ad-hoc runs are unaffected. Every exit reports, including the two download-failure paths and the
+  already-scored short circuit, because a scan that dies silently looks like a scan that never ran.
+- **Market restored OBSERVATION ONLY** on the deferral path. It runs, it is traced, its verdict is
+  recorded with `would_have_blocked_trading` and `acted_on: false`, and **nothing reads it**. Non-fatal
+  by construction. Restoring the signal and restoring the gate are two decisions; this is only the
+  second. A test fails if any future edit branches on the verdict.
+
+**STILL OPEN: whether to act on it.** After a fortnight of "what it would have said", decide between
+restoring the gate live and retiring the agent in Provy. That is now an evidence question.
+
+## The earlier, unconfirmed reading
 
 `agents/market_agent.py` and `agents/scanner_agent.py` still exist and still call
 `tracer.log_tool_call(...)`, but nothing outside `tests/` and

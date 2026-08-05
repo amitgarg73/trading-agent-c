@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 import pytest
 
@@ -802,10 +803,19 @@ class TestBatchGetIntradaySignals:
 class TestOrderPrefix:
     def test_client_order_id_starts_with_stratc(self):
         order = _mock_order(status="filled", filled_avg_price=185.0)
-        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt:
+        # The staleness gate (a788e28, 31 Jul) skips any order whose ask is >4% above the proposal.
+        # This test predates it and used the module default ask of $493 against a $420 proposal, so
+        # the order was never submitted and call_args was None. Quote near the proposal so the gate
+        # passes and the assertion can reach the order it is actually about.
+        with patch("core.alpaca._client") as mc, patch("core.alpaca.time") as mt, \
+             patch("core.alpaca._credible_ask", side_effect=lambda _t, ask: ask), \
+             patch("core.alpaca._dclient") as mdc:
             mt.sleep = MagicMock()
             mc.return_value.submit_order.return_value = order
             mc.return_value.get_order_by_id.return_value = order
+            mdc.return_value.get_stock_latest_quote.return_value = {
+                "MSFT": SimpleNamespace(ask_price=420.5)
+            }
             from core.alpaca import submit_bracket_order
             submit_bracket_order("MSFT", 5, 420.0, 435.0, 415.0)
         call_args = mc.return_value.submit_order.call_args[0][0]

@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytz
 
-from agents.market_agent import run_market_agent as run_market_agent_v1
+from agents.market_agent import run_market_agent
 from agents.orchestrator import run_premarket_pipeline
 from core.agent_config import is_trading_day, load_agent_config
 from core.alerts import send_alert
@@ -328,7 +328,7 @@ def main(bypass_checks: bool = False) -> None:
         session_closed = False
         from scanner.scanner import run_scanner
         print("[premarket] Running scanner...")
-        candidate_count = run_scanner(scan_date=date.today())
+        candidate_count = run_scanner(scan_date=date.today(), tracer=tracer)
         print(f"[premarket] Scanner: {candidate_count} candidates ready")
 
         if candidate_count == 0:
@@ -388,6 +388,36 @@ def main(bypass_checks: bool = False) -> None:
             return
 
         if now_t < _MARKET_OPEN:
+            # OBSERVATION ONLY (4 Aug 2026). The macro read stopped running on 27 Jul, when this
+            # branch began returning before run_premarket_pipeline, which is the only thing that
+            # calls the market agent. Intraday does not call it either: it hand-builds the report
+            # with decision "GO", bias "NEUTRAL" and the static max_positions, so the gate that
+            # stood the system down on 4 days between 17 Jun and 6 Jul has not run since.
+            #
+            # ⛔ THIS DOES NOT TRADE ON IT. The decision is recorded and nothing reads it, on
+            # purpose: restoring the gate and restoring the signal are two separate decisions, and
+            # this is only the second. Once there is a fortnight of "what it would have said", the
+            # first becomes an evidence question. Non-fatal by construction, so a macro failure can
+            # never stop a scan from being recorded.
+            try:
+                market_report = run_market_agent(tracer, params)
+                decision = market_report.get("decision")
+                print(f"[premarket] Market read (observation only): {decision} "
+                      f"— {market_report.get('summary', '')[:120]}")
+                tracer.log_decision("market", "observation_only", detail={
+                    "decision":      decision,
+                    "bias":          market_report.get("bias"),
+                    "max_positions": market_report.get("max_positions"),
+                    "skip_reason":   market_report.get("skip_reason"),
+                    "confidence":    market_report.get("confidence"),
+                    "key_factors":   market_report.get("key_factors"),
+                    "would_have_blocked_trading": decision == "SKIP",
+                    "acted_on": False,
+                })
+            except Exception as e:
+                print(f"  [premarket] Market read failed (non-fatal, observation only): {e}")
+                tracer.log_error("market", f"observation-only read failed: {e}")
+
             print(f"[premarket] Pre-open ({now_et.strftime('%H:%M ET')}) — {candidate_count} candidates "
                   f"scanned; deferring entry decision to market open (intraday).")
             tracer.close_session(
@@ -419,7 +449,7 @@ def main(bypass_checks: bool = False) -> None:
 
         # V1 shadow eval — non-blocking, does not affect trades
         try:
-            v1_report = run_market_agent_v1(tracer, params)
+            v1_report = run_market_agent(tracer, params)
             _log_market_eval(session_id, v1_report, v2_report)
         except Exception as e:
             print(f"  [premarket] Shadow eval failed (non-fatal): {e}")

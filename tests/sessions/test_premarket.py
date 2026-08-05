@@ -463,7 +463,7 @@ class TestPremarketMain:
         assert "Suspended" in mock_alert.call_args[0][0]
 
     _SHADOW_PATCHES = (
-        patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT),
+        patch("sessions.premarket.run_market_agent", return_value=_V1_REPORT),
         patch("sessions.premarket._log_market_eval"),
         patch("scanner.scanner.run_scanner", return_value=5),
     )
@@ -482,7 +482,7 @@ class TestPremarketMain:
                    return_value={**_RESULT_WITH_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades") as mock_exec, \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
-             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket.run_market_agent", return_value=_V1_REPORT), \
              patch("sessions.premarket._log_market_eval"), \
              patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert"):
@@ -536,7 +536,7 @@ class TestPremarketMain:
                    return_value={**_RESULT_NO_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades") as mock_exec, \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
-             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket.run_market_agent", return_value=_V1_REPORT), \
              patch("sessions.premarket._log_market_eval"), \
              patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert"):
@@ -559,7 +559,7 @@ class TestPremarketMain:
                    return_value={**_RESULT_NO_TRADES, "_v2_market_report": _V2_REPORT}), \
              patch("sessions.premarket._execute_trades"), \
              patch("sessions.premarket.TraceLogger") as mock_tracer_cls, \
-             patch("sessions.premarket.run_market_agent_v1", return_value=_V1_REPORT), \
+             patch("sessions.premarket.run_market_agent", return_value=_V1_REPORT), \
              patch("sessions.premarket._log_market_eval"), \
              patch("scanner.scanner.run_scanner", return_value=5), \
              patch("sessions.premarket.send_alert") as mock_alert:
