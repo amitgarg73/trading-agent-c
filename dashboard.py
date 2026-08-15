@@ -971,9 +971,7 @@ elif page == "Observability":
     # `[a for a in AGENT_ORDER if a in agent_stats]`, so a name that is not in this list is dropped
     # from the call chain graph and the timeline entirely. "learning" never matched anything (the
     # agent traces as "learner"), so the Learning Agent has been invisible here.
-    # ⚠ "scanner" also emits spans and is still missing from this list. Left out because its correct
-    # position in the sequence is a judgement call, not a rename.
-    AGENT_ORDER = ["market", "news_analyst", "research", "risk", "orchestrator", "learner"]
+    AGENT_ORDER = ["scanner", "market", "news_analyst", "research", "risk", "orchestrator", "learner"]
 
     tab_graph, tab_timeline, tab_stream = st.tabs(["Call Chain Graph", "Timeline", "Trace Stream"])
 
@@ -1017,6 +1015,7 @@ elif page == "Observability":
             g.attr("edge", fontname="Arial", fontsize="9", color="#666666")
 
             AGENT_COLORS = {
+                "scanner":      ("#155e63", "#d6f0f2"),
                 "market":       ("#1f4e79", "#dce9f7"),
                 "news_analyst": ("#4b2e83", "#ede9f7"),
                 "research":     ("#1a4731", "#d4edda"),
