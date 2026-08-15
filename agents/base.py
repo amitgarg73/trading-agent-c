@@ -107,6 +107,29 @@ def run_tool_loop(
                     })
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
+            continue
+
+        # ⛔ ANY OTHER STOP REASON USED TO FALL THROUGH AND SPIN. Neither branch above fired, nothing
+        # was appended to `messages`, and the next iteration sent a byte-identical request, which
+        # produced a byte-identical response, up to max_turns. The agent then died with a generic
+        # "hit the N-turn limit", which describes the symptom and hides the cause.
+        #
+        # It cost the Learning Agent every EOD run from 10 Aug 2026: four reads, then sixteen
+        # identical no-progress turns, twenty Sonnet calls burned per night, and on 12 Aug it tripped
+        # the account's API usage limit. The failure was in the traces the whole time and the error
+        # message pointed at the loop rather than at `max_tokens`. argus#583.
+        #
+        # Failing here is strictly better: same outcome, nineteen fewer calls, and the reason is in
+        # the message. `max_tokens` is the one worth naming, because the fix is a bigger budget or a
+        # shorter answer rather than anything about tools.
+        hint = (
+            " (the model's answer was truncated: raise max_tokens or ask for a shorter response)"
+            if response.stop_reason == "max_tokens" else ""
+        )
+        raise RuntimeError(
+            f"{agent_name}: tool loop stopped on '{response.stop_reason}' at turn {turn + 1} "
+            f"of {max_turns}, which the loop cannot act on{hint}"
+        )
 
     raise RuntimeError(f"{agent_name}: tool loop hit {max_turns}-turn limit without end_turn")
 
