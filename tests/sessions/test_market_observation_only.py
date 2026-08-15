@@ -62,6 +62,36 @@ class TestScannerReportsItself:
         assert 'already_scored' in src and 'log_decision' in src
         assert src.count('tracer.log_error("scanner"') == 2, 'both download failure paths must report'
 
+    def test_VISIBLE_IS_NOT_THE_SAME_AS_SCOREABLE(self):
+        """
+        The regression this file already exists for, one level deeper.
+
+        Restoring scanner's tracing with log_decision alone made it VISIBLE and left it UNSCOREABLE:
+        Provy's judge only reads steps carrying agent_reasoning, so scanner_candidate_quality had
+        nothing to score and the agent went unscored from 3 Aug 2026 while every row looked healthy.
+        A decision log is an operational record. It is not a voice.
+        """
+        src = inspect.getsource(scanner_mod.run_scanner)
+        assert 'tracer.log_agent_message(' in src, (
+            'scanner must emit reasoning, not only a decision log, or it cannot be quality scored'
+        )
+
+    def test_the_rationale_counts_rather_than_narrates(self):
+        """Every number in the reasoning has to come from a counter the scan incremented."""
+        say = scanner_mod._scan_rationale(
+            considered=126, already=0, written=8, min_score=1,
+            filtered_price=40, filtered_atr=12, filtered_volume=6, filtered_score=60,
+        )
+        assert '126 symbols' in say and '8 candidates' in say
+        assert 'Rejected 118' in say, 'the rejected total must reconcile with its own breakdown'
+
+    def test_an_empty_scan_says_so_out_loud(self):
+        say = scanner_mod._scan_rationale(
+            considered=30, already=0, written=0, min_score=2,
+            filtered_price=10, filtered_atr=0, filtered_volume=0, filtered_score=20,
+        )
+        assert 'No candidate cleared the screen' in say
+
     def test_no_tracer_means_no_calls(self):
         """Guards the default path: a None tracer must not raise."""
         src = inspect.getsource(scanner_mod.run_scanner)

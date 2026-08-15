@@ -283,4 +283,55 @@ def run_scanner(
             "filtered_price": filtered_price, "filtered_atr": filtered_atr,
             "filtered_volume": filtered_volume, "filtered_score": filtered_score,
         })
+        # ⛔ THE DECISION LOG ALONE IS INVISIBLE TO QUALITY SCORING, WHICH IS HOW THIS AGENT WENT
+        # UNSCORED FOR ELEVEN DAYS AFTER ITS TRACING WAS "RESTORED".
+        #
+        # Provy's judge only scores steps carrying `agent_reasoning`; a bare `log_decision` is an
+        # operational record and is skipped by design. So restoring the decision log made scanner
+        # VISIBLE (rows appear, the tool strip fills) without making it SCOREABLE, and the
+        # `scanner_candidate_quality` criterion had nothing to read. Last score: 3 Aug 2026.
+        #
+        # This agent has no LLM, so the reasoning is the screen itself: what it looked at, what it
+        # rejected and why. That is exactly what the criterion asks about, and it is honest, because
+        # every number in it is counted rather than narrated.
+        tracer.log_agent_message(
+            "scanner",
+            _scan_rationale(
+                considered=len(symbols), already=len(already_scored), written=rows_written,
+                min_score=min_score, filtered_price=filtered_price, filtered_atr=filtered_atr,
+                filtered_volume=filtered_volume, filtered_score=filtered_score,
+            ),
+            "candidates_scored" if total else "no_candidates",
+        )
     return total
+
+
+def _scan_rationale(
+    *, considered: int, already: int, written: int, min_score: int,
+    filtered_price: int, filtered_atr: int, filtered_volume: int, filtered_score: int,
+) -> str:
+    """
+    The screen, in words, for quality scoring.
+
+    Kept as a pure function so it is testable without a scan and without a tracer, and so the numbers
+    it reports can only come from the counters the scan actually incremented.
+    """
+    dropped = filtered_price + filtered_atr + filtered_volume + filtered_score
+    parts = [
+        f"Screened {considered} symbol{'' if considered == 1 else 's'} on daily bars and wrote "
+        f"{written} candidate{'' if written == 1 else 's'}"
+        + (f", with {already} already scored earlier today." if already else "."),
+    ]
+    if dropped:
+        reasons = []
+        if filtered_score:  reasons.append(f"{filtered_score} below the technical score floor of {min_score}")
+        if filtered_price:  reasons.append(f"{filtered_price} on price")
+        if filtered_atr:    reasons.append(f"{filtered_atr} on ATR")
+        if filtered_volume: reasons.append(f"{filtered_volume} on volume")
+        parts.append(f"Rejected {dropped}: " + ", ".join(reasons) + ".")
+    if not written and not already:
+        parts.append(
+            "No candidate cleared the screen, so the day has nothing to trade from this scan. "
+            "That is a result, not a failure, and it is reported rather than left silent."
+        )
+    return " ".join(parts)
