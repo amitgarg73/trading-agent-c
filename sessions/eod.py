@@ -474,7 +474,11 @@ def main() -> None:
                 send_alert("Strategy C — Goal Recommended",
                            "New goal recommendation — review in c_goals.")
         except Exception as e:
-            tracer.log_error("learning", f"Learning Agent failed: {e}")
+            # ⛔ The agent traces as "learner" (learning_agent.py run_tool_loop). This error path
+            # used "learning", so every failure emitted an agent name nothing else uses. Once the
+            # Learning Agent started failing every run (argus#583), Provy auto-discovered that name
+            # as a NEW agent whose only spans are errors. Keep this identical to agent_name= above.
+            tracer.log_error("learner", f"Learning Agent failed: {e}")
             print(f"[eod] Learning Agent error (continuing): {e}")
         tracer.flush_cost_breakdown()
     else:

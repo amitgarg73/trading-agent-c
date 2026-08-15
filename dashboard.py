@@ -967,7 +967,13 @@ elif page == "Observability":
         "decision":      "#d29922",
         "error":         "#f85149",
     }
-    AGENT_ORDER = ["market", "news_analyst", "research", "risk", "orchestrator", "learning"]
+    # ⛔ AGENT_ORDER is a FILTER, not just an ordering: every use below is
+    # `[a for a in AGENT_ORDER if a in agent_stats]`, so a name that is not in this list is dropped
+    # from the call chain graph and the timeline entirely. "learning" never matched anything (the
+    # agent traces as "learner"), so the Learning Agent has been invisible here.
+    # ⚠ "scanner" also emits spans and is still missing from this list. Left out because its correct
+    # position in the sequence is a judgement call, not a rename.
+    AGENT_ORDER = ["market", "news_analyst", "research", "risk", "orchestrator", "learner"]
 
     tab_graph, tab_timeline, tab_stream = st.tabs(["Call Chain Graph", "Timeline", "Trace Stream"])
 
@@ -1016,7 +1022,7 @@ elif page == "Observability":
                 "research":     ("#1a4731", "#d4edda"),
                 "risk":         ("#7c2d12", "#fde8d0"),
                 "orchestrator": ("#374151", "#e5e7eb"),
-                "learning":     ("#1e3a5f", "#dbeafe"),
+                "learner":      ("#1e3a5f", "#dbeafe"),
             }
 
             for agent, stats in agent_stats.items():
