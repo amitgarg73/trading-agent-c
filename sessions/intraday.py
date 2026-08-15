@@ -44,6 +44,48 @@ def _entry_outcome(count: int) -> str:
     return "intraday_entries_placed" if count > 0 else "intraday_entry_gate_skipped"
 
 
+def _entry_rationale(proposals: dict, verdicts: dict, approved: list, count: int, outcome: str) -> str:
+    """
+    The intraday entry decision, in words, for quality scoring (argus#579).
+
+    Pure and read-only: every figure is taken from the proposals and verdicts the session already
+    produced, so this cannot describe a decision the run did not make. Kept out of the session body
+    so it is testable without a broker, a market or a tracer.
+
+    It answers `orchestrator_synthesis_completeness` on its own terms: the approved trades with their
+    entry, size and confidence, and the terminal_reason for the session.
+    """
+    props    = proposals.get("proposals", []) or []
+    verds    = verdicts.get("verdicts", []) or []
+    rejected = [v for v in verds if v.get("verdict") != "APPROVED"]
+
+    lines = [
+        f"Research proposed {len(props)}, risk approved {len(approved)} of {len(verds)}, "
+        f"and {count} entered. Terminal reason: {outcome}."
+    ]
+    for v in approved:
+        bits = [f"{v.get('ticker', '?')}"]
+        for key, label in (("entry_price", "entry"), ("position_size", "size"), ("confidence", "confidence")):
+            val = v.get(key)
+            if val is not None:
+                bits.append(f"{label} {val}")
+        lines.append("Approved: " + ", ".join(bits) + ".")
+    if rejected:
+        why = ", ".join(
+            f"{v.get('ticker', '?')} ({v.get('reason') or v.get('verdict') or 'no reason given'})"
+            for v in rejected[:5]
+        )
+        lines.append(f"Rejected by risk: {why}.")
+    if approved and count == 0:
+        # The distinction #517 and the 31 Jul fix exist for: risk said yes and the gate still dropped
+        # them. Saying so here keeps the reasoning honest about which step actually refused.
+        lines.append(
+            "Risk approved these and the order gate placed none, so the refusal was the gate "
+            "rather than the risk assessment."
+        )
+    return " ".join(lines)
+
+
 def get_premarket_session_id() -> Optional[str]:
     """Return today's premarket session_id from the agent's own run record, or None."""
     from core import run_state
@@ -503,6 +545,18 @@ def main() -> None:
         )
         outcome = _entry_outcome(count)
         tracer.log_decision("orchestrator", outcome, detail={"count": count})
+        # ⛔ THE ORCHESTRATOR'S ONLY VOICE USED TO LIVE IN THE PREMARKET SYNTHESIS CALL, WHICH HAS NOT
+        # RUN SINCE 27 JUL (the branch defers entry to the open by design). So the agent has been
+        # routing every entry decision the fleet makes while `orchestrator_synthesis_completeness`
+        # had nothing to read, and its last quality score is 3 Aug 2026. argus#579.
+        #
+        # ⚠️ THIS REPORTS, IT DOES NOT NARRATE. Intraday is a deterministic router, not an LLM
+        # synthesiser, and pretending otherwise would be fabricating reasoning to satisfy a check.
+        # It does not have to pretend: the criterion asks for "approved trades with entry price,
+        # position size and confidence, plus a clear terminal_reason explaining the session outcome",
+        # and that is precisely what this path decides. Every value below is read back from the
+        # verdicts and proposals the session actually produced.
+        tracer.log_agent_message("orchestrator", _entry_rationale(proposals, verdicts, approved, count, outcome), outcome)
         tracer.close_session(
             outcome,
             trades_proposed=len(proposals.get("proposals", [])),

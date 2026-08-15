@@ -230,6 +230,7 @@ def run_scanner(
         return 0
 
     rows_written     = 0
+    scored: list[tuple[str, int]] = []
     filtered_price   = 0
     filtered_atr     = 0
     filtered_volume  = 0
@@ -259,6 +260,9 @@ def run_scanner(
                 "sector": get_sector(ticker),
             }).execute()
             rows_written += 1
+            # Kept for the rationale below: the criterion asks for ranked candidates WITH their
+            # scores, so a bare count would be scored as an incomplete answer, correctly.
+            scored.append((ticker, fields["technical_score"]))
 
         except ValueError as e:
             msg = str(e)
@@ -300,6 +304,7 @@ def run_scanner(
                 considered=len(symbols), already=len(already_scored), written=rows_written,
                 min_score=min_score, filtered_price=filtered_price, filtered_atr=filtered_atr,
                 filtered_volume=filtered_volume, filtered_score=filtered_score,
+                top=sorted(scored, key=lambda s: -s[1])[:5],
             ),
             "candidates_scored" if total else "no_candidates",
         )
@@ -309,6 +314,7 @@ def run_scanner(
 def _scan_rationale(
     *, considered: int, already: int, written: int, min_score: int,
     filtered_price: int, filtered_atr: int, filtered_volume: int, filtered_score: int,
+    top: list[tuple[str, int]] | None = None,
 ) -> str:
     """
     The screen, in words, for quality scoring.
@@ -329,6 +335,15 @@ def _scan_rationale(
         if filtered_atr:    reasons.append(f"{filtered_atr} on ATR")
         if filtered_volume: reasons.append(f"{filtered_volume} on volume")
         parts.append(f"Rejected {dropped}: " + ", ".join(reasons) + ".")
+    if top:
+        # Ranked, with scores, because that is what scanner_candidate_quality asks for. It also asks
+        # for a market regime, which this screen does not compute and therefore does not claim: the
+        # regime was the LLM scanner agent's, and inventing one to score better would be the exact
+        # dishonesty this whole thread is about.
+        parts.append(
+            "Top by technical score: "
+            + ", ".join(f"{tkr} {score}" for tkr, score in top) + "."
+        )
     if not written and not already:
         parts.append(
             "No candidate cleared the screen, so the day has nothing to trade from this scan. "
