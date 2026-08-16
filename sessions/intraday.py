@@ -365,6 +365,41 @@ def _place_intraday_trades(
         if fill_price is not None:
             trail_order_id = submit_trailing_stop(p["ticker"], shares, trail_pct)
 
+        # ⛔ SAY WHAT THIS ENTRY IS EXPECTED TO EARN, AT THE MOMENT IT IS BOUGHT (argus#602).
+        #
+        # Intraday placed real orders and stated no expectation, so 28 of the 36 sessions carrying a
+        # settled outcome on prod had no claim anything could be reconciled against. Provy filled the
+        # gap by forecasting from layer-4 judge scores, which on this fleet do not separate outcomes
+        # at all (held mean 0.925, failed 0.946 over 73 settled), and that degenerated into a constant.
+        #
+        # Keyed by entity_id = ticker, which is how the ledger settles (2.03 rows per session), so the
+        # claim and the outcome meet at the same grain. Premarket's session-level total cannot do that.
+        #
+        # Uses the FILL, not the proposal: the claim must describe what was actually bought. A rejected
+        # order returns above and emits nothing, because nothing was bought and nothing was promised.
+        entry = fill_price or p["entry_price"]
+        if tracer and entry:
+            claim = {
+                "estimated_profit": round((p["target_price"] - entry) * shares, 2),
+                "max_loss":         round((entry - p["stop_loss"]) * shares, 2),
+                "entry_price":      round(entry, 2),
+                "target_price":     p["target_price"],
+                "stop_loss":        p["stop_loss"],
+                "shares":           shares,
+            }
+            if claim["max_loss"] > 0:
+                claim["reward_risk"] = round(claim["estimated_profit"] / claim["max_loss"], 2)
+            if p.get("confidence"):
+                claim["confidence"] = p["confidence"]
+            tracer.log_agent_message(
+                "orchestrator",
+                f"Entered {ticker} at ${entry:.2f}, target ${p['target_price']:.2f}, "
+                f"stop ${p['stop_loss']:.2f}. Expected ${claim['estimated_profit']:.2f}.",
+                "entered",
+                entity_id=ticker,
+                payload=claim,
+            )
+
         get_client().table("c_positions").insert({
             "session_id":      session_id,
             "ticker":          p["ticker"],

@@ -1065,3 +1065,60 @@ class TestIntradayJudge:
     def test_judge_called_even_when_all_rejected(self, mock_supabase):
         mock_judge = self._run_main(mock_supabase, self._PROPOSALS, self._VERDICTS_REJECTED)
         mock_judge.assert_called_once()
+
+
+class TestIntradayStatesItsClaim:
+    """argus#602: an intraday entry must say what it expects to earn, at the moment it buys.
+
+    ⛔ WHY. Intraday placed real bracket orders and stated no expectation, so 28 of the 36 sessions
+    carrying a settled outcome on prod had nothing to reconcile a forecast against. Provy filled the
+    gap from layer-4 judge scores, which on this fleet do not separate outcomes (held mean 0.925,
+    failed 0.946 over 73 settled), and that degenerated into a constant label (argus#600).
+    """
+
+    @staticmethod
+    def _claim(p: dict, entry: float, shares: int) -> dict:
+        """The claim rule in _place_intraday_trades, isolated so it is testable without a broker."""
+        claim = {
+            "estimated_profit": round((p["target_price"] - entry) * shares, 2),
+            "max_loss":         round((entry - p["stop_loss"]) * shares, 2),
+            "entry_price":      round(entry, 2),
+            "target_price":     p["target_price"],
+            "stop_loss":        p["stop_loss"],
+            "shares":           shares,
+        }
+        if claim["max_loss"] > 0:
+            claim["reward_risk"] = round(claim["estimated_profit"] / claim["max_loss"], 2)
+        if p.get("confidence"):
+            claim["confidence"] = p["confidence"]
+        return claim
+
+    PROPOSAL = {"ticker": "RTX", "entry_price": 218.11, "target_price": 235.56,
+                "stop_loss": 213.62, "confidence": "MEDIUM"}
+
+    def test_states_expected_profit_and_downside(self):
+        c = self._claim(self.PROPOSAL, entry=218.11, shares=13)
+        assert c["estimated_profit"] == round((235.56 - 218.11) * 13, 2)
+        assert c["max_loss"] == round((218.11 - 213.62) * 13, 2)
+        assert c["reward_risk"] == round(c["estimated_profit"] / c["max_loss"], 2)
+        assert c["confidence"] == "MEDIUM"
+
+    def test_uses_the_FILL_not_the_proposal(self):
+        # ⛔ The claim must describe what was actually bought. Filling worse than proposed shrinks the
+        # expected profit; claiming the proposal's number would overstate it on every slipped fill.
+        proposed = self._claim(self.PROPOSAL, entry=218.11, shares=13)
+        filled   = self._claim(self.PROPOSAL, entry=219.50, shares=13)
+        assert filled["estimated_profit"] < proposed["estimated_profit"]
+        assert filled["entry_price"] == 219.50
+
+    def test_omits_reward_risk_when_there_is_no_downside_to_divide_by(self):
+        flat = {**self.PROPOSAL, "stop_loss": 218.11}
+        c = self._claim(flat, entry=218.11, shares=13)
+        assert c["max_loss"] == 0
+        assert "reward_risk" not in c
+
+    def test_a_negative_expectation_is_still_stated(self):
+        # Entering above target would be odd, but the claim must report it rather than hide it:
+        # a wrong claim recorded is what makes reconciliation worth anything.
+        c = self._claim(self.PROPOSAL, entry=240.00, shares=13)
+        assert c["estimated_profit"] < 0
