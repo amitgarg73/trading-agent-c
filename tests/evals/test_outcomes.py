@@ -454,3 +454,68 @@ class TestPushOutcomeSignals:
         ok, posted = self._run(accepted=False)
         assert ok is False
         assert len(posted) == 1
+
+
+# ── argus#578: per-ticker P&L as a tagged DIAGNOSTIC ─────────────────────────
+
+def test_emits_per_ticker_pnl_tagged_with_the_ticker(env_tenant):
+    """The per-ticker settled number the per-ticker CLAIM (argus#602) reconciles against."""
+    client = _make_client(evals_scores=[])
+    trades = [
+        {"ticker": "RTX", "realized_pnl": 120.0, "position_size": 3000.0, "close_time": "2026-08-17T14:00:00"},
+        {"ticker": "NOC", "realized_pnl": -45.0, "position_size": 3000.0, "close_time": "2026-08-17T15:00:00"},
+    ]
+    with patch("core.db.get_client", return_value=client):
+        from evals.outcomes import write_eod_outcome_metrics
+        write_eod_outcome_metrics("sess-1", 75.0, 0.5, 2, trades=trades)
+
+    inserted = client.table.return_value.insert.call_args[0][0]
+    per_ticker = [r for r in inserted if r["metric_name"] == "position_realized_pnl"]
+    assert {r["entity_id"] for r in per_ticker} == {"RTX", "NOC"}
+    assert {r["entity_id"]: r["metric_value"] for r in per_ticker} == {"RTX": 120.0, "NOC": -45.0}
+
+
+def test_portfolio_metrics_stay_UNTAGGED(env_tenant):
+    """⛔ THE WHOLE POINT OF THE SPLIT. 'End-of-day net profit is positive' is a PORTFOLIO question
+    (Amit's call, 14 Aug). Tagging realized_pnl per ticker would silently turn it into 'every
+    position was profitable', a harsher contract nobody wrote."""
+    client = _make_client(evals_scores=[])
+    trades = [{"ticker": "RTX", "realized_pnl": 120.0, "position_size": 3000.0, "close_time": "2026-08-17T14:00:00"}]
+    with patch("core.db.get_client", return_value=client):
+        from evals.outcomes import write_eod_outcome_metrics
+        write_eod_outcome_metrics("sess-1", 120.0, 1.0, 1, trades=trades)
+
+    inserted = client.table.return_value.insert.call_args[0][0]
+    portfolio = [r for r in inserted if r["metric_name"] != "position_realized_pnl"]
+    assert portfolio, "the session-level metrics must still be written"
+    for r in portfolio:
+        assert r.get("entity_id") is None, f"{r['metric_name']} must stay a portfolio reading"
+
+
+def test_a_trade_that_never_filled_reports_no_outcome(env_tenant):
+    """Same exclusion the ledger push applies. An unfilled order settled nothing, so reporting a P&L
+    for it would invent an outcome and put the diagnostic out of step with the ledger."""
+    client = _make_client(evals_scores=[])
+    trades = [
+        {"ticker": "RTX", "realized_pnl": 0.0, "position_size": 0.0, "exit_reason": "unfilled",
+         "close_time": "2026-08-17T14:00:00"},
+        {"ticker": "NOC", "realized_pnl": 10.0, "position_size": 3000.0, "close_time": "2026-08-17T15:00:00"},
+    ]
+    with patch("core.db.get_client", return_value=client):
+        from evals.outcomes import write_eod_outcome_metrics
+        write_eod_outcome_metrics("sess-1", 10.0, 1.0, 1, trades=trades)
+
+    inserted = client.table.return_value.insert.call_args[0][0]
+    per_ticker = [r for r in inserted if r["metric_name"] == "position_realized_pnl"]
+    assert {r["entity_id"] for r in per_ticker} == {"NOC"}
+
+
+def test_no_trades_means_no_per_ticker_rows(env_tenant):
+    client = _make_client(evals_scores=[])
+    with patch("core.db.get_client", return_value=client):
+        from evals.outcomes import write_eod_outcome_metrics
+        write_eod_outcome_metrics("sess-1", 0.0, 0.0, 0)
+
+    inserted = client.table.return_value.insert.call_args[0][0]
+    assert [r for r in inserted if r["metric_name"] == "position_realized_pnl"] == []
+    assert len(inserted) == 6      # the portfolio set, unchanged

@@ -155,8 +155,44 @@ def write_eod_outcome_metrics(
             for name, value, unit in metrics
         ]
 
+        # ⛔ PER-TICKER P&L, TAGGED, AS A DIAGNOSTIC ONLY (argus#578).
+        #
+        # The session metrics above are PORTFOLIO readings and stay untagged. "End-of-day net profit
+        # is positive after all positions are closed" is a portfolio question (Amit's call, 14 Aug);
+        # graded per ticker it would silently become "every position was profitable", a harsher
+        # contract nobody wrote.
+        #
+        # So this emits a DIFFERENT metric name, position_realized_pnl, tagged with the ticker. No
+        # contract condition reads it, and since argus#582 the evaluator only fans out over entities
+        # contributing a reading the contract actually grades. Before #582 this would have split every
+        # session into N passes and re-graded the portfolio conditions once per ticker.
+        #
+        # What it buys: the per-ticker CLAIM that intraday now states (argus#602) finally has a
+        # per-ticker settled number to be reconciled against. Claim and outcome meet at one grain.
+        per_ticker = [
+            {
+                "id":            str(uuid4()),
+                "tenant_id":     tenant_id,
+                "session_id":    session_id,
+                "entity_id":     t.get("ticker"),
+                "metric_name":   "position_realized_pnl",
+                "metric_value":  float(t.get("realized_pnl") or 0.0),
+                "metric_unit":   "usd",
+                "quality_score": quality_score,
+                "period_date":   today,
+            }
+            for t in (trades or [])
+            # Same exclusion the ledger push applies: an order that never filled settled nothing, so
+            # reporting a P&L for it would invent an outcome. Skipping it here keeps the diagnostic
+            # and the ledger describing the same set of trades.
+            if t.get("ticker") and t.get("realized_pnl") is not None
+            and (t.get("exit_reason") or "") not in _NO_TRADE_EXITS
+        ]
+        rows += per_ticker
+
         client.table("ag_outcomes").insert(rows).execute()
-        print(f"[outcomes] Wrote {len(rows)} outcome metrics (quality_score={quality_score})")
+        print(f"[outcomes] Wrote {len(rows)} outcome metrics "
+              f"({len(per_ticker)} per-ticker, quality_score={quality_score})")
     except Exception as e:
         print(f"[outcomes] Failed to write outcome metrics: {e}")
 
