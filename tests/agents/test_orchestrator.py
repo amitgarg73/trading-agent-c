@@ -452,3 +452,53 @@ class TestPrepareRiskForJudge:
         out = _prepare_risk_for_judge(r)
         assert out["verdicts"] == []
         assert out["verdict_count"] == 0
+
+
+class TestOrchestratorEmitsItsClaim:
+    """argus#601: the session's own forecast must reach Provy as a SIGNAL, not only as prose.
+
+    ⛔ WHY THIS TEST EXISTS. `total_estimated_profit` was computed for months and lived only inside
+    the LLM text blob passed as `reasoning`. Provy's trace registry therefore held `entry_price` but
+    not the estimate, so there was no claim to compare against the settled `realized_pnl`, and Provy
+    fell back to forecasting from layer-4 judge scores. Measured over 73 settled outcomes on prod,
+    those scores do not separate wins from losses at all (held mean 0.925, failed 0.946).
+    """
+
+    def _payload_from(self, result: dict) -> dict:
+        """The claim-extraction rule in agents/orchestrator.py, isolated."""
+        claim: dict = {}
+        for key in ("total_estimated_profit", "total_max_loss"):
+            val = result.get(key)
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                claim[key] = float(val)
+        return claim
+
+    def test_emits_the_estimate_as_a_number(self):
+        got = self._payload_from({"total_estimated_profit": 133.2, "total_max_loss": 21.96})
+        assert got == {"total_estimated_profit": 133.2, "total_max_loss": 21.96}
+
+    def test_a_missing_estimate_is_omitted_not_sent_as_zero(self):
+        # ⛔ A claim of zero profit and NO claim are different things. Sending 0 would let Provy
+        # reconcile against a number the session never made.
+        assert self._payload_from({}) == {}
+        assert self._payload_from({"total_estimated_profit": None}) == {}
+
+    def test_a_non_numeric_estimate_is_omitted(self):
+        assert self._payload_from({"total_estimated_profit": "133.2"}) == {}
+        assert self._payload_from({"total_estimated_profit": True}) == {}
+
+    def test_a_flat_session_still_states_its_claim(self):
+        # An empty session output carries 0.0, which IS a claim: "we expect to earn nothing".
+        got = self._payload_from({"total_estimated_profit": 0.0, "total_max_loss": 0.0})
+        assert got == {"total_estimated_profit": 0.0, "total_max_loss": 0.0}
+
+
+class TestTracerCarriesStructuredPayload:
+    def test_log_agent_message_accepts_a_payload(self):
+        import inspect
+        from trace.logger import TraceLogger
+        sig = inspect.signature(TraceLogger.log_agent_message)
+        assert "payload" in sig.parameters, (
+            "log_agent_message must accept structured fields; a number stated only in the prose "
+            "cannot be read as a signal by Provy"
+        )

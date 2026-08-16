@@ -114,6 +114,26 @@ def _run_synthesis_call(
     tracer.log_tokens("orchestrator", response.usage)
     text = next((b.text for b in response.content if hasattr(b, "text")), "")
     result = parse_json_response(text)
+    # ⛔ THE SESSION'S OWN FORECAST, AS A SIGNAL AND NOT ONLY AS PROSE (argus#601).
+    #
+    # total_estimated_profit is what this session CLAIMS it will earn, computed per trade as
+    # (target_price - entry_price) * shares. It lived only inside the JSON text blob above, so Provy
+    # could never read it: its trace registry carried entry_price but not the estimate. With no claim
+    # to compare against the settled realized_pnl, Provy fell back to forecasting outcomes from
+    # layer-4 judge scores, which on this fleet do not separate wins from losses at all (held mean
+    # 0.925, failed 0.946, measured over 73 settled outcomes).
+    #
+    # Emitted at SESSION grain to match how the outcome is reported: evals/outcomes.py posts one
+    # realized_pnl per session, so a per-trade estimate would have nothing to reconcile against.
+    #
+    # Only numbers that are really numbers. A missing or unparseable estimate is left out rather than
+    # sent as 0, because a claim of zero profit and no claim at all are different things.
+    claim: dict = {}
+    for key in ("total_estimated_profit", "total_max_loss"):
+        val = result.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            claim[key] = float(val)
+
     tracer.log_agent_message(
         "orchestrator", text,
         result.get("session_meta", {}).get("terminal_reason", "synthesized"),
@@ -121,6 +141,7 @@ def _run_synthesis_call(
         tokens_output=response.usage.output_tokens,
         model=_MODEL,
         latency_ms=api_ms,
+        payload=claim or None,
     )
     return result
 

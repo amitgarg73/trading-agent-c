@@ -271,7 +271,20 @@ class TraceLogger:
         tokens_output: int = 0,
         model: Optional[str] = None,
         latency_ms: int = 0,
+        payload: Optional[dict] = None,
     ) -> str:
+        """Log an agent's message.
+
+        `payload` carries STRUCTURED scalars alongside the prose, emitted as argus.payload.<key>.
+
+        ⛔ A NUMBER INSIDE `reasoning` IS INVISIBLE TO PROVY. The reasoning is one text blob, so
+        anything stated only in there cannot be read as a signal, bound to a contract condition, or
+        compared with what settled. The orchestrator computed `total_estimated_profit` for months and
+        Provy never saw it: the trace registry held `entry_price` but not the estimate, so Provy fell
+        back to forecasting from judge scores instead of using the agent's own number (argus#601).
+
+        If a value is meant to be graded or compared, it goes here, not only in the prose.
+        """
         return self._write({
             "step_type":       "agent_message",
             "agent":           agent,
@@ -282,6 +295,7 @@ class TraceLogger:
             "tokens_output":   tokens_output,
             "latency_ms":      latency_ms,
             "model":           model,
+            "payload":         payload,
         })
 
     def log_decision(
