@@ -56,11 +56,23 @@ def _emit_enabled() -> bool:
         return True
     return False
 
-# Token cost per million tokens (Anthropic pricing, mid-2026)
+# Token cost per million tokens (Anthropic published pricing).
+# ⛔ THESE ARE LIST PRICES, NOT GUESSES. Haiku 4.5 was priced here at 0.80/4.00 for months, which
+# understated every Haiku agent by 25%; the published rate is 1.00/5.00. Cache read is 0.1x input and
+# cache write 1.25x input, so those are derived, not independently chosen.
+# A model that runs but is missing from this table is reported UNPRICED rather than silently charged
+# at some other model's rate — see _build_cost_breakdown.
 _COST_PER_MTOK: dict[str, dict[str, float]] = {
-    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00, "cache_read": 0.08,  "cache_write": 1.00},
+    "claude-haiku-4-5-20251001": {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
+    "claude-haiku-4-5":          {"input": 1.00, "output":  5.00, "cache_read": 0.10, "cache_write": 1.25},
     "claude-sonnet-4-6":         {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
+    "claude-sonnet-5":           {"input": 3.00, "output": 15.00, "cache_read": 0.30, "cache_write": 3.75},
 }
+
+
+def _is_priced(model: Optional[str]) -> bool:
+    """True when we can price this model from published rates rather than assuming one."""
+    return bool(model) and model in _COST_PER_MTOK
 
 
 def _estimate_cost(
@@ -176,6 +188,11 @@ class TraceLogger:
         self._parent_session_id = parent_session_id
         self._sequence = 0
         self._tokens: dict[str, dict[str, int]] = {}
+        # The model each agent's tokens were actually served by, recorded at the call site.
+        # ⛔ NEVER infer this from the agent's name. It used to be guessed from a hardcoded
+        # {"orchestrator", "learner"} set, which billed the research agent's Sonnet calls at Haiku
+        # rates for months because research is not in that set (argus#612).
+        self._models: dict[str, str] = {}
         self._pending_trades: list = []
         self._started_at = datetime.utcnow()
 
@@ -342,7 +359,14 @@ class TraceLogger:
             "outcome":   "error",
         })
 
-    def log_tokens(self, agent: str, usage: Any) -> None:
+    def log_tokens(self, agent: str, usage: Any, model: str) -> None:
+        """Accumulate token usage for an agent, recording the model that served it.
+
+        `model` is REQUIRED on purpose. It was previously inferred from the agent's name at
+        breakdown time, so an agent whose name was not in a hardcoded set was billed at the wrong
+        model's rates no matter what it actually ran (argus#612). Pass the served model
+        (`response.model`), not the requested one, so a server-side substitution is visible.
+        """
         if hasattr(usage, "input_tokens"):
             inp = usage.input_tokens
             out = usage.output_tokens
@@ -356,6 +380,14 @@ class TraceLogger:
 
         if agent not in self._tokens:
             self._tokens[agent] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
+        if model:
+            prior = self._models.get(agent)
+            if prior and prior != model:
+                # An agent that changed model mid-session cannot be priced as one model. Keep the
+                # first and say so rather than silently repricing everything at the last one seen.
+                print(f"[trace] {agent} served by {model} after {prior}; pricing at {prior}")
+            else:
+                self._models[agent] = model
         self._tokens[agent]["input"]       += inp
         self._tokens[agent]["output"]      += out
         self._tokens[agent]["cache_read"]  += cr
@@ -374,21 +406,30 @@ class TraceLogger:
         payload = json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": [span]}]}]}).encode()
         _ingest_post_raw("/api/otlp/v1/traces", payload)
 
-    def flush_cost_breakdown(self) -> None:
-        """Persist accumulated cost mid-session via ingest PATCH. Ensures cost is captured if process is killed."""
-        if not self._tokens:
-            return
-        agent_costs = {}
+    def _build_cost_breakdown(self) -> tuple[dict[str, Any], float]:
+        """The one place a per-agent cost breakdown is built.
+
+        ⛔ THIS USED TO EXIST TWICE, in flush_cost_breakdown and close_session, character for
+        character. Both guessed the model from the agent's name and both were wrong in the same way;
+        fixing one would have left the other reporting the old number on the other code path.
+
+        An agent whose served model is not in the rate table is reported with `unpriced: true` and a
+        zero cost, so it shows up as missing rather than being charged at some other model's rate.
+        """
+        agent_costs: dict[str, Any] = {}
         for agent, v in self._tokens.items():
-            model = _agent_model(agent)
-            cost  = _estimate_cost(
-                model,
+            model  = self._models.get(agent)
+            priced = _is_priced(model)
+            cost   = _estimate_cost(
+                model or "",
                 v["input"],
                 v["output"],
                 v.get("cache_read",  0),
                 v.get("cache_write", 0),
-            )
-            agent_costs[agent] = {
+            ) if priced else 0.0
+            if not priced:
+                print(f"[trace] {agent}: no published rate for {model!r}; reporting unpriced")
+            entry: dict[str, Any] = {
                 "model":       model,
                 "input":       v["input"],
                 "output":      v["output"],
@@ -396,7 +437,16 @@ class TraceLogger:
                 "cache_write": v.get("cache_write", 0),
                 "cost_usd":    round(cost, 6),
             }
-        total_cost = sum(a["cost_usd"] for a in agent_costs.values())
+            if not priced:
+                entry["unpriced"] = True
+            agent_costs[agent] = entry
+        return agent_costs, sum(a["cost_usd"] for a in agent_costs.values())
+
+    def flush_cost_breakdown(self) -> None:
+        """Persist accumulated cost mid-session via ingest PATCH. Ensures cost is captured if process is killed."""
+        if not self._tokens:
+            return
+        agent_costs, total_cost = self._build_cost_breakdown()
         _ingest_patch("/api/ingest/session", {
             "session_id":    self.session_id,
             "total_cost_usd": round(total_cost, 6),
@@ -461,25 +511,7 @@ class TraceLogger:
             body["result_summary"] = result_summary
 
         if self._tokens:
-            agent_costs: dict[str, Any] = {}
-            for agent, v in self._tokens.items():
-                model = _agent_model(agent)
-                cost  = _estimate_cost(
-                    model,
-                    v["input"],
-                    v["output"],
-                    v.get("cache_read",  0),
-                    v.get("cache_write", 0),
-                )
-                agent_costs[agent] = {
-                    "model":        model,
-                    "input":        v["input"],
-                    "output":       v["output"],
-                    "cache_read":   v.get("cache_read",  0),
-                    "cache_write":  v.get("cache_write", 0),
-                    "cost_usd":     round(cost, 6),
-                }
-            total_cost   = sum(a["cost_usd"] for a in agent_costs.values())
+            agent_costs, total_cost = self._build_cost_breakdown()
             total_input  = sum(v["input"]    for v in self._tokens.values())
             total_output = sum(v["output"]   for v in self._tokens.values())
             body.update({
@@ -533,9 +565,10 @@ class TraceLogger:
         tokens_output = fields.get("tokens_output", 0)
         model         = fields.get("model")
         cost_usd: Optional[float] = None
-        if tokens_input or tokens_output:
+        served = model or self._models.get(agent)
+        if (tokens_input or tokens_output) and _is_priced(served):
             cost_usd = round(_estimate_cost(
-                model or _agent_model(agent),
+                served or "",
                 tokens_input,
                 tokens_output,
             ), 8)
@@ -598,7 +631,8 @@ class TraceLogger:
     def get_sequence(self) -> int:
         return self._sequence
 
-def _agent_model(agent: str) -> str:
-    base = agent.split("_")[0] if "_" in agent else agent
-    sonnet_agents = {"orchestrator", "learner"}
-    return "claude-sonnet-4-6" if base in sonnet_agents else "claude-haiku-4-5-20251001"
+    # ⛔ _agent_model() WAS HERE AND IS GONE ON PURPOSE (argus#612). It returned a model by matching
+    # the agent's name against a hardcoded {"orchestrator", "learner"} set, so research (which sets
+    # _MODEL = "claude-sonnet-4-6" and passes it to run_tool_loop) was recorded, priced and displayed
+    # as Haiku for months. The model is now recorded at the call site in log_tokens().
+    # Do not reintroduce a name-based guess: the caller always knows what it ran.

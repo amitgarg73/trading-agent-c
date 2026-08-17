@@ -165,7 +165,7 @@ def _llm_select(client: anthropic.Anthropic, tracer: TraceLogger, ranked: list[d
         messages=[{"role": "user", "content": _select_message(shortlist, sectors, market_report, regime, max_n)}],
     )
     latency = int((time.monotonic() - t0) * 1000)
-    tracer.log_tokens("scanner", resp.usage)
+    tracer.log_tokens("scanner", resp.usage, getattr(resp, "model", None) or _MODEL)
     text = next((b.text for b in resp.content if hasattr(b, "text")), "")
     tracer.log_agent_message(
         "scanner", text, "completed",

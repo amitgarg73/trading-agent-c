@@ -76,7 +76,9 @@ def run_tool_loop(
             messages=messages,
         )
         api_ms = int((time.monotonic() - t0) * 1000)
-        tracer.log_tokens(agent_name, response.usage)
+        # Record the model the API actually SERVED, not the one we asked for, so a server-side
+        # substitution shows up in the cost breakdown instead of being priced as the request (argus#612).
+        tracer.log_tokens(agent_name, response.usage, getattr(response, "model", None) or model)
 
         if response.stop_reason == "end_turn":
             text = next((b.text for b in response.content if hasattr(b, "text")), "")

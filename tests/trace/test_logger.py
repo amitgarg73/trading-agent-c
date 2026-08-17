@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from trace.logger import TraceLogger, _agent_model, _estimate_cost
+from trace.logger import TraceLogger, _COST_PER_MTOK, _estimate_cost
 from tests.conftest import make_query, RecordingExporter
 
 
@@ -201,25 +201,25 @@ def _usage(input_tokens=0, output_tokens=0, cache_read=0, cache_write=0):
 
 class TestLogTokens:
     def test_accumulates_tokens_per_agent(self, tracer):
-        tracer.log_tokens("market", _usage(1000, 200))
-        tracer.log_tokens("market", _usage(500, 100))
+        tracer.log_tokens("market", _usage(1000, 200), "claude-haiku-4-5-20251001")
+        tracer.log_tokens("market", _usage(500, 100), "claude-haiku-4-5-20251001")
         assert tracer._tokens["market"]["input"] == 1500
         assert tracer._tokens["market"]["output"] == 300
 
     def test_tracks_multiple_agents_separately(self, tracer):
-        tracer.log_tokens("market",   _usage(400, 80))
-        tracer.log_tokens("research", _usage(3000, 600))
+        tracer.log_tokens("market", _usage(400, 80), "claude-haiku-4-5-20251001")
+        tracer.log_tokens("research", _usage(3000, 600), "claude-sonnet-4-6")
         assert tracer._tokens["market"]["input"] == 400
         assert tracer._tokens["research"]["input"] == 3000
 
     def test_accepts_dict_usage(self, tracer):
-        tracer.log_tokens("risk", {"input_tokens": 200, "output_tokens": 50})
+        tracer.log_tokens("risk", {"input_tokens": 200, "output_tokens": 50}, "claude-haiku-4-5-20251001")
         assert tracer._tokens["risk"]["input"] == 200
         assert tracer._tokens["risk"]["output"] == 50
 
     def test_accumulates_cache_tokens(self, tracer):
-        tracer.log_tokens("research", _usage(1000, 200, cache_read=500, cache_write=100))
-        tracer.log_tokens("research", _usage(800,  150, cache_read=400, cache_write=0))
+        tracer.log_tokens("research", _usage(1000, 200, cache_read=500, cache_write=100), "claude-sonnet-4-6")
+        tracer.log_tokens("research", _usage(800,  150, cache_read=400, cache_write=0), "claude-sonnet-4-6")
         assert tracer._tokens["research"]["cache_read"]  == 900
         assert tracer._tokens["research"]["cache_write"] == 100
 
@@ -228,7 +228,7 @@ class TestLogTokens:
 
 class TestCloseSession:
     def test_posts_to_ingest_close(self, tracer, mock_ingest_post):
-        tracer.log_tokens("market", _usage(400, 80))
+        tracer.log_tokens("market", _usage(400, 80), "claude-haiku-4-5-20251001")
         tracer.close_session(
             terminal_reason="converged",
             trades_proposed=3, trades_approved=2, trades_executed=2,
@@ -263,14 +263,14 @@ class TestCloseSession:
         assert p["metadata"]["trades_executed"] == 2
 
     def test_cost_is_positive(self, tracer, mock_ingest_post):
-        tracer.log_tokens("market", _usage(1000, 200))
+        tracer.log_tokens("market", _usage(1000, 200), "claude-haiku-4-5-20251001")
         tracer.close_session("converged")
         p = _close_payload(mock_ingest_post)
         assert p["total_cost_usd"] > 0
 
     def test_cost_breakdown_in_metadata(self, tracer, mock_ingest_post):
-        tracer.log_tokens("market",   _usage(400, 80, cache_read=200))
-        tracer.log_tokens("research", _usage(3000, 600))
+        tracer.log_tokens("market", _usage(400, 80, cache_read=200), "claude-haiku-4-5-20251001")
+        tracer.log_tokens("research", _usage(3000, 600), "claude-sonnet-4-6")
         tracer.close_session("converged")
         p = _close_payload(mock_ingest_post)
         breakdown = p["metadata"]["cost_breakdown"]
@@ -330,7 +330,7 @@ class TestSessionOpen:
 
 class TestFlushCostBreakdown:
     def test_patches_session_with_cost_breakdown(self, tracer, mock_ingest_patch):
-        tracer.log_tokens("market", _usage(3000, 900))
+        tracer.log_tokens("market", _usage(3000, 900), "claude-haiku-4-5-20251001")
         tracer.flush_cost_breakdown()
         assert mock_ingest_patch.called
         path, payload = mock_ingest_patch.call_args[0]
@@ -340,8 +340,8 @@ class TestFlushCostBreakdown:
         assert payload["total_cost_usd"] > 0
 
     def test_flush_is_cumulative_across_agents(self, tracer, mock_ingest_patch):
-        tracer.log_tokens("market", _usage(3000, 900))
-        tracer.log_tokens("research_NVDA", _usage(10000, 2000))
+        tracer.log_tokens("market", _usage(3000, 900), "claude-haiku-4-5-20251001")
+        tracer.log_tokens("research_NVDA", _usage(10000, 2000), "claude-sonnet-4-6")
         tracer.flush_cost_breakdown()
         _, payload = mock_ingest_patch.call_args[0]
         assert "market" in payload["cost_breakdown"]
@@ -352,15 +352,18 @@ class TestFlushCostBreakdown:
         mock_ingest_patch.assert_not_called()
 
     def test_flush_uses_correct_model_rates(self, tracer, mock_ingest_patch):
-        tracer.log_tokens("research_NVDA", _usage(1_000_000, 0))
+        # ⛔ THIS TEST ASSERTED 0.80 (Haiku) FOR A SONNET AGENT and was green the whole time, because
+        # the model was derived from the agent's name rather than from the call (argus#612).
+        tracer.log_tokens("research_NVDA", _usage(1_000_000, 0), "claude-sonnet-4-6")
         tracer.flush_cost_breakdown()
         _, payload = mock_ingest_patch.call_args[0]
-        assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(0.80, rel=1e-3)
+        assert payload["cost_breakdown"]["research_NVDA"]["cost_usd"] == pytest.approx(3.00, rel=1e-3)
+        assert payload["cost_breakdown"]["research_NVDA"]["model"] == "claude-sonnet-4-6"
 
     def test_close_session_includes_all_accumulated_agents(self, tracer, mock_ingest_post, mock_ingest_patch):
-        tracer.log_tokens("market", _usage(3000, 900))
+        tracer.log_tokens("market", _usage(3000, 900), "claude-haiku-4-5-20251001")
         tracer.flush_cost_breakdown()
-        tracer.log_tokens("research_NVDA", _usage(10000, 2000))
+        tracer.log_tokens("research_NVDA", _usage(10000, 2000), "claude-sonnet-4-6")
         tracer.close_session("converged")
         p = _close_payload(mock_ingest_post)
         assert "market" in p["metadata"]["cost_breakdown"]
@@ -434,7 +437,8 @@ class TestLogSkip:
 
 class TestCostHelpers:
     def test_estimate_cost_haiku(self):
-        assert _estimate_cost("claude-haiku-4-5-20251001", 1_000_000, 0) == pytest.approx(0.80, rel=1e-3)
+        # Published Haiku 4.5 input rate is $1.00/MTok. This asserted 0.80 for months.
+        assert _estimate_cost("claude-haiku-4-5-20251001", 1_000_000, 0) == pytest.approx(1.00, rel=1e-3)
 
     def test_estimate_cost_sonnet(self):
         assert _estimate_cost("claude-sonnet-4-6", 1_000_000, 0) == pytest.approx(3.00, rel=1e-3)
@@ -447,10 +451,45 @@ class TestCostHelpers:
         cost_cached   = _estimate_cost("claude-sonnet-4-6", 0, 1_000, cache_read_tokens=10_000)
         assert cost_cached < cost_uncached
 
-    def test_agent_model_haiku_agents(self):
-        for agent in ("market", "risk", "news", "research", "research_NVDA", "research_AAPL"):
-            assert _agent_model(agent) == "claude-haiku-4-5-20251001"
+    # ⛔ THE TWO TESTS THAT WERE HERE ASSERTED THE BUG. test_agent_model_haiku_agents required
+    # _agent_model("research") == haiku while agents/research_agent.py has run Sonnet the whole time,
+    # so the suite was green and the money was wrong (argus#612). Replaced with the invariants that
+    # actually matter: the model is recorded from the call, and every model we run is priced.
 
-    def test_agent_model_sonnet_agents(self):
-        for agent in ("orchestrator", "learner"):
-            assert _agent_model(agent) == "claude-sonnet-4-6"
+    def test_EVERY_MODEL_AN_AGENT_RUNS_IS_PRICED(self):
+        """A model swap must not silently become an unpriced (and so free-looking) agent."""
+        import pathlib, re
+        root = pathlib.Path(__file__).resolve().parents[2]
+        used = set()
+        for f in (root / "agents").glob("*.py"):
+            for m in re.finditer(r'^_MODEL\s*=\s*"([^"]+)"', f.read_text(), re.M):
+                used.add(m.group(1))
+        assert used, "found no _MODEL constants to check"
+        missing = sorted(m for m in used if m not in _COST_PER_MTOK)
+        assert not missing, f"agents run models with no published rate: {missing}"
+
+    def test_breakdown_records_the_model_it_was_given_not_one_from_the_name(self, tracer):
+        """research is not in any 'sonnet agents' set; it must still be recorded as Sonnet."""
+        tracer.log_tokens("research_NVDA", _usage(10_000, 1_000), "claude-sonnet-4-6")
+        tracer.log_tokens("risk", _usage(1_000, 100), "claude-haiku-4-5-20251001")
+        breakdown, _total = tracer._build_cost_breakdown()
+        assert breakdown["research_NVDA"]["model"] == "claude-sonnet-4-6"
+        assert breakdown["risk"]["model"] == "claude-haiku-4-5-20251001"
+
+    def test_research_is_priced_at_sonnet_rates(self, tracer):
+        """The regression itself: Sonnet input is 3.75x Haiku, so the money must differ."""
+        tracer.log_tokens("research_NVDA", _usage(1_000_000, 0), "claude-sonnet-4-6")
+        sonnet = tracer._build_cost_breakdown()[0]["research_NVDA"]["cost_usd"]
+        assert sonnet == pytest.approx(3.00)   # 1M input tokens at $3.00/MTok
+
+    def test_haiku_uses_published_rates(self, tracer):
+        """Was 0.80/4.00 here for months; published is 1.00/5.00."""
+        tracer.log_tokens("risk", _usage(1_000_000, 1_000_000), "claude-haiku-4-5-20251001")
+        assert tracer._build_cost_breakdown()[0]["risk"]["cost_usd"] == pytest.approx(6.00)
+
+    def test_unknown_model_is_reported_unpriced_not_charged_at_another_rate(self, tracer):
+        tracer.log_tokens("mystery", _usage(1_000_000, 0), "some-future-model")
+        entry = tracer._build_cost_breakdown()[0]["mystery"]
+        assert entry["unpriced"] is True
+        assert entry["cost_usd"] == 0.0
+        assert entry["model"] == "some-future-model"
