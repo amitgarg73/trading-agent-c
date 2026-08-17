@@ -15,7 +15,20 @@ from agents.tools.learning_tools import (
 from core.params import StrategyParams
 from trace.logger import TraceLogger
 
-_MODEL = "claude-sonnet-4-6"
+# Haiku, not Sonnet (17 Aug 2026, Amit's call). This agent was 87% of the fleet's LLM spend —
+# $12.89 of $14.88 over 30 days — while producing no output at all since 7 Aug (argus#583). Paying
+# Sonnet rates for silence is the worst of both, so it runs on the cheap model until it is producing
+# something worth paying more for.
+#
+# ⛔ THIS DOES NOT FIX THE SILENCE, and must not be read as having fixed it. argus#583 is a tool-loop
+# failure, not a model choice; the fail-fast guard in run_tool_loop is what will name the cause on
+# the next EOD. Changing the model here does mean that run tests two things at once, so if it fails
+# again, separate them before concluding anything about Haiku.
+#
+# No free-tier option exists in this repo: every agent goes through anthropic.Anthropic() and the
+# shared run_tool_loop, so a non-Anthropic provider would be a new client and a new tool-calling
+# translation, not a model swap.
+_MODEL = "claude-haiku-4-5-20251001"
 
 _SYSTEM = """
 You are an EOD performance analyst for an autonomous trading system.
