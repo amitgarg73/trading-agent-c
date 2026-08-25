@@ -13,7 +13,7 @@ from agents.tools.learning_tools import (
     write_learning,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 # Haiku, not Sonnet (17 Aug 2026, Amit's call). This agent was 87% of the fleet's LLM spend —
 # $12.89 of $14.88 over 30 days — while producing no output at all since 7 Aug (argus#583). Paying
@@ -186,6 +186,7 @@ def _make_dispatch(session_id: str):
     return dispatch
 
 
+@traced_agent("learner")
 def run_learning_agent(
     tracer: TraceLogger,
     session_id: str,

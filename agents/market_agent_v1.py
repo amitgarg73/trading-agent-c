@@ -10,7 +10,7 @@ from agents.tools.market_tools import (
     get_vix,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -97,6 +97,7 @@ def _dispatch(name: str, inp: dict) -> dict | list:
     return {"error": f"unknown tool: {name}"}
 
 
+@traced_agent("market")
 def run_market_agent(tracer: TraceLogger, params: StrategyParams) -> dict:
     """
     V1 market agent — runs in comparison mode only. Decision does not affect execution.

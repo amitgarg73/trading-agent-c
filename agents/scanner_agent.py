@@ -13,7 +13,7 @@ from agents.tools.scanner_tools import (
     get_sector_leaders,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 # ── Design (Option B, 2026-07-06) ──────────────────────────────────────────────
 # The scanner's data path is deterministic quant screening, so it runs in plain Python:
@@ -197,6 +197,7 @@ def _empty_result(rationale: str, regime: str, status: str) -> dict:
     }
 
 
+@traced_agent("scanner")
 def run_scanner_agent(
     tracer: TraceLogger,
     market_report: dict,

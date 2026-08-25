@@ -13,7 +13,7 @@ from agents.tools.market_tools import (
     get_vix,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -111,6 +111,7 @@ def _cb_skip(reason: str) -> dict:
     }
 
 
+@traced_agent("market")
 def run_market_agent(tracer: TraceLogger, params: StrategyParams) -> dict:
     """
     Primary market agent. Assesses macro conditions via 6 tools and returns a

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from trace.logger import traced_agent
+
 import math
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date
@@ -160,6 +162,7 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+@traced_agent("scanner")
 def run_scanner(
     scan_date: date | None = None,
     tickers: list[str] | None = None,

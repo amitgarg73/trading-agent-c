@@ -12,7 +12,7 @@ from agents.tools.risk_tools import (
     get_today_pnl,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 _MODEL = "claude-haiku-4-5-20251001"
 
@@ -89,6 +89,7 @@ def _dispatch(name: str, inp: dict) -> dict | list:
     return {"error": f"unknown tool: {name}"}
 
 
+@traced_agent("risk")
 def run_risk_agent(
     tracer: TraceLogger,
     trade_proposals: dict,

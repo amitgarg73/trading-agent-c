@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import threading
 import urllib.request
@@ -162,6 +163,10 @@ def _ingest_get(path: str, params: dict) -> dict:
         return {}
 
 
+# 1-5 uppercase letters, matching TICKER_SUFFIX in lib/agent-identity.ts (#668).
+_VARIANT_SUFFIX = re.compile(r"^[A-Z]{1,5}$")
+
+
 class TraceLogger:
     """
     Writes structured trace rows to the Argus ingest API (ag_traces, ag_sessions).
@@ -239,6 +244,45 @@ class TraceLogger:
 
     # ── Public API ─────────────────────────────────────────────────────────────
 
+    def _base(self, agent: str) -> str:
+        """`research_GILD` -> `research`. Mirrors lib/agent-identity.ts on the server.
+
+        ⛔ THE PARENT LOOKUP USED THE EXACT NAME AND SILENTLY FELL BACK TO THE SESSION ROOT.
+        Only `research` ever gets a span; every `research_*` step missed and was parented to the
+        session, so the fan-out arrived flat. Measured: 24 of 26 spans in one session.
+
+        ⛔ agent.split("_")[0] IS NOT THIS RULE. It folds `market_shadow` into `market`, and
+        market_shadow is a real second agent on this fleet with 104 spans of its own.
+        """
+        parts = agent.split("_")
+        if len(parts) < 2:
+            return agent
+        return "_".join(parts[:-1]) if _VARIANT_SUFFIX.match(parts[-1]) else agent
+
+    def end_agent_span(self, agent: str) -> None:
+        """End this agent's span now that its work is done.
+
+        ⛔ WITHOUT THIS, A SPAN REPORTS THE SESSION'S REMAINING TIME, NOT ITS OWN WORK. close_session
+        swept every open span at the end, so `agent:risk` claimed 377s for 9.5s of work and
+        `agent:research` claimed the whole session twice over. Measured across 8 sessions: 82-377s
+        claimed against 9-23s actual.
+
+        Idempotent and forgiving: ending twice, or ending an agent that never started, is a no-op,
+        because a tracer must never be the reason a run fails.
+        """
+        # ⛔ ENDED, NOT REMOVED. Popping it made `get_agent_span` return None afterwards, which
+        # four existing tests read as "no span was ever started" — they assert that a span EXISTS
+        # for the agent, which is a fair thing to assert and is still true once it has ended.
+        # Ending an already-ended OTel span is a no-op, so close_session's sweep stays harmless.
+        span = (self._agent_otel_spans.get(self._base(agent))
+                or self._agent_otel_spans.get(agent))
+        if span is None:
+            return
+        try:
+            span.end()
+        except Exception:
+            pass
+
     def start_agent_span(self, agent: str) -> str:
         """Create an OTel child span for this agent under the session root."""
         span = self._tracer.start_span(
@@ -246,12 +290,13 @@ class TraceLogger:
             context=self._session_ctx,
             attributes={"argus.session_id": self.session_id, "argus.agent": agent},
         )
-        self._agent_otel_spans[agent] = span
+        self._agent_otel_spans[self._base(agent)] = span
         sc = span.get_span_context()
         return format(sc.span_id, "016x") if sc else agent
 
     def get_agent_span(self, agent: str) -> Optional[str]:
-        span = self._agent_otel_spans.get(agent)
+        span = (self._agent_otel_spans.get(self._base(agent))
+                or self._agent_otel_spans.get(agent))
         if not span:
             return None
         sc = span.get_span_context()
@@ -526,7 +571,8 @@ class TraceLogger:
                 "cost_breakdown":   agent_costs,
             })
 
-        # End all open agent spans, then the session root span
+        # Anything end_agent_span() did not close. ⛔ A BACKSTOP, NOT THE MECHANISM:
+        # a span still open here reports the session's remaining time, not its own work.
         for span in self._agent_otel_spans.values():
             try: span.end()
             except Exception: pass
@@ -574,7 +620,9 @@ class TraceLogger:
             ), 8)
 
         # Parent context: use agent span if it exists, else fall back to session root
-        parent_span = self._agent_otel_spans.get(agent)
+        # By BASE name: research_GILD's parent is research's span (#668).
+        parent_span = (self._agent_otel_spans.get(self._base(agent))
+                       or self._agent_otel_spans.get(agent))
         parent_ctx  = set_span_in_context(parent_span) if parent_span else self._session_ctx
 
         # Build OTel span attributes — these are mapped by the OTLP normalizer
@@ -636,3 +684,37 @@ class TraceLogger:
     # _MODEL = "claude-sonnet-4-6" and passes it to run_tool_loop) was recorded, priced and displayed
     # as Haiku for months. The model is now recorded at the call site in log_tokens().
     # Do not reintroduce a name-based guess: the caller always knows what it ran.
+
+
+def traced_agent(agent: str):
+    """End this agent's span when its function returns, however it returns (#668).
+
+    ⛔ A DECORATOR AND NOT A LINE BEFORE EACH `return`. These eight functions have 23 returns and a
+    raise between them; anything placed by hand would miss one, and the one it missed would be the
+    error path — exactly when a held-open span is most misleading.
+
+    ⛔ THE TRACER IS FOUND BY DUCK TYPING, NOT BY POSITION. Seven of the eight take it first and
+    `run_scanner` does not, so matching on position would silently no-op on that one and nobody
+    would notice: the symptom of a missing end call is a number that merely looks large.
+
+    Never raises. A tracer must not be the reason a trading run fails, so a failure to close a span
+    is swallowed the same way `close_session` already swallows one.
+    """
+    import functools
+
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                tracer = next(
+                    (a for a in list(args) + list(kwargs.values())
+                     if hasattr(a, "end_agent_span")), None)
+                if tracer is not None:
+                    try:
+                        tracer.end_agent_span(agent)
+                    except Exception:
+                        pass
+        return wrapper
+    return deco

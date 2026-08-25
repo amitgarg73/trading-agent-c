@@ -17,7 +17,7 @@ from agents.tools.research_tools import (
     get_ticker_market_data,
 )
 from core.params import StrategyParams
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 _MODEL = "claude-sonnet-4-6"
 
@@ -381,6 +381,7 @@ def _screen_candidates(
 
 # ── Public entry point ────────────────────────────────────────────────────────
 
+@traced_agent("research")
 def run_research_agent(
     tracer: TraceLogger,
     market_report: dict,

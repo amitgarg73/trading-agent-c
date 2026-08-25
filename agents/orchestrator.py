@@ -19,7 +19,7 @@ from agents.risk_agent import run_risk_agent
 from agents.scanner_agent import run_scanner_agent
 from core.params import StrategyParams
 from evals.judge import evaluate_session_outputs
-from trace.logger import TraceLogger
+from trace.logger import TraceLogger, traced_agent
 
 _MODEL = "claude-sonnet-4-6"
 
@@ -184,6 +184,7 @@ def _fire_news_analyst(tickers: list[str], session_id: str) -> None:
         pass  # observability demo — never block the pipeline
 
 
+@traced_agent("orchestrator")
 def run_premarket_pipeline(
     tracer: TraceLogger,
     params: StrategyParams,
