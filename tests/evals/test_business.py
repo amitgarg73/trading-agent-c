@@ -7,8 +7,8 @@ import pytest
 
 def _call_business(session_id="sess-1", trades_proposed=3,
                    trades_approved=2, terminal_reason="trades_approved"):
-    """Call write_premarket_outcome_evals with mocked _ingest_post. Returns list of posted payloads."""
-    from evals.business import write_premarket_outcome_evals
+    """Call write_funnel_evals with mocked _ingest_post. Returns list of posted payloads."""
+    from evals.business import write_funnel_evals
     posted = []
 
     def capture(path, payload):
@@ -16,7 +16,7 @@ def _call_business(session_id="sess-1", trades_proposed=3,
             posted.append(payload)
 
     with patch("trace.logger._ingest_post", side_effect=capture):
-        write_premarket_outcome_evals(
+        write_funnel_evals(
             session_id=session_id,
             trades_proposed=trades_proposed,
             trades_approved=trades_approved,
@@ -102,19 +102,19 @@ def test_no_viable_candidates_writes_nothing():
 
 def test_missing_tenant_id_writes_nothing(monkeypatch):
     monkeypatch.delenv("TENANT_ID", raising=False)
-    from evals.business import write_premarket_outcome_evals
+    from evals.business import write_funnel_evals
     posted = []
     with patch("trace.logger._ingest_post", side_effect=lambda p, pl: posted.append(pl)):
-        write_premarket_outcome_evals("sess-notenant", 3, 2, "trades_approved")
+        write_funnel_evals("sess-notenant", 3, 2, "trades_approved")
     assert posted == []
 
 
 def test_ingest_error_is_swallowed(monkeypatch):
     monkeypatch.setenv("TENANT_ID", "test-tenant-id")
-    from evals.business import write_premarket_outcome_evals
+    from evals.business import write_funnel_evals
     with patch("trace.logger._ingest_post", side_effect=RuntimeError("network error")):
         # Should not raise
-        write_premarket_outcome_evals("sess-err", 2, 1, "trades_approved")
+        write_funnel_evals("sess-err", 2, 1, "trades_approved")
 
 
 def test_evals_have_required_fields():

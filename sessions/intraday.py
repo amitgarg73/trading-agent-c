@@ -12,6 +12,7 @@ from core.agent_config import get_config, is_trading_day, load_agent_config
 from core.goals import evaluate_goals
 from core.params import load_params
 from core.protection import check_protection_status
+from evals.business import write_funnel_evals
 from trace.logger import TraceLogger
 
 _ET          = pytz.timezone("America/New_York")
@@ -421,6 +422,51 @@ def _place_intraday_trades(
     return count
 
 
+def _close_intraday(
+    tracer, session_id: str, terminal: str, *,
+    proposals: Optional[dict] = None,
+    verdicts: Optional[dict] = None,
+    trades_executed: int = 0,
+    result_summary: str = "",
+) -> None:
+    """Close the session and record the funnel, in that order, from ONE place.
+
+    ⛔ EVERY EXIT FROM main() GOES THROUGH HERE, AND THAT IS THE ENTIRE POINT (argus#675). premarket
+    wrote its funnel checks on the main path only. On 27 Jul 2026 a redesign added an early return
+    above that call, and research_yield / risk_approval_rate silently stopped grading for four weeks.
+    No error, no gap, no empty state: the checks just stopped.
+
+    ⛔ A GUARD SPREAD ACROSS EVERY RETURN PATH IS NOT A GUARD, because the next return path added
+    will not have it. Putting the measurement at the close means a new exit inherits it by
+    construction rather than by someone remembering.
+
+    ⛔ AND THE PATHS THAT LOOK SKIPPABLE ARE THE ONES THAT MATTER MOST. `no_intraday_candidates` IS a
+    research_yield of zero; `intraday_all_rejected` IS a risk_approval_rate of zero. Those two early
+    returns were exactly the runs where these checks would have failed, so skipping them did not just
+    lose data, it lost the failing half of it.
+    """
+    proposed = len((proposals or {}).get("proposals", []) or [])
+    approved = len([v for v in (verdicts or {}).get("verdicts", []) or [] if v.get("verdict") == "APPROVED"])
+
+    tracer.close_session(
+        terminal, trades_proposed=proposed, trades_executed=trades_executed,
+        result_summary=result_summary,
+    )
+
+    # ⛔ A CHECK THAT CANNOT RUN WRITES NO ROW. `proposals is None` means the research agent never
+    # returned, so there is no funnel to report on: writing research_yield=0 there would blame
+    # research for an orchestrator crash. Same rule the structural checks in provy-sim follow.
+    if proposals is None:
+        return
+    try:
+        write_funnel_evals(
+            session_id=session_id, trades_proposed=proposed,
+            trades_approved=approved, terminal_reason=terminal,
+        )
+    except Exception as exc:                                   # never let telemetry break a session
+        print(f"[intraday] funnel eval write failed: {exc}")
+
+
 def main() -> None:
     from agents.research_agent import run_research_agent
     from agents.risk_agent import run_risk_agent
@@ -556,7 +602,9 @@ def main() -> None:
         proposals = run_research_agent(tracer, synthetic_report, params)
         if not proposals.get("proposals"):
             tracer.log_decision("orchestrator", "no_intraday_candidates")
-            tracer.close_session("no_intraday_candidates", result_summary="No candidates from research agent")
+            _close_intraday(tracer, intraday_session_id, "no_intraday_candidates",
+                            proposals=proposals, verdicts=None,
+                            result_summary="No candidates from research agent")
             print("[intraday] No candidates found.")
             return
 
@@ -567,7 +615,9 @@ def main() -> None:
         approved = [v for v in verdicts.get("verdicts", []) if v.get("verdict") == "APPROVED"]
         if not approved:
             tracer.log_decision("orchestrator", "intraday_all_rejected")
-            tracer.close_session("intraday_all_rejected", result_summary="All proposals rejected by risk")
+            _close_intraday(tracer, intraday_session_id, "intraday_all_rejected",
+                            proposals=proposals, verdicts=verdicts,
+                            result_summary="All proposals rejected by risk")
             print("[intraday] All proposals rejected.")
             return
 
@@ -592,10 +642,9 @@ def main() -> None:
         # and that is precisely what this path decides. Every value below is read back from the
         # verdicts and proposals the session actually produced.
         tracer.log_agent_message("orchestrator", _entry_rationale(proposals, verdicts, approved, count, outcome), outcome)
-        tracer.close_session(
-            outcome,
-            trades_proposed=len(proposals.get("proposals", [])),
-            trades_executed=count,
+        _close_intraday(
+            tracer, intraday_session_id, outcome,
+            proposals=proposals, verdicts=verdicts, trades_executed=count,
             result_summary=(
                 f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}"
                 if count > 0
@@ -612,7 +661,10 @@ def main() -> None:
 
     except Exception as e:
         tracer.log_error("orchestrator", f"intraday error: {e}")
-        tracer.close_session("error", result_summary=f"Error: {e}")
+        # ⛔ proposals IS DELIBERATELY NOT PASSED. If research never returned there is no funnel to
+        # report, and a fabricated research_yield=0 would blame research for an orchestrator crash.
+        _close_intraday(tracer, intraday_session_id, "error",
+                        proposals=locals().get("proposals"), result_summary=f"Error: {e}")
         print(f"[intraday] Error: {e}")
         raise
 

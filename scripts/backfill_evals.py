@@ -42,8 +42,8 @@ def backfill_l5(session_id: str, metadata: dict) -> None:
     trades_proposed = int(metadata.get("trades_proposed", 0))
     trades_approved = int(metadata.get("trades_approved", 0))
     terminal_reason = metadata.get("terminal_reason", "")
-    from evals.business import write_premarket_outcome_evals
-    write_premarket_outcome_evals(
+    from evals.business import write_funnel_evals
+    write_funnel_evals(
         session_id=session_id,
         trades_proposed=trades_proposed,
         trades_approved=trades_approved,

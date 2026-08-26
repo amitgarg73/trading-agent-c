@@ -13,7 +13,7 @@ from core.agent_config import is_trading_day, load_agent_config
 from core.alerts import send_alert
 from core.params import load_params
 from core.protection import check_protection_status
-from evals.business import write_premarket_outcome_evals
+from evals.business import write_funnel_evals
 from trace.logger import TraceLogger
 
 _ET              = pytz.timezone("America/New_York")
@@ -201,7 +201,7 @@ def _write_session_evals(
     triggered after close_session (it scores per ticker and writes the Outcome Ledger
     predictions, which the old local judge could not).
     """
-    write_premarket_outcome_evals(
+    write_funnel_evals(
         session_id=session_id,
         trades_proposed=trades_proposed,
         trades_approved=trades_approved,
@@ -420,6 +420,14 @@ def main(bypass_checks: bool = False) -> None:
 
             print(f"[premarket] Pre-open ({now_et.strftime('%H:%M ET')}) — {candidate_count} candidates "
                   f"scanned; deferring entry decision to market open (intraday).")
+            # ⛔ THIS VALUE NEVER SURVIVES THE DAY, AND THAT IS THE SESSION MODEL, NOT A BUG.
+            # sessions/eod.py reuses THIS session_id (TraceLogger(session_id, session_type="eod"))
+            # and closes it "eod_complete" at 15:55, so every premarket session in the database reads
+            # eod_complete and "deferred_to_open" has never once appeared there. Checked on prod
+            # 25 Aug: 17 of 17 premarket sessions since 1 Aug are eod_complete.
+            #
+            # Consequence worth knowing before you rely on it: you CANNOT ask the database how
+            # premarket ended. Chased down under argus#675; recorded here so nobody chases it twice.
             tracer.close_session(
                 terminal_reason="deferred_to_open",
                 result_summary=(
@@ -428,6 +436,14 @@ def main(bypass_checks: bool = False) -> None:
                 ),
             )
             session_closed = True
+            # ⛔ NO FUNNEL EVAL HERE, DELIBERATELY, AND SAYING SO IS THE POINT (argus#675). This path
+            # scans candidates and stops: research and risk do not run, so research_yield and
+            # risk_approval_rate have nothing to measure and a zero would be a fabrication. The
+            # funnel now lives in sessions/intraday.py::_close_intraday, which records it on EVERY
+            # exit including the two that mean zero.
+            #
+            # ⛔ THE ORIGINAL BUG WAS AN UNREMARKED RETURN ABOVE THE WRITER. It looked exactly like
+            # this line does, which is why this one carries a reason and that one did not.
             send_alert(
                 f"Strategy C — Premarket {now_et.strftime('%Y-%m-%d')}",
                 f"{candidate_count} candidates scanned. Entries deferred to market open — intraday "

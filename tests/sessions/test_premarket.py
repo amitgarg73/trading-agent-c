@@ -22,7 +22,7 @@ class TestWriteSessionEvals:
     canonical server judge, triggered after close_session, so it is no longer done here."""
 
     def test_writes_l5_business_evals(self):
-        with patch("sessions.premarket.write_premarket_outcome_evals") as l5:
+        with patch("sessions.premarket.write_funnel_evals") as l5:
             _write_session_evals("sess-1", trades_proposed=3, trades_approved=2,
                                  terminal_reason="executed")
             l5.assert_called_once_with(session_id="sess-1", trades_proposed=3,
