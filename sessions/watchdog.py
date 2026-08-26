@@ -30,9 +30,14 @@ _ET = pytz.timezone("America/New_York")
 # catch a dead agent, not to page on a slow morning.
 _PREMARKET_LATE_AFTER = time(11, 0)   # window ends 10:30 ET
 _EOD_LATE_AFTER       = time(16, 30)  # EOD runs 15:55 ET
-_POSITION_POLL_START  = time(9, 45)   # first poll is 9:15; allow one cycle to land
 _POSITION_POLL_END    = time(15, 50)
 _POSITION_STALE_MINS  = 45            # polls every 15 minutes; three misses is not a blip
+# ⛔ THE OLD WINDOW OPENED AT 9:45 ON THE COMMENT "first poll is 9:15". THAT WAS NEVER TRUE. Measured
+# across the runs that actually happened, the first poll of the day lands at 10:00 ET, and on 21 Aug
+# it was 11:00. So every trading morning the check ran, found a heartbeat from YESTERDAY AFTERNOON,
+# and mailed "the position watchdog last ran 1079 minutes ago". It was the only failing run in the
+# last sixty, and it was wrong. An alert that is wrong every morning is one you stop reading.
+_POSITION_FIRST_POLL_DUE = time(10, 30)   # observed 10:00, sometimes 11:00; this is the "never started" line
 
 POSITION_WATCHDOG_JOB = "position_watchdog"
 
@@ -136,13 +141,29 @@ def check_expected_work(now_et: datetime | None = None) -> list[str]:
                 f"(status {premarket.get('status')!r}). Today's plan is incomplete."
             )
 
-    if _POSITION_POLL_START <= now_t <= _POSITION_POLL_END:
+    # ⛔ "HAS NOT STARTED TODAY" AND "STOPPED MID-SESSION" ARE DIFFERENT PROBLEMS AND THE OLD CODE
+    # REPORTED THEM AS ONE. Before the first poll of the day the newest heartbeat is from yesterday
+    # afternoon, so a plain staleness test reads ~1,080 minutes and fires every morning. Ask whether
+    # the poller has run TODAY first, and only call it stale once it has.
+    if now_t <= _POSITION_POLL_END:
         age = run_state.heartbeat_age_minutes(POSITION_WATCHDOG_JOB)
+        ran_today = age is not None and (
+            (datetime.combine(now_et.date(), now_t) - timedelta(minutes=age)).date() == now_et.date()
+        )
         if age is None:
-            problems.append(
-                "The position watchdog has never reported in. Open positions are not being "
-                "managed and trailing stops are not being maintained."
-            )
+            if now_t >= _POSITION_FIRST_POLL_DUE:
+                problems.append(
+                    "The position watchdog has never reported in. Open positions are not being "
+                    "managed and trailing stops are not being maintained."
+                )
+        elif not ran_today:
+            # Yesterday's heartbeat is not staleness, it is a poller that has not started.
+            if now_t >= _POSITION_FIRST_POLL_DUE:
+                problems.append(
+                    f"The position watchdog has not run at all today (last run was "
+                    f"{age/60:.0f} hours ago, before today's session). Open positions are not "
+                    f"being managed."
+                )
         elif age > _POSITION_STALE_MINS:
             problems.append(
                 f"The position watchdog last ran {age:.0f} minutes ago (expected every 15). "

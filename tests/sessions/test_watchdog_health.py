@@ -138,3 +138,55 @@ class TestAlerting:
             problems = run_health_checks(_at(11, 30))
         assert problems == []
         assert not alert.called
+
+
+class TestTheMorningFalseAlarm:
+    """
+    ⛔ THE ONLY FAILING RUN IN THE LAST SIXTY WAS WRONG. Every trading morning the position check
+    opened at 9:45, found the newest heartbeat was from yesterday afternoon, computed ~1,080 minutes
+    and mailed "the position watchdog last ran 1079 minutes ago (expected every 15)".
+
+    ⛔ THE WINDOW WAS BUILT ON A COMMENT THAT WAS NEVER TRUE: "first poll is 9:15". Measured across
+    the runs that actually happened, the first poll lands at 10:00 ET, and on 21 Aug it was 11:00.
+
+    An alert that is wrong every morning is one you stop reading, and then it does not work on the
+    morning it is right.
+    """
+    YESTERDAY_AFTERNOON = 1079.0        # the real number from the 26 Aug alert
+
+    def test_the_alert_that_fired_every_morning_no_longer_does(self):
+        # 9:45 ET, heartbeat from yesterday's last poll. Previously: a Gmail alert.
+        assert _run(_at(9, 45), premarket=_COMPLETED, heartbeat_age=self.YESTERDAY_AFTERNOON) == []
+
+    def test_still_quiet_at_ten_because_the_first_poll_is_not_due_until_ten_thirty(self):
+        assert _run(_at(10, 0), premarket=_COMPLETED, heartbeat_age=self.YESTERDAY_AFTERNOON) == []
+
+    # ⛔ COVERAGE IS NOT DROPPED, ONLY DELAYED. If the poller genuinely never starts, we still say so,
+    # and we say the RIGHT thing: not started today, rather than "stale".
+    def test_a_poller_that_never_starts_is_still_reported_after_the_due_time(self):
+        problems = _run(_at(10, 30), premarket=_COMPLETED, heartbeat_age=self.YESTERDAY_AFTERNOON)
+        joined = " ".join(problems)
+        assert "has not run at all today" in joined
+        assert "expected every 15" not in joined      # that phrasing is for real staleness only
+
+    def test_a_genuine_mid_session_stall_still_alerts_as_stale(self):
+        problems = _run(_at(12, 0), premarket=_COMPLETED, heartbeat_age=90.0)
+        joined = " ".join(problems)
+        assert "expected every 15" in joined
+        assert "has not run at all today" not in joined
+
+    def test_a_healthy_poll_during_the_session_stays_quiet(self):
+        assert _run(_at(12, 0), premarket=_COMPLETED, heartbeat_age=5.0) == []
+
+    # ⛔ NEVER-REPORTED IS ALSO GATED NOW. Before the first poll is due, "never reported in" is not a
+    # problem, it is a Tuesday morning.
+    def test_never_reported_is_quiet_before_the_first_poll_is_due(self):
+        assert _run(_at(9, 45), premarket=_COMPLETED, heartbeat_age=None) == []
+
+    def test_never_reported_is_reported_once_it_is_due(self):
+        problems = _run(_at(11, 0), premarket=_COMPLETED, heartbeat_age=None)
+        assert any("never reported in" in p for p in problems)
+
+    def test_the_end_of_the_window_still_closes(self):
+        # After 15:50 the poller is done for the day; a stale heartbeat is expected, not a problem.
+        assert _run(_at(16, 0), premarket=_COMPLETED, heartbeat_age=200.0) == []
