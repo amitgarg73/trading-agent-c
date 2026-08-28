@@ -7,6 +7,7 @@ import pytest
 
 from sessions.intraday import (
     _entry_outcome,
+    _trace_order,
     classify_exit,
     count_open_positions,
     get_daily_pnl,
@@ -1122,3 +1123,61 @@ class TestIntradayStatesItsClaim:
         # a wrong claim recorded is what makes reconciliation worth anything.
         c = self._claim(self.PROPOSAL, entry=240.00, shares=13)
         assert c["estimated_profit"] < 0
+
+
+class TestOrderTracing:
+    """argus#679: every order leaves a trace, not only the ones that fail.
+
+    The old path traced `submit_bracket_order` ONLY on rejection, so an order trace meant the order
+    was REFUSED and its absence meant nothing. That made the orchestrator's record a sample of its
+    bad days, and split its sessions into two modes with a mean neither of them takes.
+    """
+
+    _P = {"entry_price": 10.0, "target_price": 12.0, "stop_loss": 9.0}
+
+    def _call(self, order_id, fill_price):
+        tracer = MagicMock()
+        _trace_order(tracer, "AAPL", self._P, 100, order_id, fill_price)
+        return tracer
+
+    def test_a_filled_order_is_traced(self):
+        # The defect verbatim: this produced NOTHING before the fix.
+        tracer = self._call("ord-1", 10.25)
+        tracer.log_tool_call.assert_called_once()
+        args, kwargs = tracer.log_tool_call.call_args
+        assert args[1] == "submit_bracket_order"
+        assert kwargs["outcome"] == "filled"
+        assert args[3]["fill_price"] == 10.25
+        assert args[3]["order_id"] == "ord-1"
+
+    def test_an_accepted_but_unfilled_order_is_not_called_filled(self):
+        # submit_bracket_order polls for a fill and gives up. An order id with no fill price is a
+        # live working order, and calling that "filled" would claim something nothing confirmed.
+        tracer = self._call("ord-2", None)
+        assert tracer.log_tool_call.call_args.kwargs["outcome"] == "accepted"
+
+    def test_a_rejected_order_still_traces_as_before(self):
+        tracer = self._call(None, None)
+        kwargs = tracer.log_tool_call.call_args.kwargs
+        assert kwargs["outcome"] == "rejected"
+        assert "error" in tracer.log_tool_call.call_args.args[3]
+
+    def test_the_three_states_are_distinct(self):
+        # If two of them collapse, the trace stream cannot separate a fill from a refusal, which is
+        # the whole defect wearing a different hat.
+        seen = {self._call(o, f).log_tool_call.call_args.kwargs["outcome"]
+                for o, f in [("ord-1", 10.25), ("ord-2", None), (None, None)]}
+        assert seen == {"filled", "accepted", "rejected"}
+
+    def test_the_ticker_is_carried_so_the_trace_settles_at_the_ledger_grain(self):
+        assert self._call("ord-1", 10.25).log_tool_call.call_args.kwargs["entity_id"] == "AAPL"
+
+    def test_a_broken_tracer_never_breaks_a_trade(self):
+        # This sits between a live order and its c_positions row. A raise here would leave a placed
+        # order with nothing recording it.
+        tracer = MagicMock()
+        tracer.log_tool_call.side_effect = RuntimeError("provy down")
+        _trace_order(tracer, "AAPL", self._P, 100, "ord-1", 10.25)   # must not raise
+
+    def test_no_tracer_is_a_no_op(self):
+        _trace_order(None, "AAPL", self._P, 100, "ord-1", 10.25)     # must not raise

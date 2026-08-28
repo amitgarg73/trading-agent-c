@@ -319,6 +319,48 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
             print(f"  [intraday] {ticker} closed via {exit_reason} @ ${fill_price:.4f} P&L ${realized:+.2f}")
 
 
+def _trace_order(tracer, ticker: str, p: dict, shares: int,
+                 order_id: Optional[str], fill_price: Optional[float]) -> None:
+    """Record what the order call did, whatever it did.
+
+    ⛔ EVERY ORDER LEAVES A TRACE, NOT ONLY THE ONES THAT FAIL. Until argus#679 this path traced
+    `submit_bracket_order` ONLY on rejection, so the presence of an order trace meant the order was
+    REFUSED and its absence meant nothing at all. Two things followed. Read literally, the trace
+    stream said the orchestrator's work was rejections; and the agent looked bimodal to any
+    baseline, because sessions split into "had a rejection" (57, averaging 3.67 steps) and "did not"
+    (60, averaging 1.47) with a mean of 2.54 that no session ever takes.
+
+    An agent whose failures are better instrumented than its successes cannot be judged on its
+    method, because the record is a sample of its bad days.
+
+    Three states, because the call genuinely has three. An accepted order that has not filled yet is
+    not a fill: `submit_bracket_order` polls for one and gives up, so `order_id` without
+    `fill_price` is a live working order and saying "filled" would be a claim nothing confirmed.
+
+    Telemetry never breaks a trade. This sits between a live order and its `c_positions` row, so a
+    raise here would leave a placed order with nothing recording it.
+    """
+    if not tracer:
+        return
+    try:
+        if order_id is None:
+            outcome = "rejected"
+            output = {"error": f"order rejected or staleness gate: proposal=${p['entry_price']:.2f}"}
+        else:
+            outcome = "filled" if fill_price is not None else "accepted"
+            output = {"order_id": order_id, "fill_price": fill_price}
+        tracer.log_tool_call(
+            "orchestrator", "submit_bracket_order",
+            {"ticker": ticker, "shares": shares, "entry_price": p["entry_price"],
+             "target_price": p["target_price"], "stop_price": p["stop_loss"]},
+            {"outcome": outcome, **output},
+            entity_id=ticker,
+            outcome=outcome,
+        )
+    except Exception as exc:                                   # never let telemetry break a trade
+        print(f"  [intraday] order trace failed for {ticker}: {exc}")
+
+
 def _place_intraday_trades(
     proposals: dict,
     approved_tickers: set[str],
@@ -352,14 +394,9 @@ def _place_intraday_trades(
             stop_price=p["stop_loss"],
             max_entry_premium=max_entry_premium,
         )
+        _trace_order(tracer, ticker, p, shares, order_id, fill_price)
         if order_id is None:
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
-            if tracer:
-                tracer.log_tool_call(
-                    "orchestrator", "submit_bracket_order",
-                    {"ticker": ticker, "entry_price": p["entry_price"]},
-                    {"outcome": "rejected", "error": f"order rejected or staleness gate: proposal=${p['entry_price']:.2f}"},
-                )
             continue
 
         trail_order_id = None

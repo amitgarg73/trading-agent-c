@@ -311,7 +311,16 @@ class TraceLogger:
         entity_id: Optional[str] = None,
         latency_ms: int = 0,
         model: Optional[str] = None,
+        outcome: Optional[str] = None,
     ) -> str:
+        """Log a tool call.
+
+        `outcome` names what the call DID, in the caller's own words ("filled", "rejected"), for
+        tool calls that succeed or fail in more than one way. It reaches the outcome column, so it
+        can be grouped and filtered; a value buried in `tool_output` cannot be. Provy honours it as
+        of argus#679 — before that the OTLP gateway derived outcome from span status alone and
+        stored every non-error step as "success". Optional, and omitting it is unchanged behaviour.
+        """
         return self._write({
             "step_type":   "tool_call",
             "agent":       agent,
@@ -321,6 +330,7 @@ class TraceLogger:
             "entity_id":   entity_id,
             "latency_ms":  latency_ms,
             "model":       model,
+            "outcome":     outcome,
         })
 
     def log_agent_message(
