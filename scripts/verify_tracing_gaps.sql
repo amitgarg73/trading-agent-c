@@ -6,9 +6,9 @@
 --   orchestrator  submit_bracket_order was traced ONLY on rejection (b578841)
 --   scanner       tool calls were not traced at all since the 4 Aug rewrite (e5d500f)
 --
--- Run this after a few trading days have accumulated. Deployed 2026-08-28 (commit b578841); every
--- session before that carries the old behaviour and is the control group, which is why each section
--- reports before and after rather than only the current state.
+-- Run this after a few trading days have accumulated. Every session before the relevant fix carries
+-- the old behaviour and is the control group, which is why each section reports before and after
+-- rather than only the current state.
 --
 -- ⛔ EVERY SECTION CARRIES ITS DENOMINATOR, AND "NOTHING YET" IS NOT A PASS.
 -- The defect being verified was a check that could not see: `submit_bracket_order` was traced only
@@ -16,7 +16,13 @@
 -- reports PASS when no orders have been placed would repeat that mistake in a new place. Section 1
 -- returns INCONCLUSIVE until the denominator is non-zero.
 
-\set FIX_DEPLOYED '2026-08-28 16:30:00+00'
+-- ⛔ ONE CONSTANT PER FIX. The two fixes shipped 14 minutes apart, and a single cutoff scored the
+-- scanner against a timestamp that PRECEDED its own commit: sections 1-3 test b578841 (committed
+-- 16:18:40+00) while section 4 tests e5d500f (16:32:58+00). Each is rounded up to the next minute
+-- after its commit, so a session is only ever called "after fix" when the code it exercises was
+-- actually live. Adding a third fix means adding a third constant, not widening one of these.
+\set FIX_ORDERS  '2026-08-28 16:19:00+00'
+\set FIX_SCANNER '2026-08-28 16:33:00+00'
 
 \echo ''
 \echo '=== 1. COVERAGE: does every session that placed entries now carry a fill trace? ==='
@@ -29,7 +35,7 @@
 -- "nothing wrong" when it means "nothing looked at". That is the same defect this script verifies.
 with periods(after_fix) as (values (false), (true)),
 placed as (
-  select s.id, (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix
+  select s.id, (s.started_at >= :'FIX_ORDERS'::timestamptz) as after_fix
   from ag_sessions s
   where s.session_type = 'intraday'
     and s.terminal_reason = 'intraday_entries_placed'
@@ -72,7 +78,7 @@ from rolled order by after_fix;
 \echo '    non-error outcome to success, so the old rows read as one undifferentiated value.'
 \echo ''
 
-select case when t.created_at >= :'FIX_DEPLOYED'::timestamptz
+select case when t.created_at >= :'FIX_ORDERS'::timestamptz
             then 'after fix' else 'before fix (control)' end as period,
        coalesce(t.outcome, '(null)') as outcome,
        count(*) as traces,
@@ -94,7 +100,7 @@ group by 1,2 order by 1 desc, 3 desc;
 
 with per_session as (
   select s.id,
-         (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix,
+         (s.started_at >= :'FIX_ORDERS'::timestamptz) as after_fix,
          count(*) filter (where t.agent = 'orchestrator') as steps
   from ag_sessions s
   join ag_traces t on t.session_id = s.id
@@ -130,7 +136,7 @@ group by 1, st.sessions, st.mean_steps order by 1 desc;
 
 with periods(after_fix) as (values (false), (true)),
 sess as (
-  select s.id, (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix
+  select s.id, (s.started_at >= :'FIX_SCANNER'::timestamptz) as after_fix
   from ag_sessions s where s.session_type = 'premarket'
 ),
 counted as (
