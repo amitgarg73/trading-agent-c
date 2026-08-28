@@ -359,3 +359,92 @@ class TestSectorEtfMap:
     def test_unknown_maps_to_spy(self):
         from scanner.universe import get_sector_etf
         assert get_sector_etf("XXXX") == "SPY"
+
+
+class TestScannerToolTracing:
+    """The scanner reported what it CONCLUDED and never what it LOOKED AT.
+
+    scanner/scanner.py replaced agents/scanner_agent.py and restored the span, the decision and the
+    message, but never called log_tool_call at all. From 5 Aug 2026 the trace stream carried 2.56
+    steps a session against 7.07 before, so Provy read a 63% drop as the agent changing how it
+    works. That was true of the record and false of the agent.
+    """
+
+    def _tools(self, tracer):
+        """Every tool call recorded, as {name: outcome}."""
+        return {c.args[1]: c.kwargs.get("outcome") for c in tracer.log_tool_call.call_args_list}
+
+    def test_the_price_download_is_traced_on_success(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        with patch("scanner.scanner.yf.download", return_value={"AAPL": _make_hist(n=60)}), \
+             patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            run_scanner(scan_date=date(2026, 5, 27), tracer=tracer)
+        assert self._tools(tracer).get("download_prices") == "downloaded"
+
+    def test_the_scan_results_read_is_traced(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        with patch("scanner.scanner.yf.download", return_value={"AAPL": _make_hist(n=60)}), \
+             patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            run_scanner(scan_date=date(2026, 5, 27), tracer=tracer)
+        assert self._tools(tracer).get("fetch_scored_tickers") == "ok"
+
+    def test_a_morning_that_scores_nothing_still_reports_the_read(self, mock_supabase):
+        # The already-scored short circuit returns early. A scan that reports nothing on a quiet
+        # morning looks exactly like a scan that did not run, which is the original defect.
+        mock_supabase.table.return_value = make_query([{"ticker": "AAPL"}])
+        tracer = MagicMock()
+        with patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            run_scanner(scan_date=date(2026, 5, 27), tracer=tracer)
+        assert self._tools(tracer).get("fetch_scored_tickers") == "ok"
+
+    def test_a_failed_download_is_traced_as_failed_not_omitted(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        with patch("scanner.scanner.yf.download", side_effect=Exception("rate limit")), \
+             patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            run_scanner(scan_date=date(2026, 5, 27), tracer=tracer)
+        assert self._tools(tracer).get("download_prices") == "failed"
+
+    def test_success_and_failure_use_the_same_step_name(self, mock_supabase):
+        # If only one path emitted the step, its presence would encode the outcome and the agent
+        # would look like two different agents. That is argus#679 one layer down.
+        mock_supabase.table.return_value = make_query([])
+        names = []
+        for effect in [{"AAPL": _make_hist(n=60)}, Exception("boom")]:
+            tracer = MagicMock()
+            kw = {"side_effect": effect} if isinstance(effect, Exception) else {"return_value": effect}
+            with patch("scanner.scanner.yf.download", **kw), \
+                 patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+                from scanner.scanner import run_scanner
+                run_scanner(scan_date=date(2026, 5, 27), tracer=tracer)
+            names.append("download_prices" in self._tools(tracer))
+        assert names == [True, True]
+
+    def test_a_broken_tracer_never_breaks_the_scan(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        tracer.log_tool_call.side_effect = RuntimeError("provy down")
+        with patch("scanner.scanner.yf.download", return_value={"AAPL": _make_hist(n=60)}), \
+             patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            assert run_scanner(scan_date=date(2026, 5, 27), tracer=tracer) >= 0
+
+    def test_no_tracer_still_scans(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        with patch("scanner.scanner.yf.download", return_value={"AAPL": _make_hist(n=60)}), \
+             patch("scanner.scanner.get_tickers", return_value=["AAPL"]):
+            from scanner.scanner import run_scanner
+            assert run_scanner(scan_date=date(2026, 5, 27)) >= 0
+
+    def test_run_scanner_still_carries_the_agent_span_decorator(self):
+        # Regression guard: adding the helpers above run_scanner moved @traced_agent onto a helper,
+        # which silently detaches the agent span from the scan.
+        from scanner.scanner import run_scanner
+        assert getattr(run_scanner, "__wrapped__", None) is not None, \
+            "@traced_agent must decorate run_scanner, not a helper defined above it"

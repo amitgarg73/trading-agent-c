@@ -3,6 +3,7 @@ from __future__ import annotations
 from trace.logger import traced_agent
 
 import math
+import time as _time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import date
 from typing import Any
@@ -162,6 +163,40 @@ def _score_ticker(hist: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _elapsed_ms(started: float) -> int:
+    return int((_time.monotonic() - started) * 1000)
+
+
+def _trace_tool(tracer, name: str, tool_input: dict, tool_output: dict,
+                outcome: str, latency_ms: int = 0) -> None:
+    """Report one of the scanner's external calls.
+
+    ⛔ THIS AGENT REPORTED WHAT IT CONCLUDED AND NEVER WHAT IT LOOKED AT. When scanner/scanner.py
+    replaced agents/scanner_agent.py the tracing was restored as a span, a decision and a message,
+    but not as tool calls: the old agent got its per-tool spans free from `run_tool_loop`, and this
+    module never called `log_tool_call` at all. From 5 Aug 2026 the trace stream carried 2.56 steps
+    a session against 7.07 before, so 63% of the agent's visible work disappeared while the scan
+    itself kept running over ~126 tickers every morning.
+
+    Provy read that faithfully and reported that the agent had changed how it works, which was true
+    of the record and false of the agent. Its self-agreement of 0.49, the worst on the fleet, is
+    almost entirely this.
+
+    The names describe what THIS scanner does. The old agent's tools (`get_gap_ups`,
+    `get_sector_leaders`) belonged to a regime-aware LLM tool loop that no longer exists, and
+    re-emitting them to reconnect the old baseline would report work that is not happening.
+
+    Both outcomes, always. Tracing only the failures is the same defect one layer down (argus#679).
+    """
+    if not tracer:
+        return
+    try:
+        tracer.log_tool_call("scanner", name, tool_input, {"outcome": outcome, **tool_output},
+                             latency_ms=latency_ms, outcome=outcome)
+    except Exception as exc:                                   # never let telemetry break a scan
+        print(f"[scanner] tool trace failed for {name}: {exc}")
+
+
 @traced_agent("scanner")
 def run_scanner(
     scan_date: date | None = None,
@@ -200,7 +235,13 @@ def run_scanner(
         .data
     ) or []
     already_scored = {r["ticker"] for r in existing}
+    universe_size  = len(symbols)          # counted before the filter; get_tickers() runs once
     symbols = [s for s in symbols if s not in already_scored]
+    # Before the short circuit below, so the read is reported even on a morning that scores nothing.
+    _trace_tool(tracer, "fetch_scored_tickers",
+                {"scan_date": today_iso, "universe": universe_size},
+                {"already_scored": len(already_scored), "to_score": len(symbols)},
+                "ok")
 
     if not symbols:
         if tracer:
@@ -208,6 +249,9 @@ def run_scanner(
                                 detail={"tickers": len(already_scored), "scan_date": today_iso})
         return len(already_scored)
 
+    _dl_input = {"tickers": len(symbols), "period": _HISTORY_DAYS,
+                 "interval": "1d", "timeout_s": _DOWNLOAD_TIMEOUT}
+    _dl_started = _time.monotonic()
     try:
         with ThreadPoolExecutor(max_workers=1) as _pool:
             _future = _pool.submit(
@@ -223,14 +267,24 @@ def run_scanner(
             raw = _future.result(timeout=_DOWNLOAD_TIMEOUT)
     except FuturesTimeoutError:
         print(f"[scanner] yfinance download timed out after {_DOWNLOAD_TIMEOUT}s, aborting scan")
+        _trace_tool(tracer, "download_prices", _dl_input,
+                    {"error": f"timed out after {_DOWNLOAD_TIMEOUT}s"}, "timeout",
+                    _elapsed_ms(_dl_started))
         if tracer:
             tracer.log_error("scanner", f"price download timed out after {_DOWNLOAD_TIMEOUT}s")
         return 0
     except Exception as e:
         print(f"[scanner] yfinance download failed: {e}")
+        _trace_tool(tracer, "download_prices", _dl_input, {"error": str(e)[:300]}, "failed",
+                    _elapsed_ms(_dl_started))
         if tracer:
             tracer.log_error("scanner", f"price download failed: {e}")
         return 0
+    # ⛔ The success path traces too. A download step that appears only when the feed breaks tells a
+    # reader that this agent's job is failing downloads, which is how the fills defect read.
+    _trace_tool(tracer, "download_prices", _dl_input,
+                {"frames": int(getattr(raw, "shape", [0])[0] or 0)}, "downloaded",
+                _elapsed_ms(_dl_started))
 
     rows_written     = 0
     scored: list[tuple[str, int]] = []
