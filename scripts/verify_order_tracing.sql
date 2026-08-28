@@ -1,0 +1,117 @@
+-- Verify that fills are being traced, not only rejections.  argus#679
+--
+--   psql "$PROVY_DB_URL" -f scripts/verify_order_tracing.sql
+--
+-- Run this after a few trading days have accumulated. Deployed 2026-08-28 (commit b578841); every
+-- session before that carries the old behaviour and is the control group, which is why each section
+-- reports before and after rather than only the current state.
+--
+-- ⛔ EVERY SECTION CARRIES ITS DENOMINATOR, AND "NOTHING YET" IS NOT A PASS.
+-- The defect being verified was a check that could not see: `submit_bracket_order` was traced only
+-- on rejection, so an absence of fill traces looked exactly like a clean run. A verification that
+-- reports PASS when no orders have been placed would repeat that mistake in a new place. Section 1
+-- returns INCONCLUSIVE until the denominator is non-zero.
+
+\set FIX_DEPLOYED '2026-08-28 16:30:00+00'
+
+\echo ''
+\echo '=== 1. COVERAGE: does every session that placed entries now carry a fill trace? ==='
+\echo '    Denominator is sessions whose terminal_reason says entries were placed, so a session'
+\echo '    that legitimately traded nothing cannot inflate the result.'
+\echo ''
+
+-- ⛔ BOTH PERIODS ARE LISTED EXPLICITLY, so the "after fix" row always renders. Grouping the rows
+-- that exist would print NOTHING for a period with no sessions, and an empty result reads as
+-- "nothing wrong" when it means "nothing looked at". That is the same defect this script verifies.
+with periods(after_fix) as (values (false), (true)),
+placed as (
+  select s.id, (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix
+  from ag_sessions s
+  where s.session_type = 'intraday'
+    and s.terminal_reason = 'intraday_entries_placed'
+),
+traced as (
+  select p.after_fix, p.id,
+         count(*) filter (where t.tool_name like '%submit_bracket_order%'
+                            and coalesce(t.outcome,'') in ('filled','accepted')) as fill_traces
+  from placed p
+  left join ag_traces t on t.session_id = p.id
+  group by 1,2
+),
+rolled as (
+  select pr.after_fix,
+         count(tr.id)                                  as sessions_placed,
+         count(tr.id) filter (where tr.fill_traces > 0) as sessions_traced
+  from periods pr left join traced tr on tr.after_fix = pr.after_fix
+  group by 1
+)
+select case when after_fix then 'after fix' else 'before fix (control)' end as period,
+       sessions_placed as sessions_that_placed_entries,
+       sessions_traced as sessions_with_a_fill_trace,
+       case
+         when sessions_placed = 0 and after_fix
+           then 'INCONCLUSIVE: no entries placed since the fix yet, so nothing has exercised it'
+         when sessions_placed = 0
+           then 'INCONCLUSIVE: no entries placed in this period'
+         when not after_fix
+           then 'expected 0: the old code never traced a fill'
+         when sessions_traced = sessions_placed
+           then 'PASS: every session that placed entries carries a fill trace'
+         else 'FAIL: ' || (sessions_placed - sessions_traced)
+              || ' session(s) placed entries with no fill trace'
+       end as verdict
+from rolled order by after_fix;
+
+\echo ''
+\echo '=== 2. STATES: the order call has three outcomes. Are all three reaching the column? ==='
+\echo '    Before the fix only rejections were traced AND the OTLP gateway flattened every'
+\echo '    non-error outcome to success, so the old rows read as one undifferentiated value.'
+\echo ''
+
+select case when t.created_at >= :'FIX_DEPLOYED'::timestamptz
+            then 'after fix' else 'before fix (control)' end as period,
+       coalesce(t.outcome, '(null)') as outcome,
+       count(*) as traces,
+       count(distinct t.session_id) as sessions
+from ag_traces t
+where t.tool_name like '%submit_bracket_order%'
+group by 1,2 order by 1 desc, 3 desc;
+
+\echo ''
+\echo '=== 3. SHAPE: has the orchestrator stopped looking like two different agents? ==='
+\echo '    Its step count split by whether an order happened to be REFUSED, because refusals were'
+\echo '    the only thing it recorded. Before the fix: 57 sessions averaging 3.67 steps against 60'
+\echo '    averaging 1.47, with a mean of 2.54 that no session takes. A distribution with a hole at'
+\echo '    its own mean has no centre, and conformance cannot judge against one.'
+\echo ''
+\echo '    near_the_mean is the share of sessions within half a step of the mean. Low means bimodal.'
+\echo '    Read it as a trend across periods, not against a fixed target.'
+\echo ''
+
+with per_session as (
+  select s.id,
+         (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix,
+         count(*) filter (where t.agent = 'orchestrator') as steps
+  from ag_sessions s
+  join ag_traces t on t.session_id = s.id
+  where s.session_type = 'intraday'
+  group by 1,2
+),
+stats as (
+  select after_fix, avg(steps) as mean_steps, count(*) as sessions
+  from per_session group by 1
+)
+select case when p.after_fix then 'after fix' else 'before fix (control)' end as period,
+       st.sessions,
+       round(st.mean_steps::numeric, 2) as mean_steps,
+       round(stddev_pop(p.steps)::numeric, 2) as sd_steps,
+       round((count(*) filter (where abs(p.steps - st.mean_steps) <= 0.5))::numeric
+             / nullif(count(*),0), 2) as near_the_mean,
+       case when st.sessions < 15 then 'too few sessions to read the shape yet' else '' end as note
+from per_session p join stats st on st.after_fix = p.after_fix
+group by 1, st.sessions, st.mean_steps order by 1 desc;
+
+\echo ''
+\echo 'Section 1 is the acceptance test. Sections 2 and 3 are the consequences, and 3 needs the most'
+\echo 'data: the shape cannot be read until enough post-fix sessions exist to have a shape.'
+\echo ''
