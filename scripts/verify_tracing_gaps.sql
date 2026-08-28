@@ -1,6 +1,10 @@
--- Verify that fills are being traced, not only rejections.  argus#679
+-- Verify that the agents report their work, not only their failures.  argus#679
 --
---   psql "$PROVY_DB_URL" -f scripts/verify_order_tracing.sql
+--   psql "$PROVY_DB_URL" -f scripts/verify_tracing_gaps.sql
+--
+-- Two gaps, same family, fixed 28 Aug 2026:
+--   orchestrator  submit_bracket_order was traced ONLY on rejection (b578841)
+--   scanner       tool calls were not traced at all since the 4 Aug rewrite (e5d500f)
 --
 -- Run this after a few trading days have accumulated. Deployed 2026-08-28 (commit b578841); every
 -- session before that carries the old behaviour and is the control group, which is why each section
@@ -114,4 +118,50 @@ group by 1, st.sessions, st.mean_steps order by 1 desc;
 \echo ''
 \echo 'Section 1 is the acceptance test. Sections 2 and 3 are the consequences, and 3 needs the most'
 \echo 'data: the shape cannot be read until enough post-fix sessions exist to have a shape.'
+\echo ''
+
+\echo ''
+\echo '=== 4. SCANNER: does it report what it looked at, or only what it concluded? ==='
+\echo '    It emitted a span, a decision and a message and no tool calls at all, so 63% of its'
+\echo '    visible work vanished on 5 Aug: 7.07 steps a session before, 2.56 after, while the scan'
+\echo '    kept running over ~126 tickers a morning. Expect steps to recover toward ~5 and the'
+\echo '    tool names below to reappear.'
+\echo ''
+
+with periods(after_fix) as (values (false), (true)),
+sess as (
+  select s.id, (s.started_at >= :'FIX_DEPLOYED'::timestamptz) as after_fix
+  from ag_sessions s where s.session_type = 'premarket'
+),
+counted as (
+  select pr.after_fix,
+         count(distinct s.id) as sessions,
+         count(t.id) filter (where ag_agent_base(t.agent) = 'scanner') as scanner_steps,
+         count(t.id) filter (where ag_agent_base(t.agent) = 'scanner'
+                               and t.tool_name like '%fetch_scored_tickers%') as reads,
+         count(t.id) filter (where ag_agent_base(t.agent) = 'scanner'
+                               and t.tool_name like '%download_prices%')      as downloads
+  from periods pr
+  left join sess s on s.after_fix = pr.after_fix
+  left join ag_traces t on t.session_id = s.id
+  group by 1
+)
+select case when after_fix then 'after fix' else 'before fix (control)' end as period,
+       sessions,
+       round(scanner_steps::numeric / nullif(sessions,0), 2) as steps_per_session,
+       reads, downloads,
+       case
+         when sessions = 0 and after_fix
+           then 'INCONCLUSIVE: no premarket sessions since the fix yet'
+         when sessions = 0 then 'INCONCLUSIVE: no sessions in this period'
+         when not after_fix then 'control: expect 0 reads and 0 downloads'
+         when reads > 0 and downloads > 0
+           then 'PASS: the scanner is reporting both of its external calls'
+         else 'FAIL: scanner ran but did not report ' ||
+              case when reads = 0 and downloads = 0 then 'either call'
+                   when reads = 0 then 'the scan_results read'
+                   else 'the price download' end
+       end as verdict
+from counted order by after_fix;
+
 \echo ''
