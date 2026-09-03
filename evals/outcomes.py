@@ -246,41 +246,19 @@ def push_outcome_signals(
         return False
 
 
-def trigger_server_judge(session_id: str) -> None:
-    """Trigger Argus's server-side judge for a session, after it has closed.
-
-    The server judge scores per-entity (per-ticker) L4 quality and writes the Outcome
-    Ledger predictions for that session. This is the one canonical, entity-aware judge,
-    so the ledger fills automatically and quality is not double-scored. Call after
-    close_session so the session's terminal_reason is set (the ledger skip-exclusion
-    reads it). Best-effort: a failure never affects the trading session.
-    """
-    try:
-        import json
-        import urllib.request
-        from trace.logger import _ARGUS_URL, _ARGUS_API_KEY, _emit_enabled
-
-        if not _emit_enabled():
-            return
-        req = urllib.request.Request(
-            f"{_ARGUS_URL}/api/compute/judge",
-            data=json.dumps({"session_id": session_id}).encode(),
-            headers={"Content-Type": "application/json", "x-argus-key": _ARGUS_API_KEY or ""},
-            method="POST",
-        )
-        urllib.request.urlopen(req, timeout=120)
-    except Exception as e:
-        print(f"[outcomes] server judge trigger failed for {session_id[:8]}: {e}")
-
-
 def backfill_server_judge() -> None:
     """EOD safety net: judge the workflow's most recent closed sessions server-side.
 
-    trigger_server_judge fires per-session only on the premarket / intraday-entry close paths, so
-    sessions that close another way (EOD, a premarket stand-down, an intraday with no entries) never
-    get their L4 quality scored. A no-session-id call judges the last closed sessions in one shot
-    (idempotent server-side — already-scored pairs are skipped), so quality coverage no longer
-    depends on any single close path. Best-effort: a failure never affects the trading session.
+    Provy grades a session when it closes, so this is a safety net rather than the primary path:
+    it covers a close whose background grading was dropped by the serverless runtime, which is the
+    failure /api/ingest/session/close's own `after()` wrapper exists to reduce but cannot eliminate.
+    A no-session-id call judges the last closed sessions in one shot. Best-effort: a failure never
+    affects the trading session.
+
+    ⛔ THE PER-SESSION TRIGGER THIS USED TO SIT BESIDE IS GONE (Provy #730). Asking to grade a
+    session one line after closing it raced with the grading the close had already started: both
+    runs read "already scored" as empty and both wrote. This one is safe because it runs at EOD,
+    hours later, when the skip-set is populated — the race needed the two calls to be seconds apart.
     """
     try:
         import json

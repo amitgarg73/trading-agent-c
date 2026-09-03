@@ -392,9 +392,9 @@ def _run_semantic_evals(
     orchestrator_result: dict,
 ) -> None:
     """
-    Deprecated: L4 quality scoring moved to the canonical server-side judge, triggered at
-    session close (evals.outcomes.trigger_server_judge). The server judge scores per ENTITY
-    (per ticker) and writes the Outcome Ledger predictions, which this local collapsed judge
-    could not do. Kept as a no-op so the existing call sites stay harmless; remove later.
+    Deprecated: L4 quality scoring moved to the canonical server-side judge, which Provy runs
+    when the session closes. It scores per ENTITY (per ticker) and writes the Outcome Ledger
+    predictions, which this local collapsed judge could not do. Kept as a no-op so the existing
+    call sites stay harmless; remove later.
     """
     return

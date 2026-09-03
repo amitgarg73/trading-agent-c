@@ -504,10 +504,10 @@ def main() -> None:
     tracer.log_decision("orchestrator", "eod_complete",
                         detail={"pnl": perf.realized_pnl, "trades": perf.trades_total})
 
-    # Safety net: judge the day's sessions server-side. trigger_server_judge only fires on the
-    # premarket / intraday-entry close paths, so EOD and stand-down sessions would otherwise never
-    # get L4 quality scored (this silently dropped quality coverage after the open-entry redesign).
-    # Idempotent and best-effort; a failure must not affect EOD.
+    # Safety net: judge the day's sessions server-side. Provy grades a session at close, so this
+    # catches a close whose background grading was dropped rather than being the primary path.
+    # Safe to keep after Provy #730 removed the per-session triggers: it runs hours after the
+    # closes it covers, so it cannot race them. Idempotent and best-effort; must not affect EOD.
     try:
         from evals.outcomes import backfill_server_judge
         backfill_server_judge()

@@ -60,14 +60,31 @@ def _entry_rationale(proposals: dict, verdicts: dict, approved: list, count: int
     verds    = verdicts.get("verdicts", []) or []
     rejected = [v for v in verds if v.get("verdict") != "APPROVED"]
 
+    # ⛔ ENTRY, SIZE AND CONFIDENCE LIVE ON THE PROPOSAL, NOT ON THE VERDICT (argus#726).
+    #
+    # This read them off the verdict from 2026-08-14, and the risk agent's contract is only
+    # {ticker, verdict, reason} — it has never carried a price, a size or a confidence. So all three
+    # were None on every real session and the loop below dropped them silently, exactly as it is
+    # meant to for a value the run did not produce. Measured on production: 0 passes in 128 runs
+    # from 2026-08-17, against a 1.0 on 3 Aug, when this path did not yet exist.
+    #
+    # It read as correct because the test fixture put those keys on a verdict object, which no other
+    # verdict fixture in the suite does and the risk agent never emits. The values were one argument
+    # away the whole time.
+    by_ticker = {p.get("ticker"): p for p in props if p.get("ticker")}
+
     lines = [
         f"Research proposed {len(props)}, risk approved {len(approved)} of {len(verds)}, "
         f"and {count} entered. Terminal reason: {outcome}."
     ]
     for v in approved:
-        bits = [f"{v.get('ticker', '?')}"]
+        ticker = v.get("ticker", "?")
+        # The verdict still wins where it carries a field, so a risk agent that starts returning one
+        # overrides the proposal rather than being ignored.
+        src = {**by_ticker.get(ticker, {}), **{k: x for k, x in v.items() if x is not None}}
+        bits = [f"{ticker}"]
         for key, label in (("entry_price", "entry"), ("position_size", "size"), ("confidence", "confidence")):
-            val = v.get(key)
+            val = src.get(key)
             if val is not None:
                 bits.append(f"{label} {val}")
         lines.append("Approved: " + ", ".join(bits) + ".")
@@ -689,10 +706,13 @@ def main() -> None:
                      f"{', '.join(v['ticker'] for v in approved)}"
             ),
         )
-        # After close (terminal_reason set), trigger the canonical server judge: per-ticker
-        # L4 quality + Outcome Ledger predictions for this intraday session.
-        from evals.outcomes import trigger_server_judge
-        trigger_server_judge(intraday_session_id)
+        # ⛔ NO EXPLICIT JUDGE TRIGGER HERE (Provy #730). close_session above already grades the
+        # session: /api/ingest/session/close runs the same canonical batch — the L4 judge and the
+        # Outcome Ledger predictions — in the background. This used to ask a second time, one line
+        # after the close, and the two gradings raced: both read "already scored" as empty and both
+        # wrote. Measured on production from 2026-08-17, 46% of quality rows were the second copy,
+        # a median 1.4s apart, and 17 slots recorded the same work as both a pass and a failure.
+        # Provy now refuses the duplicate row, but the wasted judge calls were ours to stop.
         print(f"[intraday] {count} trade(s) placed: "
               f"{', '.join(v['ticker'] for v in approved)}")
 

@@ -496,12 +496,13 @@ def main(bypass_checks: bool = False) -> None:
             result_summary=summary,
         )
         session_closed = True
-        # After close (so terminal_reason is set for the ledger skip-exclusion), run the post-close
-        # side-effects: the canonical server judge and the alert. The session is already closed, so a
-        # failure here must not re-close it or flip terminal_reason to "error" (Provy #288).
+        # After close, run the post-close side-effect: the alert. The session is already closed, so
+        # a failure here must not re-close it or flip terminal_reason to "error" (Provy #288).
+        #
+        # ⛔ THE JUDGE TRIGGER THAT USED TO BE HERE IS GONE (Provy #730). The close above already
+        # grades the session through the same canonical batch, so asking again just raced with it:
+        # both gradings read "already scored" as empty and both wrote.
         try:
-            from evals.outcomes import trigger_server_judge
-            trigger_server_judge(session_id)
             subject, body = _build_premarket_alert(result, session_id, now_et)
             send_alert(subject, body)
         except Exception as e:

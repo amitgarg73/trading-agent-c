@@ -15,9 +15,22 @@ import inspect
 from sessions import intraday
 
 
-PROPOSALS = {"proposals": [{"ticker": "NVDA"}, {"ticker": "AVGO"}, {"ticker": "PANW"}]}
+# ⛔ THESE ARE THE SHAPES THE AGENTS ACTUALLY EMIT, AND THAT IS THE WHOLE POINT (argus#726).
+#
+# This file used to put entry_price, position_size and confidence on the VERDICT, which the risk
+# agent has never returned — its contract is {ticker, verdict, reason} (agents/risk_agent.py) and
+# every other verdict fixture in the suite says so. The fabricated shape made a green test out of a
+# summary that omitted all three on all 128 production runs. It also had position_size as 12, a
+# share count, where research emits $3,000 of notional.
+#
+# Price, size and confidence come from the RESEARCH proposal (agents/research_agent.py).
+PROPOSALS = {"proposals": [
+    {"ticker": "NVDA", "entry_price": 178.2, "position_size": 3000, "confidence": "HIGH"},
+    {"ticker": "AVGO", "entry_price": 291.4, "position_size": 3000, "confidence": "MEDIUM"},
+    {"ticker": "PANW", "entry_price": 402.9, "position_size": 3000, "confidence": "LOW"},
+]}
 VERDICTS = {"verdicts": [
-    {"ticker": "NVDA", "verdict": "APPROVED", "entry_price": 178.2, "position_size": 12, "confidence": 0.81},
+    {"ticker": "NVDA", "verdict": "APPROVED"},
     {"ticker": "AVGO", "verdict": "REJECTED", "reason": "ATR above limit"},
     {"ticker": "PANW", "verdict": "REJECTED", "reason": "correlation with open position"},
 ]}
@@ -37,8 +50,24 @@ def test_it_answers_the_criterion_on_its_own_terms():
     """entry price, position size, confidence, and a terminal_reason."""
     say = intraday._entry_rationale(PROPOSALS, VERDICTS, APPROVED, 1, "intraday_entries_placed")
     assert "NVDA" in say
-    assert "entry 178.2" in say and "size 12" in say and "confidence 0.81" in say
+    assert "entry 178.2" in say and "size 3000" in say and "confidence HIGH" in say
     assert "intraday_entries_placed" in say
+
+
+def test_it_reads_price_size_and_confidence_off_the_proposal():
+    """
+    ⛔ THE SHIPPED BUG, VERBATIM. Read from the verdict, all three are absent from every real
+    session, and the summary says only "Approved: NVDA." — which is what the judge saw 128 times.
+    """
+    say = intraday._entry_rationale(PROPOSALS, VERDICTS, APPROVED, 1, "intraday_entries_placed")
+    assert "Approved: NVDA, entry 178.2, size 3000, confidence HIGH." in say
+
+
+def test_a_verdict_that_carries_a_field_overrides_the_proposal():
+    """If risk ever starts returning its own sizing, its number is the one that ran."""
+    verds = [{"ticker": "NVDA", "verdict": "APPROVED", "position_size": 1500}]
+    say = intraday._entry_rationale(PROPOSALS, {"verdicts": verds}, verds, 1, "intraday_entries_placed")
+    assert "size 1500" in say and "size 3000" not in say
 
 
 def test_it_reconciles_its_own_counts():
@@ -55,8 +84,12 @@ def test_it_names_the_gate_when_risk_said_yes_and_nothing_entered():
     assert "the refusal was the gate rather than the risk assessment" in say
 
 
-def test_it_does_not_invent_fields_the_verdict_did_not_carry():
-    """A missing size or confidence is omitted, never guessed."""
+def test_it_does_not_invent_fields_the_run_did_not_produce():
+    """
+    A size or confidence absent from BOTH the proposal and the verdict is omitted, never guessed.
+    Reporting a value the session did not produce is the dishonesty this whole path avoids, and it
+    stays the behaviour now that there is a second place to look.
+    """
     thin = [{"ticker": "NVDA", "verdict": "APPROVED"}]
     say = intraday._entry_rationale({"proposals": [{"ticker": "NVDA"}]},
                                     {"verdicts": thin}, thin, 1, "intraday_entries_placed")

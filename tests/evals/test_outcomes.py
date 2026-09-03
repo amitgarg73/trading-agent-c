@@ -293,41 +293,35 @@ class TestPushTradeOutcomes:
         assert "session_id" not in posted[0][1]
 
 
-class TestTriggerServerJudge:
-    """The pipeline triggers the canonical server judge after a session closes; it scores
-    per-ticker quality and writes the Outcome Ledger predictions."""
+class TestServerJudgeBackfill:
+    """
+    The EOD safety net, and the guarantee that nothing asks Provy to grade a session it has just
+    been told about.
 
-    def test_posts_to_compute_judge(self):
-        from evals.outcomes import trigger_server_judge
-        captured = {}
-        def fake_urlopen(req, timeout=None):
-            captured["url"] = req.full_url
-            captured["body"] = req.data
-            captured["timeout"] = timeout
-            return MagicMock()
-        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
-             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
-             patch("trace.logger._ARGUS_API_KEY", "k"), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            trigger_server_judge("sess-abc")
-        assert captured["url"].endswith("/api/compute/judge")
-        assert b"sess-abc" in captured["body"]
-        assert captured["timeout"] == 120
+    ⛔ THE PER-SESSION TRIGGER WAS REMOVED (Provy #730). Closing a session already grades it, so
+    asking again one line later raced the grading the close had started: both runs read "already
+    scored" as empty and both wrote. On production from 2026-08-17 that was 46% of quality rows,
+    a median 1.4s apart, with 17 slots recorded as both a pass and a failure. The backfill below
+    survives because it runs at EOD, hours after the closes it covers, so it cannot race them.
+    """
 
-    def test_failure_is_non_fatal(self):
-        from evals.outcomes import trigger_server_judge
-        with patch.dict("os.environ", {"PROVY_EMIT": "1"}), \
-             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
-             patch("trace.logger._ARGUS_API_KEY", "k"), \
-             patch("urllib.request.urlopen", side_effect=RuntimeError("down")):
-            trigger_server_judge("sess-x")  # must not raise
+    def test_no_close_path_asks_provy_to_grade_a_single_session(self):
+        """
+        The regression guard. A per-session judge call placed next to a close is the bug, whatever
+        it ends up being named, so this looks for the shape rather than for the old function.
+        """
+        import inspect
+        from sessions import intraday, premarket
 
-    def test_noop_without_argus_url(self):
-        from evals.outcomes import trigger_server_judge
-        with patch("trace.logger._ARGUS_URL", ""), \
-             patch("urllib.request.urlopen") as uo:
-            trigger_server_judge("sess-y")
-            uo.assert_not_called()
+        for mod in (intraday, premarket):
+            src = inspect.getsource(mod)
+            assert "/api/compute/judge" not in src, (
+                f"{mod.__name__} posts to the judge directly; closing the session already grades it"
+            )
+            assert "trigger_server_judge" not in src, (
+                f"{mod.__name__} asks Provy to grade one session after closing it, which races the "
+                "grading the close already started (Provy #730)"
+            )
 
     def test_backfill_posts_without_session_id(self):
         # The EOD safety net judges recent sessions with a no-session-id call.
@@ -360,17 +354,6 @@ class TestTriggerServerJudge:
         with patch("trace.logger._ARGUS_URL", ""), \
              patch("urllib.request.urlopen") as uo:
             backfill_server_judge()
-            uo.assert_not_called()
-
-    def test_trigger_noop_when_emit_disabled(self):
-        # Credentials present, but no opt-in (PROVY_EMIT unset, not in GitHub Actions):
-        # the server judge must NOT hit the network. Guards the local EOD hang.
-        from evals.outcomes import trigger_server_judge
-        with patch.dict("os.environ", {"PROVY_EMIT": "", "GITHUB_ACTIONS": ""}), \
-             patch("trace.logger._ARGUS_URL", "https://argus.test"), \
-             patch("trace.logger._ARGUS_API_KEY", "k"), \
-             patch("urllib.request.urlopen") as uo:
-            trigger_server_judge("sess-z")
             uo.assert_not_called()
 
     def test_backfill_noop_when_emit_disabled(self):
