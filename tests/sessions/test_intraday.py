@@ -188,6 +188,11 @@ class TestClassifyExit:
 
 _BRACKET_PATCH = patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", 185.0))
 _TRAIL_PATCH   = patch("core.alpaca.submit_trailing_stop", return_value="trail-intra-001")
+# ⛔ WITHOUT THIS THE ENTRY TESTS READ THE LIVE PAPER ACCOUNT. core/alpaca.py calls load_dotenv() at
+# import, so a local run has real broker credentials, and the position gate added on 3 Sep 2026 calls
+# get_open_alpaca_tickers() for real. The account happened to hold AAPL, which is the fixture ticker,
+# so three tests skipped the entry and failed for a reason that had nothing to do with the code.
+_HELD_PATCH    = patch("core.alpaca.get_open_alpaca_tickers", return_value=set())
 
 _INTRA_PROPOSAL = {
     "proposals": [
@@ -217,7 +222,7 @@ class TestPlaceIntradayTrades:
         mock_supabase.table.return_value = q
 
         from sessions.intraday import _place_intraday_trades
-        with _BRACKET_PATCH, _TRAIL_PATCH:
+        with _BRACKET_PATCH, _TRAIL_PATCH, _HELD_PATCH:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 1
         assert inserted.get("entry_context") == "intraday"
@@ -236,7 +241,7 @@ class TestPlaceIntradayTrades:
         mock_supabase.table.return_value = q
 
         from sessions.intraday import _place_intraday_trades
-        with patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", None)), \
+        with _HELD_PATCH, patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", None)), \
              _TRAIL_PATCH as mock_trail:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 1
@@ -259,14 +264,14 @@ class TestPlaceIntradayTrades:
             ]
         }
         from sessions.intraday import _place_intraday_trades
-        with _BRACKET_PATCH, _TRAIL_PATCH:
+        with _BRACKET_PATCH, _TRAIL_PATCH, _HELD_PATCH:
             count = _place_intraday_trades(proposals, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
 
     def test_skips_rejected_order(self, mock_supabase):
         mock_supabase.table.return_value = make_query([])
         from sessions.intraday import _place_intraday_trades
-        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH:
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH, _HELD_PATCH:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
         assert count == 0
 
@@ -275,7 +280,7 @@ class TestPlaceIntradayTrades:
         mock_supabase.table.return_value = make_query([])
         mock_tracer = MagicMock()
         from sessions.intraday import _place_intraday_trades
-        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH:
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)), _TRAIL_PATCH, _HELD_PATCH:
             count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=mock_tracer)
         assert count == 0
         mock_tracer.log_tool_call.assert_called_once()
@@ -286,6 +291,52 @@ class TestPlaceIntradayTrades:
         assert isinstance(call_args.args[2], dict)  # tool_input
         assert isinstance(call_args.args[3], dict)  # tool_output
         assert call_args.args[3].get("outcome") == "rejected"
+
+    def test_position_gate_skips_a_ticker_already_held_at_the_broker(self, mock_supabase):
+        """
+        ⛔ THE 3 SEP 2026 OUTAGE. Alpaca refuses a bracket order on a symbol already held:
+        {"code":42210000,"message":"bracket orders must be entry orders"}. The day gate only knows
+        about entries made TODAY, so a position carried overnight walked past it and the broker did
+        the rejecting. Both intraday scans that day died on it.
+        """
+        mock_supabase.table.return_value = make_query([])
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.get_open_alpaca_tickers", return_value={"AAPL"}), \
+             _BRACKET_PATCH as bracket, _TRAIL_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008)
+        assert count == 0
+        bracket.assert_not_called()
+
+    def test_one_broker_rejection_does_not_end_the_scan(self, mock_supabase):
+        """
+        ⛔ ALSO THE 3 SEP 2026 OUTAGE, AND THE HALF THAT MADE IT EXPENSIVE. submit_bracket_order was
+        unguarded, so the first APIError propagated past every remaining approved ticker and out of
+        main(). One invalid order became a dead scan, and the tickers behind it were never attempted
+        and never logged.
+        """
+        mock_supabase.table.return_value = make_query([])
+        mock_tracer = MagicMock()
+        proposals = {"proposals": [
+            dict(_INTRA_PROPOSAL["proposals"][0], ticker="BAD"),
+            dict(_INTRA_PROPOSAL["proposals"][0], ticker="GOOD"),
+        ]}
+
+        def submit(**kw):
+            if kw["ticker"] == "BAD":
+                raise RuntimeError('{"code":42210000,"message":"bracket orders must be entry orders"}')
+            return ("ord-good-001", 185.0)
+
+        from sessions.intraday import _place_intraday_trades
+        with patch("core.alpaca.submit_bracket_order", side_effect=submit), _TRAIL_PATCH, _HELD_PATCH:
+            count = _place_intraday_trades(proposals, {"BAD", "GOOD"}, _SESSION_ID, 0.008,
+                                           tracer=mock_tracer)
+
+        # The scan survived the rejection and still entered the ticker behind it.
+        assert count == 1
+        # And the failed attempt is traced, not silently absent. An untraced failure cannot be told
+        # apart from a ticker that was never approved.
+        traced = [c.args[0] for c in mock_tracer.log_tool_call.call_args_list]
+        assert len(traced) == 2
 
     def test_hard_gate_blocks_ticker_already_entered_today(self, mock_supabase):
         """If AAPL was already entered today (open or closed), hard gate must skip it."""

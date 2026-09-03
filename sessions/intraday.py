@@ -388,12 +388,21 @@ def _place_intraday_trades(
     tracer=None,
 ) -> int:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
-    from core.alpaca import submit_bracket_order, submit_trailing_stop
+    from core.alpaca import submit_bracket_order, submit_trailing_stop, get_open_alpaca_tickers
     from core.db import get_client
     today = date.today().isoformat()
     now_  = datetime.utcnow().isoformat()
     already_entered = today_tickers or set()
     count = 0
+
+    # ⛔ THE DAY GATE CANNOT SEE A POSITION OPENED ON AN EARLIER DAY, AND ALPACA REFUSES A BRACKET
+    # ORDER ON A SYMBOL ALREADY HELD: "bracket orders must be entry orders" (code 42210000). A
+    # bracket has to OPEN a position, so holding the symbol makes the order invalid by definition.
+    # `already_entered` is seeded from today's entries only, so a position carried overnight walked
+    # straight past it and the broker did the rejecting. Both intraday scans on 3 Sep 2026 died this
+    # way. Ask the broker what is actually held rather than inferring it from today's activity.
+    held_at_broker = get_open_alpaca_tickers()
+
     for p in proposals.get("proposals", []):
         ticker = p["ticker"]
         if ticker not in approved_tickers:
@@ -401,16 +410,35 @@ def _place_intraday_trades(
         if ticker in already_entered:
             print(f"  [intraday] {ticker} already entered today — skipping (hard gate)")
             continue
+        if ticker in held_at_broker:
+            print(f"  [intraday] {ticker} already held at the broker — skipping (position gate)")
+            continue
         already_entered.add(ticker)
         shares   = p.get("shares") or int(p["position_size"] / p["entry_price"])
-        order_id, fill_price = submit_bracket_order(
-            ticker=p["ticker"],
-            shares=shares,
-            entry_price=p["entry_price"],
-            target_price=p["target_price"],
-            stop_price=p["stop_loss"],
-            max_entry_premium=max_entry_premium,
-        )
+
+        # ⛔ ONE REJECTED TICKER MUST NOT END THE SCAN.
+        #
+        # This call was unguarded, so the first APIError propagated out of the loop, past every
+        # remaining approved ticker, and out of main(). On 3 Sep 2026 that turned one invalid order
+        # into two dead scans: MET entered and was protected, and whatever was queued behind it was
+        # never attempted and never logged. The rejection path immediately below already treats a
+        # failed order as a skip; an exception should reach the same place rather than the top.
+        try:
+            order_id, fill_price = submit_bracket_order(
+                ticker=p["ticker"],
+                shares=shares,
+                entry_price=p["entry_price"],
+                target_price=p["target_price"],
+                stop_price=p["stop_loss"],
+                max_entry_premium=max_entry_premium,
+            )
+        except Exception as e:
+            # Traced with no order id, so the attempt is visible rather than absent. An untraced
+            # failure is indistinguishable from a ticker that was never approved.
+            _trace_order(tracer, ticker, p, shares, None, None)
+            print(f"  [intraday] {ticker} order failed at the broker: {e} — skipping, scan continues")
+            continue
+
         _trace_order(tracer, ticker, p, shares, order_id, fill_price)
         if order_id is None:
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
