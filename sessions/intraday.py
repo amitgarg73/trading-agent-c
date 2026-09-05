@@ -474,14 +474,51 @@ def _place_intraday_trades(
                 claim["reward_risk"] = round(claim["estimated_profit"] / claim["max_loss"], 2)
             if p.get("confidence"):
                 claim["confidence"] = p["confidence"]
-            tracer.log_agent_message(
-                "orchestrator",
-                f"Entered {ticker} at ${entry:.2f}, target ${p['target_price']:.2f}, "
-                f"stop ${p['stop_loss']:.2f}. Expected ${claim['estimated_profit']:.2f}.",
-                "entered",
-                entity_id=ticker,
-                payload=claim,
-            )
+            # ⛔ THE FORWARD CLAIM GOES IN ITS OWN FIELD, NOT IN `payload` (argus#747, argus#751).
+            #
+            # The dict above is a set of READINGS about the entry and it stays where it is. The claim
+            # below is a different act: it says what we expect realized_pnl to settle at, before the
+            # market has answered. Provy keeps the last value it sees for a key, so a claim carried
+            # as a payload key is overwritten by the EOD reading of the same key and stored as what
+            # we "claimed". On prod every non-zero claimed value is a copy of what settled.
+            #
+            # ⛔ `signal` NAMES `realized_pnl`, NOT `estimated_profit`. The contract's leading
+            # condition is "end-of-day net profit is positive", graded on realized_pnl, and a claim
+            # under a different name never meets the outcome it is supposed to be compared with.
+            #
+            # ⛔ CONFIDENCE IS MAPPED HERE, NOT BY PROVY. Our agents speak in HIGH/MEDIUM/LOW and
+            # Provy's claim takes a 0-1 number. Provy deciding what HIGH means would be it inventing
+            # our scale, which is exactly what the whole epic is removing. It is our word, so it is
+            # our mapping, and the original string stays in the payload so nothing is lost.
+            conf = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(str(p.get("confidence", "")).upper())
+            # ⛔ TELEMETRY MUST NEVER COST US THE POSITION RECORD.
+            #
+            # The bracket order is already placed at the broker by this point, and the c_positions
+            # insert is below. This call sits between them and did not catch, so anything raising in
+            # the tracer (an exporter fault, a serialisation error on a value we did not anticipate)
+            # would propagate out of the loop and skip the insert. We would hold a real position with
+            # no local record of it: the watchdog would not see it, EOD would not close it, and the
+            # first sign would be the broker statement.
+            #
+            # Provy is never in the trade critical path, and this is what honouring that means at the
+            # one place where an observation happens mid-transaction. A lost span is a lost span.
+            try:
+                tracer.log_agent_message(
+                    "orchestrator",
+                    f"Entered {ticker} at ${entry:.2f}, target ${p['target_price']:.2f}, "
+                    f"stop ${p['stop_loss']:.2f}. Expected ${claim['estimated_profit']:.2f}.",
+                    "entered",
+                    entity_id=ticker,
+                    payload=claim,
+                    claim={
+                        "signal":     "realized_pnl",
+                        "value":      claim["estimated_profit"],
+                        "entity_id":  ticker,
+                        **({"confidence": conf} if conf is not None else {}),
+                    },
+                )
+            except Exception as e:
+                print(f"  [intraday] {ticker} entry claim not recorded: {e} — position still written")
 
         get_client().table("c_positions").insert({
             "session_id":      session_id,

@@ -229,6 +229,61 @@ class TestPlaceIntradayTrades:
         assert inserted.get("alpaca_order_id") == "ord-intra-001"
         assert inserted.get("trail_order_id") == "trail-intra-001"
 
+    def test_emits_a_forward_claim_naming_the_settled_key(self, mock_supabase):
+        """⛔ THE CLAIM NAMES `realized_pnl`, NOT `estimated_profit` (argus#602, argus#747).
+
+        The contract's leading condition grades end-of-day profit on `realized_pnl`. A claim filed
+        under any other name never meets the outcome it is meant to be compared with, so this asserts
+        the name as well as the number.
+        """
+        q = make_query([])
+        mock_supabase.table.return_value = q
+        tracer = MagicMock()
+
+        from sessions.intraday import _place_intraday_trades
+        with _BRACKET_PATCH, _TRAIL_PATCH, _HELD_PATCH:
+            _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=tracer)
+
+        entered = [c for c in tracer.log_agent_message.call_args_list if c.kwargs.get("entity_id") == "AAPL"]
+        assert entered, "the entry emitted no agent message"
+        claim = entered[-1].kwargs["claim"]
+        assert claim["signal"] == "realized_pnl"
+        # (192.4 - 185.0) * 18, priced off the FILL rather than the proposal.
+        assert claim["value"] == 133.2
+        assert claim["entity_id"] == "AAPL"
+        # HIGH is OUR word, so WE map it. Provy deciding what HIGH means would be it inventing our scale.
+        assert claim["confidence"] == 0.9
+
+    def test_claim_uses_the_fill_not_the_proposed_entry(self, mock_supabase):
+        # The claim must describe what was actually bought. A fill above the proposal shrinks the
+        # expected profit, and claiming the proposal's number would overstate it on every entry.
+        q = make_query([])
+        mock_supabase.table.return_value = q
+        tracer = MagicMock()
+
+        from sessions.intraday import _place_intraday_trades
+        with _HELD_PATCH, _TRAIL_PATCH, \
+             patch("core.alpaca.submit_bracket_order", return_value=("ord-intra-001", 186.0)):
+            _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=tracer)
+
+        claim = tracer.log_agent_message.call_args_list[-1].kwargs["claim"]
+        assert claim["value"] == round((192.4 - 186.0) * 18, 2)
+
+    def test_a_rejected_order_promises_nothing(self, mock_supabase):
+        # ⛔ NOTHING WAS BOUGHT, SO NOTHING WAS PROMISED. A claim on a rejected order would be an
+        # expectation about a position that does not exist, and it would settle as a miss.
+        q = make_query([])
+        mock_supabase.table.return_value = q
+        tracer = MagicMock()
+
+        from sessions.intraday import _place_intraday_trades
+        with _HELD_PATCH, _TRAIL_PATCH, \
+             patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
+            _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=tracer)
+
+        claims = [c for c in tracer.log_agent_message.call_args_list if c.kwargs.get("claim")]
+        assert claims == []
+
     def test_trail_order_id_none_when_fill_pending(self, mock_supabase):
         inserted = {}
 
@@ -1232,3 +1287,36 @@ class TestOrderTracing:
 
     def test_no_tracer_is_a_no_op(self):
         _trace_order(None, "AAPL", self._P, 100, "ord-1", 10.25)     # must not raise
+
+
+class TestTelemetryNeverCostsThePosition:
+    """⛔ THE POSITION RECORD OUTRANKS THE SPAN.
+
+    The bracket order is placed at the broker before the claim is emitted, and the c_positions
+    insert happens after it. A tracer that raises in between would leave us holding a real position
+    with no local record: the watchdog would not see it, EOD would not close it, and the first sign
+    would be the broker statement. Provy is never in the trade critical path, and this is the one
+    place where an observation happens mid-transaction.
+    """
+
+    def test_a_throwing_tracer_still_writes_the_position(self, mock_supabase):
+        inserted = {}
+
+        def capture(data):
+            inserted.update(data)
+            return make_query([])
+
+        q = make_query([])
+        q.insert.side_effect = capture
+        mock_supabase.table.return_value = q
+
+        tracer = MagicMock()
+        tracer.log_agent_message.side_effect = RuntimeError("exporter down")
+
+        from sessions.intraday import _place_intraday_trades
+        with _BRACKET_PATCH, _TRAIL_PATCH, _HELD_PATCH:
+            count = _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=tracer)
+
+        assert count == 1
+        assert inserted.get("ticker") == "AAPL"
+        assert inserted.get("alpaca_order_id") == "ord-intra-001"

@@ -344,6 +344,7 @@ class TraceLogger:
         model: Optional[str] = None,
         latency_ms: int = 0,
         payload: Optional[dict] = None,
+        claim: Optional[dict] = None,
     ) -> str:
         """Log an agent's message.
 
@@ -356,6 +357,21 @@ class TraceLogger:
         back to forecasting from judge scores instead of using the agent's own number (argus#601).
 
         If a value is meant to be graded or compared, it goes here, not only in the prose.
+
+        `claim` is this step's FORWARD CLAIM: {"signal", "value", "confidence"?, "entity_id"?}, or a
+        list of those. It says what we expect a key to settle at, BEFORE the answer exists.
+
+        ⛔ A CLAIM IS NOT A PAYLOAD KEY, AND PUTTING IT IN `payload` DOES NOT WORK (argus#751).
+        Provy keeps the LAST value it sees for a key across the whole session. That is correct for a
+        reading, because a close step supersedes earlier partials, and it destroys a claim: the risk
+        agent reports realized_pnl 0 during the run, EOD reports the settled figure under the same
+        key, and Provy stores the settled figure as what risk claimed. On prod every non-zero
+        "claimed" value is a byte-for-byte copy of what actually settled. A claim goes in its own
+        field, which nothing else writes, so nothing can overwrite it.
+
+        ⛔ `signal` MUST NAME THE KEY THE OUTCOME SETTLES UNDER, or the two sides never meet. Our
+        contract's leading condition is realized_pnl > 0, so a forward claim about this entry's
+        profit is signal="realized_pnl", not signal="estimated_profit".
         """
         return self._write({
             "step_type":       "agent_message",
@@ -368,6 +384,7 @@ class TraceLogger:
             "latency_ms":      latency_ms,
             "model":           model,
             "payload":         payload,
+            "claim":           claim,
         })
 
     def log_decision(
@@ -665,6 +682,11 @@ class TraceLogger:
         if fields.get("payload") is not None:
             for k, v in fields["payload"].items():
                 attrs[f"argus.payload.{k}"] = json.dumps(v, default=str) if not isinstance(v, (str, int, float, bool)) else v
+        # The forward claim, as its own attribute (argus#747). Provy lifts this out of the span into
+        # a column at ingest, so it survives trace-body offload and cannot be overwritten by a later
+        # reading of the same key.
+        if fields.get("claim") is not None:
+            attrs["argus.claim"] = json.dumps(fields["claim"], default=str)
 
         span = self._tracer.start_span(
             f"{step_type}:{fields.get('tool_name', agent)}",

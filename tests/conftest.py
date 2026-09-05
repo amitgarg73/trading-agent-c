@@ -168,3 +168,41 @@ def text_block(text):
     b.type = "text"
     b.text = text
     return b
+
+
+@pytest.fixture(autouse=True)
+def _no_real_broker(monkeypatch):
+    """
+    No test may open a real broker connection.
+
+    ⛔ THIS IS THE OTHER HALF OF `_no_real_database` AND IT WAS MISSING FOR MONTHS. That fixture
+    exists because a local run carries live credentials, so a test that forgets to mock reaches
+    production. Every word of it is equally true of Alpaca, and nothing guarded Alpaca: a test that
+    called into `core.alpaca` without patching would have built a real `TradingClient` from the same
+    environment and talked to the live broker. The database side of that mistake writes a fake
+    heartbeat; this side places or cancels an order.
+
+    It is guarded at CLIENT CONSTRUCTION rather than per function, the same as the database, because
+    an allowlist of "the dangerous ones" is a list somebody has to keep correct forever. Reading is
+    blocked along with writing on purpose: a quote fetched from the live market makes a test's result
+    depend on the time of day, which is its own kind of silent failure.
+
+    Tests that patch `core.alpaca.<function>` never reach this. Tests that need a client should patch
+    `core.alpaca._client` (or `_dclient` / `_nclient`) with a mock.
+    """
+    def _refuse(name: str):
+        def _inner(*_args, **_kwargs):
+            raise RuntimeError(
+                f"This test tried to construct a real Alpaca {name}. Local runs carry live broker "
+                "credentials, so the call would have reached the real account. Patch the specific "
+                "core.alpaca function you need, or patch core.alpaca._client / _dclient / _nclient."
+            )
+        return _inner
+
+    monkeypatch.setattr("core.alpaca._client",  _refuse("TradingClient"))
+    monkeypatch.setattr("core.alpaca._dclient", _refuse("StockHistoricalDataClient"))
+    monkeypatch.setattr("core.alpaca._nclient", _refuse("NewsClient"))
+    # Cached clients: a real one built by an earlier test would otherwise be reused past the patch.
+    monkeypatch.setattr("core.alpaca._trading_client", None, raising=False)
+    monkeypatch.setattr("core.alpaca._data_client",    None, raising=False)
+    monkeypatch.setattr("core.alpaca._news_client",    None, raising=False)
