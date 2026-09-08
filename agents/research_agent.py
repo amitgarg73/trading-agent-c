@@ -6,7 +6,7 @@ from typing import Optional
 
 import anthropic
 
-from agents.base import parse_json_response, run_tool_loop
+from agents.base import cacheable_system, parse_json_response, run_tool_loop
 from agents.tools.market_tools import get_sector_rotation
 from agents.tools.research_tools import (
     batch_fetch_news,
@@ -187,7 +187,9 @@ def _investigate_ticker(
     text = run_tool_loop(
         client=client,
         model=_MODEL,
-        system=_INVESTIGATE_SYSTEM,
+        # The only prefix here big enough for Anthropic to cache: 1856 tokens of tools+system
+        # against Sonnet's 1024 minimum, resent unchanged on every turn of every ticker's loop.
+        system=cacheable_system(_INVESTIGATE_SYSTEM),
         tools=INVESTIGATE_TOOL_SCHEMAS,
         initial_message=msg,
         dispatch=_investigate_dispatch,

@@ -38,10 +38,28 @@ import anthropic
 from trace.logger import TraceLogger
 
 
+def cacheable_system(system: str) -> list[dict]:
+    """Mark the system prompt as a cache breakpoint.
+
+    The cached prefix is everything up to and including this block -- tools FIRST, then system -- so
+    a tool loop that resends the same tools and system every turn pays for them once and reads them
+    back at a tenth of the price for five minutes.
+
+    ⛔ ONLY WORTH IT ABOVE THE MODEL'S MINIMUM, AND THE API WILL NOT TELL YOU. Anthropic accepts
+    cache_control on a short prefix, declines to cache it, and reports nothing -- which looks exactly
+    like caching that works. The minimum is 1024 tokens on Sonnet and 2048 on Haiku. Measured with
+    count_tokens on 2026-09-08: research is 1856 tokens of tools+system against a 1024 minimum on
+    Sonnet and caches. Every other agent here is under its model's limit -- risk 1190 against Haiku's
+    2048, orchestrator 652, market 358, scanner 261 -- so marking them would be a silent no-op that
+    reads like a working optimisation. Check the count before adding a fifth caller.
+    """
+    return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+
+
 def run_tool_loop(
     client: anthropic.Anthropic,
     model: str,
-    system: str,
+    system: str | list[dict],
     tools: list[dict],
     initial_message: str,
     dispatch: Callable[[str, dict], Any],
@@ -55,6 +73,9 @@ def run_tool_loop(
     Returns final text content. Raises RuntimeError if limit exceeded.
     Every tool call and the final message are logged via tracer.
     wall_clock_timeout_s caps total elapsed time across all turns and tool calls.
+
+    `system` may be a plain string or the block list from cacheable_system(), which turns the
+    unchanging tools+system prefix into a cache read on every turn after the first.
     """
     messages: list[dict] = [{"role": "user", "content": initial_message}]
     loop_start = time.monotonic()

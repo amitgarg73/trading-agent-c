@@ -527,3 +527,49 @@ class TestCandidatesPath:
 
         _run_with_candidates(tracer, candidates=many, investigate_side_effect=side_effect)
         assert len(investigated) <= _MAX_CANDIDATES
+
+
+class TestPromptCaching:
+    """Research is the only agent whose prefix Anthropic will actually cache.
+
+    Measured with count_tokens on 2026-09-08: 1856 tokens of tools+system against Sonnet's 1024
+    minimum, and confirmed against the live API (1532 written, then read back on the next call).
+    Every other agent here is under its model's minimum, where cache_control is accepted, ignored,
+    and indistinguishable from caching that works.
+    """
+
+    def test_investigate_marks_the_system_prompt_as_cacheable(self):
+        import inspect
+        from agents import research_agent
+
+        src = inspect.getsource(research_agent._investigate_ticker)
+        assert "cacheable_system(_INVESTIGATE_SYSTEM)" in src, (
+            "research must send its system prompt as a cache breakpoint; without it the same "
+            "1.5k-token tools+system prefix is billed at full input rate on all ~21 calls a "
+            "session makes"
+        )
+
+    def test_cacheable_system_emits_an_ephemeral_breakpoint(self):
+        from agents.base import cacheable_system
+
+        blocks = cacheable_system("some system prompt")
+        assert blocks == [{
+            "type": "text",
+            "text": "some system prompt",
+            "cache_control": {"type": "ephemeral"},
+        }]
+
+    def test_the_other_agents_are_below_their_models_minimum(self):
+        """A guard against 'helpfully' adding caching everywhere.
+
+        Marking a prefix under the limit costs nothing and does nothing, which is worse than not
+        marking it: the code then claims an optimisation that is not happening.
+        """
+        import inspect
+        from agents import orchestrator, risk_agent, market_agent, scanner_agent
+
+        for mod in (orchestrator, risk_agent, market_agent, scanner_agent):
+            assert "cacheable_system" not in inspect.getsource(mod), (
+                f"{mod.__name__} is below its model's minimum cacheable prefix; re-measure with "
+                f"count_tokens before marking it"
+            )
