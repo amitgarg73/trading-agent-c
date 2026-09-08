@@ -146,6 +146,51 @@ class TestLogAgentMessage:
         span_id = tracer.log_agent_message("market", "reasoning", "go")
         assert isinstance(span_id, str) and len(span_id) == 16
 
+    def test_usage_object_puts_the_cache_counters_on_the_span(self, tracer, mock_argus_exporter):
+        """The two cache figures must reach the span, not only the session cost breakdown.
+
+        They were computed in log_tokens for months and discarded at span grain, so
+        ag_traces.cache_read_tokens was NULL on every production row while the same numbers sat in
+        metadata.cost_breakdown (argus#791).
+        """
+        tracer.log_agent_message(
+            "research", "reasoning", "approved",
+            usage=_usage(1000, 200, cache_read=4096, cache_write=1024),
+            model="claude-sonnet-4-6",
+        )
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert attrs["llm.token_count.input"] == 1000
+        assert attrs["llm.token_count.output"] == 200
+        assert attrs["argus.cache_read_tokens"] == 4096
+        assert attrs["argus.cache_write_tokens"] == 1024
+
+    def test_cache_counters_are_absent_rather_than_zero(self, tracer, mock_argus_exporter):
+        """A step that read no cache must not claim it read zero.
+
+        The columns are nullable on purpose: "no cache hit" and "not an LLM call" are different
+        facts, and sending 0 for both makes them the same one.
+        """
+        tracer.log_agent_message(
+            "research", "reasoning", "approved",
+            usage=_usage(1000, 200), model="claude-sonnet-4-6",
+        )
+        attrs = _last_span_attrs(mock_argus_exporter)
+        assert "argus.cache_read_tokens" not in attrs
+        assert "argus.cache_write_tokens" not in attrs
+
+    def test_span_cost_includes_the_cache_tokens(self, tracer, mock_argus_exporter):
+        """Priced from all four counters, like the breakdown. Cache reads are a tenth of input on
+        Sonnet, so pricing them as absent understates a heavily cached call rather than overstating
+        it -- the direction that hides spend."""
+        tracer.log_agent_message(
+            "research", "reasoning", "approved",
+            usage=_usage(1000, 200, cache_read=100_000, cache_write=0),
+            model="claude-sonnet-4-6",
+        )
+        attrs = _last_span_attrs(mock_argus_exporter)
+        # 1000*3.00 + 200*15.00 + 100000*0.30, per million.
+        assert attrs["argus.cost_usd"] == pytest.approx((3_000 + 3_000 + 30_000) / 1_000_000)
+
 
 # ── log_decision ───────────────────────────────────────────────────────────────
 

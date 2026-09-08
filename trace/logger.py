@@ -92,6 +92,32 @@ def _estimate_cost(
     ) / 1_000_000
 
 
+def _usage_fields(usage: Any) -> tuple[int, int, int, int]:
+    """Read (input, output, cache_read, cache_write) off an Anthropic usage object or a plain dict.
+
+    ⛔ CACHE TOKENS ARE NOT PART OF `input_tokens`. Anthropic reports cache reads and cache writes as
+    their own counters, so anything that prices or reports a call from input/output alone is missing
+    them entirely -- and a cached call is where the difference is largest.
+
+    This lives in one place because it is read twice: once for the per-agent cost breakdown and once
+    for the span itself. It used to exist only inside log_tokens, which is why the span never carried
+    the two cache figures even though the caller had them in hand (argus#791).
+    """
+    if hasattr(usage, "input_tokens"):
+        return (
+            usage.input_tokens,
+            usage.output_tokens,
+            getattr(usage, "cache_read_input_tokens",     0) or 0,
+            getattr(usage, "cache_creation_input_tokens", 0) or 0,
+        )
+    return (
+        usage.get("input_tokens",  0) or 0,
+        usage.get("output_tokens", 0) or 0,
+        usage.get("cache_read_input_tokens",     0) or 0,
+        usage.get("cache_creation_input_tokens", 0) or 0,
+    )
+
+
 def _ingest_post(path: str, payload: dict) -> bool:
     """POST to Argus ingest API. Non-fatal on any error.
 
@@ -345,8 +371,14 @@ class TraceLogger:
         latency_ms: int = 0,
         payload: Optional[dict] = None,
         claim: Optional[dict] = None,
+        usage: Any = None,
     ) -> str:
         """Log an agent's message.
+
+        `usage` is the raw Anthropic usage object. Pass it instead of tokens_input/tokens_output and
+        the span also carries the two CACHE counters, which are separate from input_tokens and were
+        previously computed for the cost breakdown and then thrown away at span grain (argus#791).
+        The explicit token arguments still work and are what every pre-existing caller uses.
 
         `payload` carries STRUCTURED scalars alongside the prose, emitted as argus.payload.<key>.
 
@@ -373,18 +405,24 @@ class TraceLogger:
         contract's leading condition is realized_pnl > 0, so a forward claim about this entry's
         profit is signal="realized_pnl", not signal="estimated_profit".
         """
+        cache_read = cache_write = 0
+        if usage is not None:
+            tokens_input, tokens_output, cache_read, cache_write = _usage_fields(usage)
+
         return self._write({
-            "step_type":       "agent_message",
-            "agent":           agent,
-            "agent_reasoning": reasoning,
-            "outcome":         outcome,
-            "entity_id":       entity_id,
-            "tokens_input":    tokens_input,
-            "tokens_output":   tokens_output,
-            "latency_ms":      latency_ms,
-            "model":           model,
-            "payload":         payload,
-            "claim":           claim,
+            "step_type":          "agent_message",
+            "agent":              agent,
+            "agent_reasoning":    reasoning,
+            "outcome":            outcome,
+            "entity_id":          entity_id,
+            "tokens_input":       tokens_input,
+            "tokens_output":      tokens_output,
+            "cache_read_tokens":  cache_read,
+            "cache_write_tokens": cache_write,
+            "latency_ms":         latency_ms,
+            "model":              model,
+            "payload":            payload,
+            "claim":              claim,
         })
 
     def log_decision(
@@ -439,16 +477,7 @@ class TraceLogger:
         model's rates no matter what it actually ran (argus#612). Pass the served model
         (`response.model`), not the requested one, so a server-side substitution is visible.
         """
-        if hasattr(usage, "input_tokens"):
-            inp = usage.input_tokens
-            out = usage.output_tokens
-            cr  = getattr(usage, "cache_read_input_tokens",    0) or 0
-            cw  = getattr(usage, "cache_creation_input_tokens", 0) or 0
-        else:
-            inp = usage.get("input_tokens", 0)
-            out = usage.get("output_tokens", 0)
-            cr  = usage.get("cache_read_input_tokens",    0) or 0
-            cw  = usage.get("cache_creation_input_tokens", 0) or 0
+        inp, out, cr, cw = _usage_fields(usage)
 
         if agent not in self._tokens:
             self._tokens[agent] = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0}
@@ -636,6 +665,8 @@ class TraceLogger:
 
         tokens_input  = fields.get("tokens_input",  0)
         tokens_output = fields.get("tokens_output", 0)
+        cache_read    = fields.get("cache_read_tokens",  0) or 0
+        cache_write   = fields.get("cache_write_tokens", 0) or 0
         model         = fields.get("model")
         cost_usd: Optional[float] = None
         served = model or self._models.get(agent)
@@ -644,6 +675,8 @@ class TraceLogger:
                 served or "",
                 tokens_input,
                 tokens_output,
+                cache_read,
+                cache_write,
             ), 8)
 
         # Parent context: use agent span if it exists, else fall back to session root
@@ -665,6 +698,11 @@ class TraceLogger:
         if fields.get("latency_ms") is not None: attrs["argus.latency_ms"]      = int(fields["latency_ms"])
         if tokens_input:                          attrs["llm.token_count.input"]  = tokens_input
         if tokens_output:                         attrs["llm.token_count.output"] = tokens_output
+        # Provy lifts these into their own columns, so they survive trace-body offload to R2.
+        # Sent only when non-zero: a real 0 and "this step was not an LLM call" are different, and
+        # the column is nullable so that difference is worth preserving.
+        if cache_read:                            attrs["argus.cache_read_tokens"]  = cache_read
+        if cache_write:                           attrs["argus.cache_write_tokens"] = cache_write
         if model:                                 attrs["argus.model"]            = model
         if cost_usd is not None:                  attrs["argus.cost_usd"]         = cost_usd
         if entity_id is not None:                 attrs["argus.entity_id"]        = entity_id

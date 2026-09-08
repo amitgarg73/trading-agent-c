@@ -78,15 +78,18 @@ def run_tool_loop(
         api_ms = int((time.monotonic() - t0) * 1000)
         # Record the model the API actually SERVED, not the one we asked for, so a server-side
         # substitution shows up in the cost breakdown instead of being priced as the request (argus#612).
-        tracer.log_tokens(agent_name, response.usage, getattr(response, "model", None) or model)
+        # ⛔ THE SPAN MUST NAME THE SAME MODEL. It used to send the requested one while the cost
+        # breakdown sent the served one, so a substitution would have been visible in one place and
+        # not the other -- #612 again, one level down.
+        served = getattr(response, "model", None) or model
+        tracer.log_tokens(agent_name, response.usage, served)
 
         if response.stop_reason == "end_turn":
             text = next((b.text for b in response.content if hasattr(b, "text")), "")
             tracer.log_agent_message(
                 agent_name, text, "completed",
-                tokens_input=response.usage.input_tokens,
-                tokens_output=response.usage.output_tokens,
-                model=model,
+                usage=response.usage,
+                model=served,
                 latency_ms=api_ms,
             )
             return text

@@ -111,7 +111,8 @@ def _run_synthesis_call(
         messages=[{"role": "user", "content": user_msg}],
     )
     api_ms = int((time.monotonic() - t0) * 1000)
-    tracer.log_tokens("orchestrator", response.usage, getattr(response, "model", None) or _MODEL)
+    served = getattr(response, "model", None) or _MODEL
+    tracer.log_tokens("orchestrator", response.usage, served)
     text = next((b.text for b in response.content if hasattr(b, "text")), "")
     result = parse_json_response(text)
     # ⛔ THE SESSION'S OWN FORECAST, AS A SIGNAL AND NOT ONLY AS PROSE (argus#601).
@@ -137,9 +138,8 @@ def _run_synthesis_call(
     tracer.log_agent_message(
         "orchestrator", text,
         result.get("session_meta", {}).get("terminal_reason", "synthesized"),
-        tokens_input=response.usage.input_tokens,
-        tokens_output=response.usage.output_tokens,
-        model=_MODEL,
+        usage=response.usage,
+        model=served,
         latency_ms=api_ms,
         payload=claim or None,
     )
