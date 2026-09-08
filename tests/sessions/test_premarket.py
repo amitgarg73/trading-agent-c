@@ -590,3 +590,47 @@ class TestPremarketMain:
                 main()
         assert mock_alert.called
         assert "Error" in mock_alert.call_args[0][0]
+
+
+class TestOrderTracesNameTheirTicker:
+    """
+    Every premarket order trace carries the ticker it was for (argus#805).
+
+    ⛔ WHY IT MATTERS, MEASURED ON PRODUCTION. Provy's grounding check compares what an agent said
+    against what it retrieved. When the orchestrator submits several orders in one session and none
+    of the traces say which ticker they belong to, every ticker's check is shown the whole session's
+    orders, and the judge reports fabrication that never happened: "output claims entry into DHR but
+    the tool results only show rejected orders for GILD and TGT".
+
+    The intraday path was fixed on 28 Aug (b578841) and its zero scores stopped dead: 23 zeros
+    before it, none in the 32 gradings since. These three premarket sites were missed.
+    """
+
+    _TRADE_TICKER = _TRADE["ticker"]
+
+    def test_rejected_bracket_order_names_its_ticker(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        with patch("core.alpaca.submit_bracket_order", return_value=(None, None)):
+            _execute_trades([_TRADE], _SESSION_ID, 0.008, tracer=tracer)
+        tracer.log_tool_call.assert_called_once()
+        assert tracer.log_tool_call.call_args.kwargs.get("entity_id") == self._TRADE_TICKER
+
+    def test_failed_opening_order_names_its_ticker(self, mock_supabase):
+        mock_supabase.table.return_value = make_query([])
+        tracer = MagicMock()
+        with patch("core.alpaca.submit_opening_order", return_value=None):
+            _execute_opening_orders([_TRADE], _SESSION_ID, tracer=tracer)
+        tracer.log_tool_call.assert_called_once()
+        assert tracer.log_tool_call.call_args.kwargs.get("entity_id") == self._TRADE_TICKER
+
+    def test_cancelled_opening_order_names_its_ticker(self, mock_supabase):
+        q = make_query([])
+        q.execute.side_effect = Exception('null value in column "entry_price"')
+        mock_supabase.table.return_value = q
+        tracer = MagicMock()
+        with patch("core.alpaca.submit_opening_order", return_value="opg-1"), \
+             patch("core.alpaca.cancel_order", return_value=True):
+            _execute_opening_orders([_TRADE], _SESSION_ID, tracer=tracer)
+        tracer.log_tool_call.assert_called_once()
+        assert tracer.log_tool_call.call_args.kwargs.get("entity_id") == self._TRADE_TICKER

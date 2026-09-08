@@ -70,6 +70,10 @@ def _execute_trades(trades: list[dict], session_id: str, trail_pct: float, max_e
                     "orchestrator", "submit_bracket_order",
                     {"ticker": trade["ticker"], "entry_price": trade["entry_price"]},
                     {"outcome": "rejected", "error": f"order rejected or staleness gate: proposal=${trade['entry_price']:.2f}"},
+                    # Which ticker this order was for. Without it Provy cannot tell one work item's
+                    # evidence from another's on a session that submits several, and its grounding
+                    # check reads this rejection as belonging to every ticker in the run (argus#805).
+                    entity_id=trade["ticker"],
                 )
             continue
 
@@ -125,6 +129,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on
                     "orchestrator", "submit_opening_order",
                     {"ticker": trade["ticker"], "shares": shares},
                     {"outcome": "failed", "error": "opening order not accepted"},
+                    entity_id=trade["ticker"],
                 )
             continue
         # The order is now live at Alpaca. Record the tracking row so the watchdog can adopt it.
@@ -157,6 +162,7 @@ def _execute_opening_orders(trades: list[dict], session_id: str, tracer=None, on
                     "orchestrator", "submit_opening_order",
                     {"ticker": trade["ticker"], "shares": shares, "order_id": order_id},
                     {"outcome": "cancelled", "error": f"position insert failed: {exc}"},
+                    entity_id=trade["ticker"],
                 )
             continue
         submitted += 1
