@@ -126,6 +126,12 @@ def check_expected_work(now_et: datetime | None = None) -> list[str]:
     if not is_trading_day(weekday):
         return []
 
+    # A holiday is not missing work (argus#865). Without this the 16:30 check would alert every
+    # market holiday that EOD recorded no performance, which is correct behaviour reported as a fault.
+    from core import market_calendar
+    if not market_calendar.check_market_day(now_et.date()).open:
+        return []
+
     problems: list[str] = []
 
     premarket = run_state.today_run("premarket", today)

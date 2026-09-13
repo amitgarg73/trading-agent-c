@@ -74,6 +74,20 @@ def get_account() -> dict:
         return {"error": str(e)}
 
 
+# ── Market calendar ────────────────────────────────────────────────────────────
+
+def get_market_session_dates(start, end) -> set:
+    """Dates between start and end (inclusive) on which the exchange holds a session.
+
+    RAISES on any failure, deliberately, unlike the helpers around it that return an error dict. The
+    caller (core/market_calendar.py) must be able to tell "the API said closed" from "the API did not
+    answer", because the two are handled differently: the second falls back to a static holiday list.
+    """
+    from alpaca.trading.requests import GetCalendarRequest
+    days = _client().get_calendar(GetCalendarRequest(start=start, end=end))
+    return {c.date for c in days}
+
+
 # ── Prices ─────────────────────────────────────────────────────────────────────
 
 # An ask more than this far above the last traded price is not believable and is

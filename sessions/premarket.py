@@ -267,7 +267,7 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
     _COMPLETE = {
         "no_opportunity", "converged", "error", "eod_complete", "no_candidates",
         "risk_rejected", "manual_stop", "watchdog_timeout", "circuit_breaker",
-        "deferred_to_open",
+        "deferred_to_open", "market_closed",
     }
     if term in _COMPLETE or status == "completed":
         return True, f"Session {sid[:8]} already completed ({term}). Skipping."
@@ -285,6 +285,40 @@ def _existing_session_guard(today: str) -> tuple[bool, str]:
                     "Skipping concurrent run."
                 )
     return False, ""
+
+
+def _stand_down_market_closed(market_day, now_et: datetime) -> None:
+    """Record the day as closed and do nothing else (argus#865).
+
+    Traced ONCE per day, here, rather than in every session. Premarket is the day's anchor: EOD reuses
+    its session id and intraday hangs off it as parent, so one `market_closed` session is the whole
+    day's record. The 15-minute intraday and watchdog polls stand down with a log line only, the same
+    way they already treat every other pass-through exit, because 26 empty sessions a holiday would
+    say nothing the first one did not.
+
+    ⛔ SKIP, NOT ERROR, UNLESS THE CALENDAR COULD NOT ANSWER. A holiday is the design working. A
+    fail-closed day (API down and the date outside the static list) is a skip caused by a fault, so
+    it is typed as one and the alert says so.
+    """
+    session_id = str(uuid4())
+    tracer     = TraceLogger(session_id, session_type="premarket")
+    skip_type  = "error" if market_day.source == "unknown" else "design"
+    why        = market_day.reason or "closed"
+    for agent in ("market", "scanner", "research", "risk", "orchestrator"):
+        tracer.log_skip(agent, reason="market_closed", skip_type=skip_type)
+    tracer.log_decision("orchestrator", "market_closed", detail=market_day.as_detail())
+    tracer.close_session(
+        terminal_reason="market_closed",
+        result_summary=f"Market closed {market_day.day.isoformat()} ({why}; source {market_day.source}). "
+                       "No scan, no research, no orders.",
+    )
+    print(f"[premarket] Market closed {market_day.day.isoformat()} ({why}, via {market_day.source}). "
+          "Standing down.")
+    if market_day.source == "unknown":
+        send_alert(
+            f"Strategy C — Market calendar unavailable {now_et.strftime('%Y-%m-%d')}",
+            f"Stood down for the day, failing closed: {why}",
+        )
 
 
 def main(bypass_checks: bool = False) -> None:
@@ -319,6 +353,15 @@ def main(bypass_checks: bool = False) -> None:
         should_skip, skip_msg = _existing_session_guard(date.today().isoformat())
         if should_skip:
             print(f"[premarket] {skip_msg}")
+            return
+
+        # ⛔ A CONFIGURED WEEKDAY IS NOT AN OPEN MARKET (argus#865). Labor Day 2026 passed every gate
+        # above and ran a full day. Checked after the dedup guard so a second cron fire on a holiday
+        # finds the first run's market_closed record and exits without writing another.
+        from core import market_calendar
+        market_day = market_calendar.check_market_day(now_et.date())
+        if not market_day.open:
+            _stand_down_market_closed(market_day, now_et)
             return
     else:
         print(f"[premarket] --bypass-checks active: skipping trading day, window, protection, and dedup guards.")

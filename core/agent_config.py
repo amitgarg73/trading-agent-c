@@ -57,6 +57,10 @@ def get_config(key: str, default: Any = None) -> Any:
 def is_trading_day(weekday_abbr: str) -> bool:
     """
     Check if the given 3-letter weekday abbreviation (e.g. 'MON') is a configured trading day.
+
+    ⛔ THIS IS THE CONFIGURED WEEKDAY ONLY, NOT WHETHER THE MARKET IS OPEN. It returned True for Labor
+    Day 2026 and the agent traded into a closed market (argus#865). Every session must ALSO ask
+    core.market_calendar.check_market_day(date) before doing any work.
     """
     trading_days = get_config("trading_days", _DEFAULTS["trading_days"])
     return weekday_abbr.upper() in [d.upper() for d in trading_days]

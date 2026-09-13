@@ -206,3 +206,29 @@ def _no_real_broker(monkeypatch):
     monkeypatch.setattr("core.alpaca._trading_client", None, raising=False)
     monkeypatch.setattr("core.alpaca._data_client",    None, raising=False)
     monkeypatch.setattr("core.alpaca._news_client",    None, raising=False)
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "real_calendar: run against the real core.market_calendar.check_market_day "
+                   "(its Alpaca lookup is still refused by _no_real_broker, so it exercises the fallback)",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _market_open_by_default(request, monkeypatch):
+    """
+    Sessions ask the market calendar before doing anything (argus#865). Unpatched, that answer would
+    depend on the date the suite runs: `_no_real_broker` refuses the Alpaca lookup, the static list
+    answers for today, and every session test would stand down on a weekend or a holiday.
+
+    So a session test sees an OPEN market unless it says otherwise. Tests about the calendar itself
+    opt out with @pytest.mark.real_calendar; tests about standing down patch in a closed MarketDay.
+    """
+    if request.node.get_closest_marker("real_calendar"):
+        return
+    from core import market_calendar
+    monkeypatch.setattr(
+        market_calendar, "check_market_day",
+        lambda d: market_calendar.MarketDay(d, True, "test", None),
+    )

@@ -447,12 +447,22 @@ class TraceLogger:
         agent: str,
         reason: str,
         skip_type: str = "design",
+        entity_id: Optional[str] = None,
+        detail: Optional[dict] = None,
     ) -> str:
+        """Log a step that deliberately did not run.
+
+        `entity_id` names the work item the skip belongs to (a ticker), so a skipped entry settles at
+        the same grain as a submitted one (argus#865). `detail` adds structured scalars to the payload;
+        it can never overwrite `reason` or `skip_type`.
+        """
+        payload = {**(detail or {}), "reason": reason, "skip_type": skip_type}
         return self._write({
             "step_type": "skip",
             "agent":     agent,
             "outcome":   "skipped",
-            "payload":   {"reason": reason, "skip_type": skip_type},
+            "entity_id": entity_id,
+            "payload":   payload,
         })
 
     def log_error(

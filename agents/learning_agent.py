@@ -52,6 +52,12 @@ Your job:
 NEVER call adjust_param for: daily_loss_limit, account_drawdown_thresholds,
 session_time_limit, session_tool_cap, max_consecutive_losing_days.
 
+KEEP OUTPUT SHORT:
+- Write at most 5 learnings per day. Each finding is 1-2 sentences, under 300 characters,
+  and names the tickers and numbers it rests on. Do not restate the trade record.
+- Do not narrate between tool calls.
+- The final summary is the JSON object below and nothing else: no prose, no code fence.
+
 After all tool calls, return a JSON summary:
 {
   "session_date": "YYYY-MM-DD",
@@ -148,9 +154,21 @@ TOOL_SCHEMAS: list[dict] = [
 ]
 
 
-def _make_dispatch(session_id: str):
-    """Return a dispatcher closure that injects session_id into write/adjust calls."""
+def _make_dispatch(session_id: str, written: dict | None = None):
+    """Return a dispatcher closure that injects session_id into write/adjust calls.
+
+    `written`, when given, counts the write_learning calls the DATABASE accepted. The summary's own
+    `learnings_written` is the model's word for it; this is the record's. argus#583 went a month with
+    no rows while nothing compared the two.
+    """
     def dispatch(name: str, inp: dict):
+        result = _dispatch(name, inp)
+        if written is not None and name == "write_learning" and isinstance(result, dict) \
+                and result.get("status") == "written":
+            written["count"] = written.get("count", 0) + 1
+        return result
+
+    def _dispatch(name: str, inp: dict):
         if name == "read_today_trades":    return read_today_trades()
         if name == "read_session_context": return read_session_context(inp["session_id"])
         if name == "read_strategy_params": return read_strategy_params()
@@ -199,6 +217,7 @@ def run_learning_agent(
     """
     tracer.start_agent_span("learner")
     client = anthropic.Anthropic()
+    written: dict = {"count": 0}
     text = run_tool_loop(
         client=client,
         model=_MODEL,
@@ -209,9 +228,18 @@ def run_learning_agent(
             "Read today's trades, session context, current params, and recent learnings. "
             "Write your findings and return the summary JSON."
         ),
-        dispatch=_make_dispatch(session_id),
+        dispatch=_make_dispatch(session_id, written),
         tracer=tracer,
         agent_name="learner",
         max_turns=20,
+        # ⛔ 2048 WAS THE WHOLE FAILURE (argus#583, argus#865). From 17 Aug the learner stopped on
+        # max_tokens at turn 2, the turn where it issues its write_learning calls, on 10 of its last
+        # 20 runs, and wrote nothing. 8192 holds five learnings plus the summary with room to spare;
+        # the loop doubles to 16000 if a day still overflows. The prompt caps the output as well, so
+        # the budget is headroom and not an invitation.
+        max_tokens=8192,
+        max_tokens_ceiling=16000,
     )
-    return parse_json_response(text)
+    summary = parse_json_response(text)
+    summary["learnings_confirmed"] = written["count"]
+    return summary

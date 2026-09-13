@@ -248,8 +248,10 @@ class TestPlaceIntradayTrades:
         assert entered, "the entry emitted no agent message"
         claim = entered[-1].kwargs["claim"]
         assert claim["signal"] == "realized_pnl"
-        # (192.4 - 185.0) * 18, priced off the FILL rather than the proposal.
-        assert claim["value"] == 133.2
+        # ⛔ THE EXPECTED VALUE, NOT THE TARGET PROFIT (argus#865). Priced off the FILL (185.0):
+        # 0.9 * (192.4 - 185.0) * 18  -  0.1 * (185.0 - 183.78) * 18  =  119.88 - 2.196
+        assert claim["value"] == 117.68
+        assert claim["value"] != 133.2, "133.2 is the best case, the old claim"
         assert claim["entity_id"] == "AAPL"
         # HIGH is OUR word, so WE map it. Provy deciding what HIGH means would be it inventing our scale.
         assert claim["confidence"] == 0.9
@@ -267,7 +269,7 @@ class TestPlaceIntradayTrades:
             _place_intraday_trades(_INTRA_PROPOSAL, {"AAPL"}, _SESSION_ID, 0.008, tracer=tracer)
 
         claim = tracer.log_agent_message.call_args_list[-1].kwargs["claim"]
-        assert claim["value"] == round((192.4 - 186.0) * 18, 2)
+        assert claim["value"] == round(0.9 * (192.4 - 186.0) * 18 - 0.1 * (186.0 - 183.78) * 18, 2)
 
     def test_a_rejected_order_promises_nothing(self, mock_supabase):
         # ⛔ NOTHING WAS BOUGHT, SO NOTHING WAS PROMISED. A claim on a rejected order would be an

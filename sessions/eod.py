@@ -356,6 +356,16 @@ def main() -> None:
         print(f"[eod] Not a trading day ({weekday}). Exiting.")
         return
 
+    # argus#865. On a closed day premarket has already recorded the day as `market_closed` under the
+    # session id EOD would reuse; closing it again as eod_complete would overwrite that with a day
+    # that never happened, and the force-close below would queue market sells for the next open.
+    from core import market_calendar
+    market_day = market_calendar.check_market_day(now_et.date())
+    if not market_day.open:
+        print(f"[eod] Market closed {market_day.day.isoformat()} "
+              f"({market_day.reason or 'closed'}, via {market_day.source}). Exiting.")
+        return
+
     session_id = get_today_session_id()
     if not session_id:
         print("[eod] No premarket session today. Exiting.")
@@ -462,6 +472,8 @@ def main() -> None:
             tracer.log_decision("orchestrator", "learning_completed",
                                 detail={
                                     "learnings_written": learnings.get("learnings_written", 0),
+                                    # Rows the database accepted, not the model's own count (#583).
+                                    "learnings_confirmed": learnings.get("learnings_confirmed"),
                                     "params_adjusted":   learnings.get("params_adjusted", 0),
                                 })
             if learnings.get("params_adjusted", 0) > 0:

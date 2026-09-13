@@ -134,6 +134,15 @@ def _poll() -> None:
         print(f"[watchdog] Not a trading day ({weekday}). Exiting.")
         return
 
+    # argus#865: this job places deferred entries and the near-open fallback, so it must not run into
+    # a closed market either. The heartbeat in main() still records, so "stood down" is not "dead".
+    from core import market_calendar
+    market_day = market_calendar.check_market_day(now_et.date())
+    if not market_day.open:
+        print(f"[watchdog] Market closed {market_day.day.isoformat()} "
+              f"({market_day.reason or 'closed'}, via {market_day.source}). Exiting.")
+        return
+
     if not (_POLL_START <= now_t <= _POLL_END):
         print(f"[watchdog] Outside poll window ({now_t}). Exiting.")
         return

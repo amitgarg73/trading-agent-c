@@ -45,6 +45,58 @@ def _entry_outcome(count: int) -> str:
     return "intraday_entries_placed" if count > 0 else "intraday_entry_gate_skipped"
 
 
+def _dollars_position(value) -> str:
+    """'$3,000 position' from 3000.0. Anything unparseable is shown as given, still labelled."""
+    try:
+        return f"${float(value):,.0f} position"
+    except (TypeError, ValueError):
+        return f"position ${value}"
+
+
+# The confidence words our agents speak, as the 0-1 number Provy's claim takes. OUR mapping, not
+# Provy's (argus#751). ⛔ NOT CALIBRATED: confidence_backtest.py measured HIGH names hitting direction
+# 27% of the time against LOW's 56%. It is used below as the agent's STATED belief, never as a fact.
+_CONFIDENCE_P = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}
+
+
+def _expected_value_claim(p: dict, entry: float, shares: int, ticker: str) -> Optional[dict]:
+    """The forward claim for one entry: what the agent's own stated odds say it should earn.
+
+    ⛔ THE OLD CLAIM WAS THE BEST CASE (argus#865). It sent (target - entry) * shares, the profit if the
+    target is hit, on every entry. A claim that assumes the win cannot ever predict a loss, so every
+    graded row read "expected success" and a losing trade could only ever be an overclaim.
+
+    Now a probability-weighted value over the bracket's two exits:
+
+        EV = p * (target - entry) * shares  -  (1 - p) * (entry - stop) * shares
+
+    where p is the agent's stated confidence mapped through _CONFIDENCE_P. That is the same number
+    the claim's `confidence` has always carried, so value and confidence can no longer disagree.
+    A LOW pick with a modest reward/risk now claims a NEGATIVE value, which is the honest reading of
+    "30% sure, 1.5 to 1": the agent is entering a trade its own numbers expect to lose.
+
+    `confidence` is the probability of the claimed SIGN: p when EV > 0, 1 - p when EV < 0.
+
+    Bracket exits only. A trailing stop or the EOD force-close can settle anywhere between stop and
+    target, so this is a model of the plan, not of every path the position can take.
+
+    Returns None when there is no stated confidence. With no probability there is no expectation to
+    state, and a claim of zero would read as "expects to break even", which nobody said.
+    """
+    prob = _CONFIDENCE_P.get(str(p.get("confidence") or "").upper())
+    if prob is None or not entry or not shares:
+        return None
+    win  = (p["target_price"] - entry) * shares
+    loss = (entry - p["stop_loss"]) * shares
+    ev   = round(prob * win - (1 - prob) * loss, 2)
+    return {
+        "signal":     "realized_pnl",
+        "value":      ev,
+        "entity_id":  ticker,
+        "confidence": round(prob if ev >= 0 else 1 - prob, 2),
+    }
+
+
 def _entry_rationale(proposals: dict, verdicts: dict, approved: list, count: int, outcome: str) -> str:
     """
     The intraday entry decision, in words, for quality scoring (argus#579).
@@ -83,10 +135,14 @@ def _entry_rationale(proposals: dict, verdicts: dict, approved: list, count: int
         # overrides the proposal rather than being ignored.
         src = {**by_ticker.get(ticker, {}), **{k: x for k, x in v.items() if x is not None}}
         bits = [f"{ticker}"]
-        for key, label in (("entry_price", "entry"), ("position_size", "size"), ("confidence", "confidence")):
-            val = src.get(key)
-            if val is not None:
-                bits.append(f"{label} {val}")
+        if src.get("entry_price") is not None:
+            bits.append(f"entry {src['entry_price']}")
+        # ⛔ position_size IS DOLLARS, AND A BARE NUMBER READ AS SHARES (argus#865). "size 3000.0"
+        # went to the judge, which scored a $3,000 position as a 3,000-share order.
+        if src.get("position_size") is not None:
+            bits.append(_dollars_position(src["position_size"]))
+        if src.get("confidence") is not None:
+            bits.append(f"confidence {src['confidence']}")
         lines.append("Approved: " + ", ".join(bits) + ".")
     if rejected:
         why = ", ".join(
@@ -102,6 +158,26 @@ def _entry_rationale(proposals: dict, verdicts: dict, approved: list, count: int
             "rather than the risk assessment."
         )
     return " ".join(lines)
+
+
+def _entry_summary(verdicts: dict, approved: list, outcomes: dict, count: int) -> str:
+    """The session's one-line result, naming only what was ENTERED (argus#865).
+
+    ⛔ IT USED TO LIST EVERY APPROVED TICKER UNDER THE ENTERED COUNT. "4 trade(s): VLO, WFC, MU, JNJ,
+    PRU, SNOW" on 7 Sep named six tickers for four entries, including MU (refused by the broker) and
+    VLO (never submitted). Counts for approved and rejected are stated separately so none of the three
+    numbers has to be inferred from a list that means something else.
+    """
+    verds    = (verdicts or {}).get("verdicts", []) or []
+    entered  = [t for t, o in outcomes.items() if o == "entered"]
+    not_in   = [f"{t} ({o.split(':', 1)[-1] if o.startswith('skipped:') else o})"
+                for t, o in outcomes.items() if o != "entered"]
+    head = (f"{count} entered: {', '.join(entered)}." if count > 0
+            else "0 entered.")
+    tail = f" Risk approved {len(approved)}, rejected {len(verds) - len(approved)}."
+    if not_in:
+        tail += f" Approved but not entered: {', '.join(not_in)}."
+    return head + tail
 
 
 def get_premarket_session_id() -> Optional[str]:
@@ -386,8 +462,21 @@ def _place_intraday_trades(
     max_entry_premium: float = 0.02,
     today_tickers: set[str] | None = None,
     tracer=None,
+    outcomes: dict | None = None,
 ) -> int:
-    """Submit bracket orders to Alpaca and write confirmed positions to c_positions."""
+    """Submit bracket orders to Alpaca and write confirmed positions to c_positions.
+
+    ⛔ EVERY APPROVED PICK ENDS IN A TRACED OUTCOME (argus#865). Before this, two gates below skipped a
+    risk-approved ticker with a print() and nothing else: "already entered today" and "already held at
+    the broker". On 7 Sep 2026 risk approved six, five orders were attempted, and VLO left no record at
+    all; PSX did the same on 8, 9, 10 and 11 Sep. The session summary still listed them as approved, so
+    Provy's judge read the missing entry as a hallucination.
+
+    Every approved ticker now finishes as exactly one of: an order trace (filled / accepted /
+    rejected, via _trace_order) or a skip trace with the gate's name. `outcomes`, when given, is filled
+    with ticker -> "entered" | "rejected" | "skipped:<reason>" so the caller can report what happened
+    rather than what was approved.
+    """
     from core.alpaca import submit_bracket_order, submit_trailing_stop, get_open_alpaca_tickers
     from core.db import get_client
     today = date.today().isoformat()
@@ -402,16 +491,35 @@ def _place_intraday_trades(
     # straight past it and the broker did the rejecting. Both intraday scans on 3 Sep 2026 died this
     # way. Ask the broker what is actually held rather than inferring it from today's activity.
     held_at_broker = get_open_alpaca_tickers()
+    outcomes = outcomes if outcomes is not None else {}
+    seen: set[str] = set()
+
+    def _skip(ticker: str, reason: str, **detail) -> None:
+        outcomes[ticker] = f"skipped:{reason}"
+        print(f"  [intraday] {ticker} approved but not entered: {reason}")
+        if not tracer:
+            return
+        try:
+            tracer.log_skip("orchestrator", reason=reason, skip_type="design",
+                            entity_id=ticker, detail={"ticker": ticker, "gate": reason, **detail})
+        except Exception as exc:                               # never let telemetry break a trade
+            print(f"  [intraday] skip trace failed for {ticker}: {exc}")
 
     for p in proposals.get("proposals", []):
         ticker = p["ticker"]
         if ticker not in approved_tickers:
             continue
+        if ticker in seen:
+            # A second proposal for a ticker this scan already handled. Its outcome is the first
+            # one's, so it is not re-recorded; overwriting "entered" with a skip would misreport it.
+            print(f"  [intraday] {ticker} duplicate proposal in this batch — ignored")
+            continue
+        seen.add(ticker)
         if ticker in already_entered:
-            print(f"  [intraday] {ticker} already entered today — skipping (hard gate)")
+            _skip(ticker, "already_entered_today")
             continue
         if ticker in held_at_broker:
-            print(f"  [intraday] {ticker} already held at the broker — skipping (position gate)")
+            _skip(ticker, "already_held_at_broker")
             continue
         already_entered.add(ticker)
         shares   = p.get("shares") or int(p["position_size"] / p["entry_price"])
@@ -436,11 +544,13 @@ def _place_intraday_trades(
             # Traced with no order id, so the attempt is visible rather than absent. An untraced
             # failure is indistinguishable from a ticker that was never approved.
             _trace_order(tracer, ticker, p, shares, None, None)
+            outcomes[ticker] = "rejected"
             print(f"  [intraday] {ticker} order failed at the broker: {e} — skipping, scan continues")
             continue
 
         _trace_order(tracer, ticker, p, shares, order_id, fill_price)
         if order_id is None:
+            outcomes[ticker] = "rejected"
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
             continue
 
@@ -474,6 +584,10 @@ def _place_intraday_trades(
                 claim["reward_risk"] = round(claim["estimated_profit"] / claim["max_loss"], 2)
             if p.get("confidence"):
                 claim["confidence"] = p["confidence"]
+            ev_claim = _expected_value_claim(p, entry, shares, ticker)
+            if ev_claim is not None:
+                # A reading alongside the target-price profit, so the payload shows both numbers.
+                claim["expected_value"] = ev_claim["value"]
             # ⛔ THE FORWARD CLAIM GOES IN ITS OWN FIELD, NOT IN `payload` (argus#747, argus#751).
             #
             # The dict above is a set of READINGS about the entry and it stays where it is. The claim
@@ -489,8 +603,10 @@ def _place_intraday_trades(
             # ⛔ CONFIDENCE IS MAPPED HERE, NOT BY PROVY. Our agents speak in HIGH/MEDIUM/LOW and
             # Provy's claim takes a 0-1 number. Provy deciding what HIGH means would be it inventing
             # our scale, which is exactly what the whole epic is removing. It is our word, so it is
-            # our mapping, and the original string stays in the payload so nothing is lost.
-            conf = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.3}.get(str(p.get("confidence", "")).upper())
+            # our mapping (_CONFIDENCE_P), and the original string stays in the payload.
+            #
+            # ⛔ THE VALUE IS THE EXPECTED VALUE, NOT THE TARGET PROFIT (argus#865). See
+            # _expected_value_claim for the formula and why the best case could never predict a loss.
             # ⛔ TELEMETRY MUST NEVER COST US THE POSITION RECORD.
             #
             # The bracket order is already placed at the broker by this point, and the c_positions
@@ -506,16 +622,14 @@ def _place_intraday_trades(
                 tracer.log_agent_message(
                     "orchestrator",
                     f"Entered {ticker} at ${entry:.2f}, target ${p['target_price']:.2f}, "
-                    f"stop ${p['stop_loss']:.2f}. Expected ${claim['estimated_profit']:.2f}.",
+                    f"stop ${p['stop_loss']:.2f}. ${claim['estimated_profit']:.2f} at target, "
+                    f"-${claim['max_loss']:.2f} at stop"
+                    + (f", expected ${ev_claim['value']:.2f} at stated confidence "
+                       f"{p.get('confidence')}." if ev_claim else "."),
                     "entered",
                     entity_id=ticker,
                     payload=claim,
-                    claim={
-                        "signal":     "realized_pnl",
-                        "value":      claim["estimated_profit"],
-                        "entity_id":  ticker,
-                        **({"confidence": conf} if conf is not None else {}),
-                    },
+                    claim=ev_claim,
                 )
             except Exception as e:
                 print(f"  [intraday] {ticker} entry claim not recorded: {e} — position still written")
@@ -537,7 +651,12 @@ def _place_intraday_trades(
             "alpaca_order_id": order_id,
             "trail_order_id":  trail_order_id,
         }).execute()
+        outcomes[ticker] = "entered"
         count += 1
+
+    # An approved verdict whose ticker has no proposal cannot be placed, and used to vanish here too.
+    for ticker in sorted(set(approved_tickers) - seen):
+        _skip(ticker, "no_matching_proposal")
     return count
 
 
@@ -565,10 +684,15 @@ def _close_intraday(
     lose data, it lost the failing half of it.
     """
     proposed = len((proposals or {}).get("proposals", []) or [])
-    approved = len([v for v in (verdicts or {}).get("verdicts", []) or [] if v.get("verdict") == "APPROVED"])
+    verds    = (verdicts or {}).get("verdicts", []) or []
+    approved = len([v for v in verds if v.get("verdict") == "APPROVED"])
+    rejected = len(verds) - approved
 
+    # ⛔ trades_approved WAS NEVER PASSED, SO IT DEFAULTED TO 0 (argus#865). Session b32757c8 on
+    # 7 Sep recorded trades_approved 0 with six risk approvals, and the Sessions page showed that.
     tracer.close_session(
-        terminal, trades_proposed=proposed, trades_executed=trades_executed,
+        terminal, trades_proposed=proposed, trades_approved=approved,
+        trades_executed=trades_executed, risk_rejections=rejected,
         result_summary=result_summary,
     )
 
@@ -596,6 +720,17 @@ def main() -> None:
 
     if not is_trading_day(weekday):
         print(f"[intraday] Not a trading day ({weekday}). Exiting.")
+        return
+
+    # ⛔ BEFORE ANYTHING ELSE, INCLUDING THE PREMARKET FALLBACK BELOW (argus#865). On Labor Day 2026
+    # this session ran research against a closed market and placed four orders. It must also sit above
+    # `_premarket_main(bypass_checks=True)`, which skips premarket's own calendar check by design.
+    # Untraced like the other pass-through exits: premarket records the closed day once.
+    from core import market_calendar
+    market_day = market_calendar.check_market_day(now_et.date())
+    if not market_day.open:
+        print(f"[intraday] Market closed {market_day.day.isoformat()} "
+              f"({market_day.reason or 'closed'}, via {market_day.source}). Exiting.")
         return
 
     if not (_POLL_START <= now_t <= _POLL_END):
@@ -741,11 +876,13 @@ def main() -> None:
             return
 
         # Positions are written under premarket_session_id — the day-level data key.
+        outcomes: dict = {}
         count = _place_intraday_trades(
             proposals, {v["ticker"] for v in approved}, premarket_session_id, params.trail_pct,
             params.max_entry_premium,
             today_tickers=today_tickers,
             tracer=tracer,
+            outcomes=outcomes,
         )
         outcome = _entry_outcome(count)
         tracer.log_decision("orchestrator", outcome, detail={"count": count})
@@ -764,12 +901,7 @@ def main() -> None:
         _close_intraday(
             tracer, intraday_session_id, outcome,
             proposals=proposals, verdicts=verdicts, trades_executed=count,
-            result_summary=(
-                f"{count} trade(s): {', '.join(v['ticker'] for v in approved)}"
-                if count > 0
-                else f"All {len(approved)} approved pick(s) skipped at entry gate: "
-                     f"{', '.join(v['ticker'] for v in approved)}"
-            ),
+            result_summary=_entry_summary(verdicts, approved, outcomes, count),
         )
         # ⛔ NO EXPLICIT JUDGE TRIGGER HERE (Provy #730). close_session above already grades the
         # session: /api/ingest/session/close runs the same canonical batch — the L4 judge and the
@@ -778,8 +910,7 @@ def main() -> None:
         # wrote. Measured on production from 2026-08-17, 46% of quality rows were the second copy,
         # a median 1.4s apart, and 17 slots recorded the same work as both a pass and a failure.
         # Provy now refuses the duplicate row, but the wasted judge calls were ours to stop.
-        print(f"[intraday] {count} trade(s) placed: "
-              f"{', '.join(v['ticker'] for v in approved)}")
+        print(f"[intraday] {_entry_summary(verdicts, approved, outcomes, count)}")
 
     except Exception as e:
         tracer.log_error("orchestrator", f"intraday error: {e}")

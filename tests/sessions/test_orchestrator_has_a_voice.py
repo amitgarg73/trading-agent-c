@@ -50,7 +50,7 @@ def test_it_answers_the_criterion_on_its_own_terms():
     """entry price, position size, confidence, and a terminal_reason."""
     say = intraday._entry_rationale(PROPOSALS, VERDICTS, APPROVED, 1, "intraday_entries_placed")
     assert "NVDA" in say
-    assert "entry 178.2" in say and "size 3000" in say and "confidence HIGH" in say
+    assert "entry 178.2" in say and "$3,000 position" in say and "confidence HIGH" in say
     assert "intraday_entries_placed" in say
 
 
@@ -60,14 +60,14 @@ def test_it_reads_price_size_and_confidence_off_the_proposal():
     session, and the summary says only "Approved: NVDA." — which is what the judge saw 128 times.
     """
     say = intraday._entry_rationale(PROPOSALS, VERDICTS, APPROVED, 1, "intraday_entries_placed")
-    assert "Approved: NVDA, entry 178.2, size 3000, confidence HIGH." in say
+    assert "Approved: NVDA, entry 178.2, $3,000 position, confidence HIGH." in say
 
 
 def test_a_verdict_that_carries_a_field_overrides_the_proposal():
     """If risk ever starts returning its own sizing, its number is the one that ran."""
     verds = [{"ticker": "NVDA", "verdict": "APPROVED", "position_size": 1500}]
     say = intraday._entry_rationale(PROPOSALS, {"verdicts": verds}, verds, 1, "intraday_entries_placed")
-    assert "size 1500" in say and "size 3000" not in say
+    assert "$1,500 position" in say and "$3,000 position" not in say
 
 
 def test_it_reconciles_its_own_counts():

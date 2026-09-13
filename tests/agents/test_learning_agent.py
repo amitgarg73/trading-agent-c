@@ -140,3 +140,56 @@ class TestRunLearningAgent:
         mock_adj.assert_called_once()
         call_kwargs = mock_adj.call_args[1]
         assert call_kwargs["session_id"] == _SESSION_ID
+
+
+class TestLearnerOutputBudget:
+    """argus#583 / argus#865: the learner died on max_tokens at turn 2 on 10 of its last 20 runs."""
+
+    def test_it_starts_with_a_budget_that_holds_its_writes(self, tracer):
+        client = _setup_client()
+        _run(tracer, client)
+        assert client.messages.create.call_args_list[0].kwargs["max_tokens"] == 8192
+
+    def test_a_truncated_write_turn_is_retried_and_the_learnings_land(self, tracer):
+        write_block = tool_block(
+            "write_learning",
+            {"learning_type": "observation", "dimension": "entry_quality", "finding": "x"},
+            "t-wl",
+        )
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            make_api_response("tool_use", [tool_block("read_today_trades", {}, "t1")]),
+            make_api_response("max_tokens", [write_block]),     # the production failure, turn 2
+            make_api_response("tool_use", [write_block]),
+            make_api_response("end_turn", [text_block(json.dumps(_SUMMARY))]),
+        ]
+        with patch("agents.learning_agent.anthropic.Anthropic", return_value=client), \
+             patch("agents.learning_agent.read_today_trades", return_value=_TRADES), \
+             patch("agents.learning_agent.write_learning", return_value=_WRITE_OK) as write:
+            result = run_learning_agent(tracer, _SESSION_ID, StrategyParams())
+        budgets = [c.kwargs["max_tokens"] for c in client.messages.create.call_args_list]
+        assert budgets == [8192, 8192, 16000, 16000]
+        write.assert_called_once()                 # the truncated call was not executed
+        assert result["learnings_confirmed"] == 1
+
+    def test_learnings_confirmed_counts_rows_the_database_accepted_not_the_models_word(self, tracer):
+        write_block = tool_block(
+            "write_learning",
+            {"learning_type": "observation", "dimension": "entry_quality", "finding": "x"},
+            "t-wl",
+        )
+        client = MagicMock()
+        client.messages.create.side_effect = [
+            make_api_response("tool_use", [write_block]),
+            make_api_response("end_turn", [text_block(json.dumps(_SUMMARY))]),   # says 2 written
+        ]
+        with patch("agents.learning_agent.anthropic.Anthropic", return_value=client), \
+             patch("agents.learning_agent.write_learning", return_value={"error": "insert failed"}):
+            result = run_learning_agent(tracer, _SESSION_ID, StrategyParams())
+        assert result["learnings_written"] == 2
+        assert result["learnings_confirmed"] == 0
+
+    def test_the_prompt_asks_for_short_output(self):
+        from agents.learning_agent import _SYSTEM
+        assert "at most 5 learnings" in _SYSTEM
+        assert "nothing else" in _SYSTEM

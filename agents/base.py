@@ -67,6 +67,8 @@ def run_tool_loop(
     agent_name: str,
     max_turns: int = 15,
     wall_clock_timeout_s: int | None = None,
+    max_tokens: int = 2048,
+    max_tokens_ceiling: int = 16000,
 ) -> str:
     """
     Drive a Claude tool-use loop until end_turn or max_turns.
@@ -76,9 +78,14 @@ def run_tool_loop(
 
     `system` may be a plain string or the block list from cacheable_system(), which turns the
     unchanging tools+system prefix into a cache read on every turn after the first.
+
+    `max_tokens` is the per-response budget to start with. A response cut off at that budget is
+    re-requested with double the budget, up to `max_tokens_ceiling`, and each retry spends a turn,
+    so the hard turn limit still bounds the loop.
     """
     messages: list[dict] = [{"role": "user", "content": initial_message}]
     loop_start = time.monotonic()
+    budget = max_tokens
 
     for turn in range(max_turns):
         if wall_clock_timeout_s is not None:
@@ -91,7 +98,7 @@ def run_tool_loop(
         t0 = time.monotonic()
         response = client.messages.create(
             model=model,
-            max_tokens=2048,
+            max_tokens=budget,
             system=system,
             tools=tools,
             messages=messages,
@@ -135,6 +142,28 @@ def run_tool_loop(
             messages.append({"role": "user", "content": tool_results})
             continue
 
+        # ⛔ A TRUNCATED ANSWER IS RETRIED WITH A BIGGER BUDGET, NOT FAILED (argus#583, argus#865).
+        #
+        # From 17 Aug the Learning Agent died on every EOD with "stopped on 'max_tokens' at turn 2":
+        # turn 1 is its four reads, turn 2 is where it writes its findings, several write_learning
+        # calls in one response, and 2048 output tokens did not hold them. Nothing was written to
+        # c_learnings, because the writes were the truncated part.
+        #
+        # The truncated response is NOT appended and NOT acted on. Its last tool_use block may have
+        # partial input, and executing a half-formed write_learning or adjust_param is worse than not
+        # executing it. The same messages go back with double the budget, so the model regenerates
+        # the whole turn. Doubling stops at the ceiling, and each retry spends a turn, so this cannot
+        # loop without bound: the fail-fast below still fires once the ceiling itself truncates.
+        if response.stop_reason == "max_tokens" and budget < max_tokens_ceiling:
+            new_budget = min(budget * 2, max_tokens_ceiling)
+            try:
+                tracer.log_decision(agent_name, "max_tokens_retry",
+                                    detail={"turn": turn + 1, "from": budget, "to": new_budget})
+            except Exception:
+                pass                                   # telemetry never decides whether we retry
+            budget = new_budget
+            continue
+
         # ⛔ ANY OTHER STOP REASON USED TO FALL THROUGH AND SPIN. Neither branch above fired, nothing
         # was appended to `messages`, and the next iteration sent a byte-identical request, which
         # produced a byte-identical response, up to max_turns. The agent then died with a generic
@@ -149,7 +178,8 @@ def run_tool_loop(
         # the message. `max_tokens` is the one worth naming, because the fix is a bigger budget or a
         # shorter answer rather than anything about tools.
         hint = (
-            " (the model's answer was truncated: raise max_tokens or ask for a shorter response)"
+            f" (the model's answer was truncated even at the {budget}-token ceiling: raise "
+            "max_tokens or ask for a shorter response)"
             if response.stop_reason == "max_tokens" else ""
         )
         raise RuntimeError(
