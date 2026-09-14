@@ -59,7 +59,7 @@ Mixing the two grains is the mistake already recorded against the ledger, whose 
 **2. Leave the per-trade `value` pushes exactly as they are.** They feed the ledger, they are the
 grain its key expects, and nothing above changes them.
 
-**3. Point `write_eod_outcome_metrics` at production, or retire it.** Writing the contract's evidence
+**3. Point `write_eod_outcome_metrics` at production, or retire it.** ✅ **Retired 13 Sep 2026.** It had failed on every EOD since the 25 Jul database split (foreign key on a session that only exists in Provy production), caught and printed. `tests/test_no_provy_table_writes.py` now fails the build on any runtime write to an `ag_*` table. Writing the contract's evidence
 into a database Provy production cannot read is either the wrong target or, once (1) ships,
 duplicated work. Decide which; do not leave both.
 

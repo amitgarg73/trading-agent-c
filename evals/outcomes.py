@@ -1,9 +1,18 @@
-"""Write EOD business outcome metrics to ag_outcomes for quality-vs-P&L correlation."""
+"""EOD outcome reporting to Provy, over its API only: per-trade P&L to the ledger, session risk signals.
+
+⛔ NOTHING HERE WRITES TO A PROVY TABLE. `write_eod_outcome_metrics` used to insert into `ag_outcomes`
+through the shared Supabase client. That client points at Provy's PRE-PRODUCTION project, where this
+fleet's sessions have not existed since Provy split its databases on 2026-07-25, so every insert failed
+on `ag_outcomes_session_id_fkey` from then on (EOD logs 3 Aug to 11 Sep), caught and printed, run green.
+The per-ticker `position_realized_pnl` added on 16 Aug (argus#578) never landed anywhere.
+
+Nothing was lost by removing it. The fleet's own record already holds every number: each trade's
+realized P&L on `c_positions`, the day on `c_daily_performance`, and `compute_risk_metrics` derives the
+risk shape from those trades on demand. Provy receives the per-ticker P&L on its ledger
+(`push_trade_outcomes`) and the session risk signals (`push_outcome_signals`), both over the API.
+"""
 from __future__ import annotations
 
-import os
-from datetime import date
-from uuid import uuid4
 
 
 def _max_positions() -> int:
@@ -69,132 +78,6 @@ def compute_risk_metrics(
         "within_limits": within_limits,
         "max_single_trade_loss_pct": round(worst_loss_pct, 4),
     }
-
-
-def write_eod_outcome_metrics(
-    session_id: str,
-    realized_pnl: float,
-    win_rate: float,
-    trades_total: int,
-    *,
-    trades: list[dict] | None = None,
-) -> None:
-    """Write EOD P&L and risk metrics to ag_outcomes, snapshotting avg L4 quality for correlation.
-
-    This writes to OUR OWN database (SUPABASE_URL), which is this fleet's book of record. It is NOT
-    how Provy sees these numbers and never was: ARGUS_URL points at Provy production while
-    SUPABASE_URL is our own project, so nothing written here is visible to the contract. That
-    mismatch is what made the risk conditions look wired for weeks while grading from nothing.
-
-    Provy is fed by `push_outcome_signals`, over the API, from the same `compute_risk_metrics`
-    values. Keep both: this is our record, that is the report. Do not "fix" this by pointing it at
-    Provy's database, which we do not own and cannot write to.
-
-    Pass `trades` (the session's closed trades, each carrying position_size and realized_pnl);
-    defaults to an empty/zero session.
-
-    Skipped silently when TENANT_ID is unset or any DB error occurs.
-    """
-    try:
-        from core.db import get_client
-
-        tenant_id = os.environ.get("TENANT_ID", "")
-        if not tenant_id:
-            try:
-                from dotenv import load_dotenv
-                load_dotenv()
-                tenant_id = os.environ.get("TENANT_ID", "")
-            except ImportError:
-                pass
-
-        if not tenant_id:
-            print("[outcomes] TENANT_ID not set, skipping")
-            return
-
-        client = get_client()
-
-        # Snapshot avg L4 quality for this session at time of writing
-        evals_rows = (
-            client.table("ag_evals")
-            .select("score")
-            .eq("tenant_id", tenant_id)
-            .eq("session_id", session_id)
-            .eq("layer", 4)
-            .execute()
-            .data
-        )
-        scores = [r["score"] for r in evals_rows if r.get("score") is not None]
-        quality_score = round(sum(scores) / len(scores), 4) if scores else None
-
-        today = date.today().isoformat()
-        metrics = [
-            ("realized_pnl", float(realized_pnl), "usd"),
-            ("win_rate",     float(win_rate),     "ratio"),
-            ("trades_total", float(trades_total),  "count"),
-        ]
-        # Risk-shape signals for the success contract (drawdown / limits / single-trade loss). Every
-        # session grades the full contract, not just P&L, so s2/s3/f2/r1 stop reading "not measurable".
-        risk = compute_risk_metrics(trades or [], int(trades_total), _max_positions())
-        metrics += [
-            ("max_drawdown_pct",          risk["max_drawdown_pct"],          "pct"),
-            ("within_limits",             risk["within_limits"],             "flag"),
-            ("max_single_trade_loss_pct", risk["max_single_trade_loss_pct"], "pct"),
-        ]
-
-        rows = [
-            {
-                "id":            str(uuid4()),
-                "tenant_id":     tenant_id,
-                "session_id":    session_id,
-                "metric_name":   name,
-                "metric_value":  value,
-                "metric_unit":   unit,
-                "quality_score": quality_score,
-                "period_date":   today,
-            }
-            for name, value, unit in metrics
-        ]
-
-        # ⛔ PER-TICKER P&L, TAGGED, AS A DIAGNOSTIC ONLY (argus#578).
-        #
-        # The session metrics above are PORTFOLIO readings and stay untagged. "End-of-day net profit
-        # is positive after all positions are closed" is a portfolio question (Amit's call, 14 Aug);
-        # graded per ticker it would silently become "every position was profitable", a harsher
-        # contract nobody wrote.
-        #
-        # So this emits a DIFFERENT metric name, position_realized_pnl, tagged with the ticker. No
-        # contract condition reads it, and since argus#582 the evaluator only fans out over entities
-        # contributing a reading the contract actually grades. Before #582 this would have split every
-        # session into N passes and re-graded the portfolio conditions once per ticker.
-        #
-        # What it buys: the per-ticker CLAIM that intraday now states (argus#602) finally has a
-        # per-ticker settled number to be reconciled against. Claim and outcome meet at one grain.
-        per_ticker = [
-            {
-                "id":            str(uuid4()),
-                "tenant_id":     tenant_id,
-                "session_id":    session_id,
-                "entity_id":     t.get("ticker"),
-                "metric_name":   "position_realized_pnl",
-                "metric_value":  float(t.get("realized_pnl") or 0.0),
-                "metric_unit":   "usd",
-                "quality_score": quality_score,
-                "period_date":   today,
-            }
-            for t in (trades or [])
-            # Same exclusion the ledger push applies: an order that never filled settled nothing, so
-            # reporting a P&L for it would invent an outcome. Skipping it here keeps the diagnostic
-            # and the ledger describing the same set of trades.
-            if t.get("ticker") and t.get("realized_pnl") is not None
-            and (t.get("exit_reason") or "") not in _NO_TRADE_EXITS
-        ]
-        rows += per_ticker
-
-        client.table("ag_outcomes").insert(rows).execute()
-        print(f"[outcomes] Wrote {len(rows)} outcome metrics "
-              f"({len(per_ticker)} per-ticker, quality_score={quality_score})")
-    except Exception as e:
-        print(f"[outcomes] Failed to write outcome metrics: {e}")
 
 
 def push_outcome_signals(

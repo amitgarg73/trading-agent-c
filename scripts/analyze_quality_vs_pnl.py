@@ -5,6 +5,11 @@ for the trading-C tenant and measures whether the quality signal has any concord
 with the money result. This is the check that decides whether Outcome Assurance is a
 moat or just a dashboard.
 
+⛔ STALE SINCE 2026-07-25. It reads ag_outcomes and ag_evals through the shared client, which is Provy's
+pre-production project. This fleet's evaluations and outcomes have lived in Provy production since the
+database split, and the EOD write that fed ag_outcomes here is retired. Results after that date are
+not this fleet's.
+
 Run from repo root:  python scripts/analyze_quality_vs_pnl.py
 """
 from __future__ import annotations

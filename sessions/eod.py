@@ -405,15 +405,12 @@ def main() -> None:
     scoring = score_trades(session_id)
     tracer.log_decision("orchestrator", "trades_scored", detail=scoring)
 
-    # Write outcome metrics to ag_outcomes for quality-vs-P&L correlation in Argus
-    from evals.outcomes import (
-        write_eod_outcome_metrics, push_trade_outcomes, push_outcome_signals, _NO_TRADE_EXITS,
-    )
+    # Report outcomes to Provy over its API. There is no direct write to Provy's tables: the old
+    # ag_outcomes insert went to Provy's pre-production project and failed on every EOD after the
+    # 2026-07-25 database split (see evals/outcomes.py). This run's record is c_positions and
+    # c_daily_performance, written above.
+    from evals.outcomes import push_trade_outcomes, push_outcome_signals, _NO_TRADE_EXITS
     today_trades = get_today_trades(session_id)
-    write_eod_outcome_metrics(
-        session_id, perf.realized_pnl, perf.win_rate, perf.trades_total,
-        trades=today_trades,
-    )
     # Push each closed trade's realized P&L to the Argus Outcome Ledger so the trace-based
     # prediction for that ticker reconciles against the real result.
     # Deliberately NOT pinning session_id. It looks like the safer call and it is not: Argus
