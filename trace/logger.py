@@ -15,7 +15,8 @@ try:
     from opentelemetry import trace as otel_trace
     from opentelemetry.sdk.trace import TracerProvider, ReadableSpan
     from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.trace import NonRecordingSpan, set_span_in_context, Status, StatusCode
+    from opentelemetry.trace import (NonRecordingSpan, set_span_in_context, Status, StatusCode,
+                                     Link, SpanContext, TraceFlags)
     import opentelemetry.context as otel_ctx
 except ImportError as _e:  # pragma: no cover
     raise ImportError(
@@ -260,6 +261,9 @@ class TraceLogger:
 
         # Map agent name → its OTel span (kept open until close_session)
         self._agent_otel_spans: dict[str, Any] = {}
+        # Newest span id per agent BASE, so a downstream call site can declare what it read
+        # (argus#1009). Written in _write; read via last_span_for().
+        self._last_span_by_agent: dict[str, str] = {}
 
         # Open session via ingest API — fire-and-forget; traces can flow immediately
         self._open_thread = threading.Thread(target=self._open_session, daemon=True)
@@ -372,8 +376,14 @@ class TraceLogger:
         payload: Optional[dict] = None,
         claim: Optional[dict] = None,
         usage: Any = None,
+        inputs: Optional[list] = None,
     ) -> str:
         """Log an agent's message.
+
+        `inputs` names the span ids whose OUTPUT this step consumed — use `last_span_for(agent)` to
+        get one. It is a DATA dependency, not the call tree: risk does not run inside research, it
+        reads what research produced. Declaring it is what lets Provy say a later failure was caused
+        by an earlier one rather than merely following it (argus#1009).
 
         `usage` is the raw Anthropic usage object. Pass it instead of tokens_input/tokens_output and
         the span also carries the two CACHE counters, which are separate from input_tokens and were
@@ -410,6 +420,7 @@ class TraceLogger:
             tokens_input, tokens_output, cache_read, cache_write = _usage_fields(usage)
 
         return self._write({
+            "inputs":             inputs,
             "step_type":          "agent_message",
             "agent":              agent,
             "agent_reasoning":    reasoning,
@@ -432,8 +443,11 @@ class TraceLogger:
         detail: Optional[dict] = None,
         latency_ms: int = 0,
         model: Optional[str] = None,
+        inputs: Optional[list] = None,
     ) -> str:
+        """`inputs`: span ids whose output this decision consumed. See log_agent_message."""
         return self._write({
+            "inputs":      inputs,
             "step_type":   "decision",
             "agent":       agent,
             "outcome":     outcome,
@@ -736,10 +750,35 @@ class TraceLogger:
         if fields.get("claim") is not None:
             attrs["argus.claim"] = json.dumps(fields["claim"], default=str)
 
+        # ⛔ INPUT EDGES ARE LINKS, NOT A SECOND PARENT (argus#1009). The parent above is the CALL
+        # TREE and is deliberately this agent's own base span (#668) — which is why, measured across
+        # 8,337 production spans and 256 sessions, this fleet has produced ZERO edges between two
+        # different agents. Every cross-agent-looking edge was `research -> research_<TICKER>`, one
+        # agent fanning out per work item.
+        #
+        # ⛔ AND THE LOGGER DOES NOT GUESS THEM. It links only what a CALL SITE declares via
+        # `inputs=`. Inferring "the previous agent in the roster" here would recreate exactly the
+        # positional reasoning Provy has twice had to delete: once when every agent in a session was
+        # charged with one agent's incident, an orchestrator showing an 87% incident rate having
+        # caused none of them. A step that declares nothing links nothing.
+        links = None
+        declared = fields.get("inputs")
+        if declared:
+            ids = [i for i in declared if isinstance(i, str) and len(i) == 16]
+            if ids and self._session_ctx is not None:
+                _trace_id = otel_trace.get_current_span(self._session_ctx).get_span_context().trace_id
+                if _trace_id:
+                    links = [
+                        Link(SpanContext(trace_id=_trace_id, span_id=int(i, 16),
+                                         is_remote=False, trace_flags=TraceFlags(0x01)))
+                        for i in ids
+                    ]
+
         span = self._tracer.start_span(
             f"{step_type}:{fields.get('tool_name', agent)}",
             context=parent_ctx,
             attributes=attrs,
+            links=links,
         )
         # Error steps must carry OTel ERROR status. The Argus ingest gateway derives the trace
         # outcome (and the error message) from span STATUS, not from attributes — so without this
@@ -751,7 +790,20 @@ class TraceLogger:
         span.end()
 
         sc = span.get_span_context()
-        return format(sc.span_id, "016x") if sc else ""
+        emitted = format(sc.span_id, "016x") if sc else ""
+        # By BASE name, matching the parent lookup above: research_GILD's output is research's.
+        if emitted:
+            self._last_span_by_agent[self._base(agent)] = emitted
+        return emitted
+
+    def last_span_for(self, agent: str) -> Optional[str]:
+        """The newest span id this agent emitted, for a downstream step to declare as its input.
+
+        ⛔ IT IS THE CALLER'S JOB TO KNOW IT ACTUALLY READ THAT OUTPUT. This returns what an agent
+        last emitted; it does not assert anybody consumed it. Passing it to `inputs=` is a claim the
+        call site is making, which is the only place the claim can honestly be made.
+        """
+        return self._last_span_by_agent.get(self._base(agent)) or self._last_span_by_agent.get(agent)
 
     def _count_tool_calls(self) -> int:
         return self._sequence
