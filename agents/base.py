@@ -69,6 +69,7 @@ def run_tool_loop(
     wall_clock_timeout_s: int | None = None,
     max_tokens: int = 2048,
     max_tokens_ceiling: int = 16000,
+    inputs: list | None = None,
 ) -> str:
     """
     Drive a Claude tool-use loop until end_turn or max_turns.
@@ -119,6 +120,8 @@ def run_tool_loop(
                 usage=response.usage,
                 model=served,
                 latency_ms=api_ms,
+                # argus#1444: the span ids whose OUTPUT this agent's prompt was built from, declared by the caller (the only place that knows).
+                inputs=inputs,
             )
             return text
 

@@ -195,6 +195,8 @@ def _investigate_ticker(
         dispatch=_investigate_dispatch,
         tracer=tracer,
         agent_name=f"research_{ticker}",
+        # argus#1444: the prompt is built from the market report and, on the premarket path, the scanner's shortlist.
+        inputs=[s for s in (tracer.last_span_for("market"), tracer.last_span_for("scanner")) if s] or None,
         max_turns=10,
         wall_clock_timeout_s=_TICKER_TIMEOUT_S,
     )

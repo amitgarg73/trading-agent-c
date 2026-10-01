@@ -171,6 +171,8 @@ def _llm_select(client: anthropic.Anthropic, tracer: TraceLogger, ranked: list[d
     tracer.log_agent_message(
         "scanner", text, "completed",
         usage=resp.usage, model=served, latency_ms=latency,
+        # argus#1444: the selection prompt is built from the market report.
+        inputs=[s for s in (tracer.last_span_for("market"),) if s] or None,
     )
     parsed = parse_json_response(text)
     return {
