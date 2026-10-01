@@ -13,6 +13,8 @@ risk shape from those trades on demand. Provy receives the per-ticker P&L on its
 """
 from __future__ import annotations
 
+import re
+
 
 
 def _max_positions() -> int:
@@ -165,6 +167,17 @@ def backfill_server_judge() -> None:
 _NO_TRADE_EXITS = {"unfilled", "test_cleanup"}
 
 
+def _work_date(trade: dict) -> str | None:
+    """The day the position was worked, YYYY-MM-DD (argus#1439). The entry time says when the work ran; the
+    close time is the fallback. None when neither parses: absent is better than a guessed date, which would
+    address a wrong row with confidence (provy-sdk CONTRACT.md)."""
+    for key in ("entry_time", "close_time"):
+        v = trade.get(key)
+        if isinstance(v, str) and re.match(r"^\d{4}-\d{2}-\d{2}", v):
+            return v[:10]
+    return None
+
+
 def push_trade_outcomes(trades: list[dict], session_id: str | None = None) -> int:
     """Push each closed trade's realized P&L to the Argus Outcome Ledger, keyed on ticker.
 
@@ -181,6 +194,11 @@ def push_trade_outcomes(trades: list[dict], session_id: str | None = None) -> in
     session_id pins the outcome to the prediction made in that session. Without it Argus
     falls back to the most recent unanswered row for the ticker, which on a fleet that sees
     the same ticker on many days can settle the wrong day's prediction.
+
+    business_date (argus#1439) is the precise handle: the day the work RAN. Every outcome now
+    sends it. Without it the server may only settle a prediction from the last day, so an
+    outcome that arrives late is held instead of landing on the wrong day, which is what put
+    37 of 179 settled outcomes on a day the end-of-day totals contradict (24 Jun to 27 Jul).
     """
     from trace.logger import _ingest_post
 
@@ -200,6 +218,9 @@ def push_trade_outcomes(trades: list[dict], session_id: str | None = None) -> in
             "source":      "confirmed",
             "occurred_at": t.get("close_time"),
         }
+        work_day = _work_date(t)
+        if work_day:
+            payload["business_date"] = work_day
         if session_id:
             payload["session_id"] = session_id
         try:
