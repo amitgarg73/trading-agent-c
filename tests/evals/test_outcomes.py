@@ -93,6 +93,21 @@ class TestPushTradeOutcomes:
         assert cat["source"] == "confirmed"
         assert cat["occurred_at"] == "2026-06-24T20:00:00"
 
+    def test_sends_the_day_the_work_ran_as_business_date(self):
+        """argus#1439: without it Argus settles the newest unanswered row, however old."""
+        n, posted = self._run([
+            {"ticker": "CAT", "realized_pnl": 214.0, "exit_reason": "NATIVE_TRAIL",
+             "entry_time": "2026-07-22T14:32:11+00:00", "close_time": "2026-07-22T20:05:00+00:00"},
+            {"ticker": "GE", "realized_pnl": -50.0, "exit_reason": "eod_forced", "close_time": "2026-07-22T20:05:00"},
+        ])
+        by = {pl["entity_id"]: pl for _, pl in posted}
+        assert by["CAT"]["business_date"] == "2026-07-22"     # entry day wins
+        assert by["GE"]["business_date"] == "2026-07-22"      # no entry time: the close day
+
+    def test_sends_no_business_date_rather_than_a_guess(self):
+        n, posted = self._run([{"ticker": "X", "realized_pnl": 1.0, "exit_reason": "eod_forced", "close_time": "t"}])
+        assert "business_date" not in posted[0][1]
+
     def test_skips_unfilled_orders(self):
         n, posted = self._run([
             {"ticker": "X", "realized_pnl": 0.0, "exit_reason": "unfilled", "close_time": None},
