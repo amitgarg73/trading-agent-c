@@ -191,3 +191,32 @@ class TestThroughTheRealExporter:
         # and the tool call is untouched
         tool = [s for s in spans if self._attr(s, "argus.step_type") == "tool_call"][-1]
         assert json.loads(self._attr(tool, "argus.tool_output")) == {"message": "downloaded 90 frames"}
+
+
+# ── NaN and Infinity (V9 D4) ──────────────────────────────────────────────────
+
+def _strict(text):
+    return json.loads(text, parse_constant=lambda c: pytest.fail(f"non-JSON constant {c}"))
+
+
+class TestNonFiniteNumbers:
+    """json.dumps writes NaN and Infinity, which are not JSON: Provy can only keep that as an unreadable string. They are recorded as null."""
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_value_becomes_null_and_the_output_parses(self, bad):
+        assert _strict(_bounded_input({"premarket_change_pct": bad, "ok": 1.5})) == {"premarket_change_pct": None, "ok": 1.5}
+
+    def test_nested_in_a_list_of_dicts_and_over_the_bound(self):
+        big = {"shortlist": [{"ticker": f"T{i}", "x": float("nan"), "note": "n" * 100} for i in range(60)]}
+        out = _bounded_input(big)
+        assert len(out) <= GIVEN_INPUT_MAX_CHARS
+        parsed = _strict(out)
+        assert parsed["shortlist"][0]["x"] is None and parsed["not_recorded"]["shortlist"] > 0
+
+    def test_the_truncated_text_fallback_is_clean_too(self):
+        _strict(_bounded_input({"blob": "z" * 9_000, "x": float("inf")}))
+
+    def test_on_the_wire(self, tracer, mock_argus_exporter):
+        tracer.log_agent_message("scanner", "picked", "completed", tool_input={"shortlist": [{"premarket_change_pct": float("nan")}]})
+        raw = _attrs(_message_spans(mock_argus_exporter)[-1])["argus.tool_input"]
+        assert _strict(raw) == {"shortlist": [{"premarket_change_pct": None}]}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import os
 import threading
@@ -190,7 +191,6 @@ def _ingest_get(path: str, params: dict) -> dict:
         return {}
 
 
-# 1-5 uppercase letters, matching TICKER_SUFFIX in lib/agent-identity.ts (#668).
 # ⛔ THE BOUND ON A MESSAGE OR DECISION STEP'S RECORDED INPUT (argus#1478). Provy's judge shows at most this much of one step's given inputs
 # (web/lib/judge-context.ts MAX_GIVEN_ITEM_CHARS, kept equal on purpose: a larger bound here would only be cut by Provy at a place that
 # is not ours to choose). The old clip was a bare `[:4000]` on the JSON string, which cuts mid-token: the result is not JSON, Provy can only
@@ -198,8 +198,23 @@ def _ingest_get(path: str, params: dict) -> dict:
 GIVEN_INPUT_MAX_CHARS = 2_000
 
 
+def _finite(value: Any) -> Any:
+    """Copy of `value` with every NaN and Infinity replaced by None (JSON null).
+
+    json.dumps writes the bare words NaN and Infinity, which are not JSON; Provy can only keep such a string unparsed. A non-finite number
+    is "no usable number", and null says exactly that. Tuples become lists, as json does.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
+
+
 def _dumps(value: Any) -> str:
-    return json.dumps(value, default=str)
+    return json.dumps(_finite(value), default=str, allow_nan=False)
 
 
 def _bounded_input(value: Any, limit: int = GIVEN_INPUT_MAX_CHARS) -> str:
@@ -243,6 +258,7 @@ def _bounded_input(value: Any, limit: int = GIVEN_INPUT_MAX_CHARS) -> str:
     return wrapped
 
 
+# 1-5 uppercase letters, matching TICKER_SUFFIX in lib/agent-identity.ts (#668).
 _VARIANT_SUFFIX = re.compile(r"^[A-Z]{1,5}$")
 
 
