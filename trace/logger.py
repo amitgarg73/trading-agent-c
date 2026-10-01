@@ -191,6 +191,58 @@ def _ingest_get(path: str, params: dict) -> dict:
 
 
 # 1-5 uppercase letters, matching TICKER_SUFFIX in lib/agent-identity.ts (#668).
+# ⛔ THE BOUND ON A MESSAGE OR DECISION STEP'S RECORDED INPUT (argus#1478). Provy's judge shows at most this much of one step's given inputs
+# (web/lib/judge-context.ts MAX_GIVEN_ITEM_CHARS, kept equal on purpose: a larger bound here would only be cut by Provy at a place that
+# is not ours to choose). The old clip was a bare `[:4000]` on the JSON string, which cuts mid-token: the result is not JSON, Provy can only
+# keep it as an unreadable string, and a shortlist's tail vanished without a word.
+GIVEN_INPUT_MAX_CHARS = 2_000
+
+
+def _dumps(value: Any) -> str:
+    return json.dumps(value, default=str)
+
+
+def _bounded_input(value: Any, limit: int = GIVEN_INPUT_MAX_CHARS) -> str:
+    """JSON for a step's recorded input, never longer than `limit` and always parseable.
+
+    Fits as is: returned untouched. Too long and it is a dict (or a list, wrapped as {"items": [...]}): the longest list is shortened from
+    the TAIL, because a list handed to a step is ranked best first and the head is what it mostly used, and `not_recorded` says how many
+    items of which key were left off, so a reader never mistakes a short list for a complete one. Nothing to shorten: a valid object
+    {"truncated": true, "text": <the start of the JSON>}. This is for steps that RECORD what they were given. A tool call keeps its own
+    4,000-character clip, which is unchanged.
+    """
+    out = _dumps(value)
+    if len(out) <= limit:
+        return out
+    if isinstance(value, list):
+        value = {"items": value}
+    if isinstance(value, dict):
+        work = dict(value)
+        dropped: dict[str, int] = {}
+        keys = sorted((k for k, v in work.items() if isinstance(v, list) and v), key=lambda k: len(_dumps(work[k])), reverse=True)
+        for k in keys:
+            items = work[k]
+            lo, hi = 0, len(items)                       # the most items of this list that still fit
+            while lo < hi:
+                mid = (lo + hi + 1) // 2
+                cand = {**work, k: items[:mid], "not_recorded": {**dropped, k: len(items) - mid}}
+                if len(_dumps(cand)) <= limit:
+                    lo = mid
+                else:
+                    hi = mid - 1
+            work[k] = items[:lo]
+            dropped[k] = len(items) - lo
+            cand = {**work, "not_recorded": dropped}
+            if len(_dumps(cand)) <= limit:
+                return _dumps(cand)
+    text = out
+    wrapped = _dumps({"truncated": True, "text": text})
+    while len(wrapped) > limit and text:
+        text = text[: max(0, len(text) - (len(wrapped) - limit) - 1)]
+        wrapped = _dumps({"truncated": True, "text": text})
+    return wrapped
+
+
 _VARIANT_SUFFIX = re.compile(r"^[A-Z]{1,5}$")
 
 
@@ -377,8 +429,16 @@ class TraceLogger:
         claim: Optional[dict] = None,
         usage: Any = None,
         inputs: Optional[list] = None,
+        tool_input: Optional[dict] = None,
     ) -> str:
         """Log an agent's message.
+
+        `tool_input` is the values this step was GIVEN and did not fetch with a tool call: a shortlist an earlier stage computed in code,
+        a setting it read. Provy's quality judge shows them as grounding for a value this step repeats (argus#1478).
+
+        ⛔ WHAT THE STEP WAS GIVEN, NEVER WHAT IT PRODUCED. The judge reads this field and nothing else of a message step as evidence. A
+        result recorded here would ground itself, so the step's own numbers go in `payload` and its claim in `claim`. Bounded to
+        GIVEN_INPUT_MAX_CHARS: a longer list loses trailing items and records how many (`not_recorded`) instead of being cut mid-string.
 
         `inputs` names the span ids whose OUTPUT this step consumed — use `last_span_for(agent)` to
         get one. It is a DATA dependency, not the call tree: risk does not run inside research, it
@@ -434,6 +494,7 @@ class TraceLogger:
             "model":              model,
             "payload":            payload,
             "claim":              claim,
+            "tool_input":         tool_input,
         })
 
     def log_decision(
@@ -444,14 +505,16 @@ class TraceLogger:
         latency_ms: int = 0,
         model: Optional[str] = None,
         inputs: Optional[list] = None,
+        tool_input: Optional[dict] = None,
     ) -> str:
-        """`inputs`: span ids whose output this decision consumed. See log_agent_message."""
+        """`inputs`: span ids whose output this decision consumed. `tool_input`: the values it was given. See log_agent_message."""
         return self._write({
             "inputs":      inputs,
             "step_type":   "decision",
             "agent":       agent,
             "outcome":     outcome,
             "tool_output": detail,
+            "tool_input":  tool_input,
             "latency_ms":  latency_ms,
             "model":       model,
         })
@@ -735,7 +798,9 @@ class TraceLogger:
         if fields.get("agent_reasoning") is not None:
             attrs["argus.agent_reasoning"] = str(fields["agent_reasoning"])[:4000]
         if fields.get("tool_input") is not None:
-            attrs["argus.tool_input"]  = json.dumps(fields["tool_input"],  default=str)[:4000]
+            # A step that RECORDS what it was given gets a bound that keeps the JSON readable (argus#1478); a tool call keeps its clip.
+            attrs["argus.tool_input"]  = (_bounded_input(fields["tool_input"]) if step_type in ("agent_message", "decision")
+                                          else json.dumps(fields["tool_input"], default=str)[:4000])
         if fields.get("tool_output") is not None:
             attrs["argus.tool_output"] = json.dumps(
                 fields["tool_output"] if isinstance(fields["tool_output"], dict) else {"value": fields["tool_output"]},
