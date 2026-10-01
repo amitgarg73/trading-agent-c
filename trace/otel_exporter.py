@@ -42,7 +42,17 @@ class ArgusExporter:
                 ev_attrs = [{"key": k, "value": {"stringValue": str(v)}} for k, v in (ev.attributes or {}).items()]
                 events.append({"name": ev.name, "attributes": ev_attrs})
 
-            otlp_spans.append({
+            # argus#1444: a step that declares which spans' output it read does so as OTel Links (trace/logger.py). This exporter builds
+            # the OTLP JSON by hand, so anything it does not copy never leaves the machine: until now `links` was never copied, and 0 of 76
+            # production traces on 1 Oct 2026 carried an input edge although the logger declared them. Absent stays absent, because
+            # Provy reads a missing `links` as "this step said nothing" and an empty list as a claim that it read nothing.
+            links = []
+            for ln in (getattr(span, "links", None) or ()):
+                lc = getattr(ln, "context", None)
+                if lc is not None and getattr(lc, "span_id", 0):
+                    links.append({"traceId": format(lc.trace_id, "032x"), "spanId": format(lc.span_id, "016x")})
+
+            otlp_span = {
                 "spanId":            format(ctx.span_id,  "016x") if ctx else None,
                 "parentSpanId":      format(parent_ctx.span_id, "016x") if parent_ctx else None,
                 "traceId":           format(ctx.trace_id, "032x") if ctx else None,
@@ -52,7 +62,10 @@ class ArgusExporter:
                 "status":            {"code": span.status.status_code.value if span.status else 0},
                 "attributes":        attrs,
                 "events":            events,
-            })
+            }
+            if links:
+                otlp_span["links"] = links
+            otlp_spans.append(otlp_span)
 
         payload = json.dumps({"resourceSpans": [{"scopeSpans": [{"spans": otlp_spans}]}]}).encode()
         try:
