@@ -142,6 +142,8 @@ def _run_synthesis_call(
         model=served,
         latency_ms=api_ms,
         payload=claim or None,
+        # argus#1444: the synthesis prompt is the market report, the research proposals and the risk verdicts.
+        inputs=[s for s in (tracer.last_span_for("market"), tracer.last_span_for("research"), tracer.last_span_for("risk")) if s] or None,
     )
     return result
 

@@ -171,6 +171,18 @@ def _llm_select(client: anthropic.Anthropic, tracer: TraceLogger, ranked: list[d
     tracer.log_agent_message(
         "scanner", text, "completed",
         usage=resp.usage, model=served, latency_ms=latency,
+        # argus#1444: the selection prompt is built from the market report.
+        inputs=[s for s in (tracer.last_span_for("market"),) if s] or None,
+        # argus#1432: the numbers this step was GIVEN, computed in code and shown to the model only inside the prompt. They were never recorded,
+        # so Provy could neither check them nor tell a score the model saw from one it made up. Recorded as structured values, not prose.
+        payload={
+            "regime": regime, "max_n": max_n,
+            "shortlist": [
+                {"ticker": c.get("ticker"), "technical_score": c.get("technical_score", 0),
+                 "premarket_change_pct": c.get("premarket_change_pct", 0.0), "sector": c.get("sector")}
+                for c in shortlist
+            ],
+        },
     )
     parsed = parse_json_response(text)
     return {

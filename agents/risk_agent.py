@@ -115,6 +115,8 @@ def run_risk_agent(
         dispatch=_dispatch,
         tracer=tracer,
         agent_name="risk",
+        # argus#1444: the prompt is the research proposals. The newest research span is the one declared (the tracer keeps one per agent).
+        inputs=[s for s in (tracer.last_span_for("research"),) if s] or None,
         max_turns=6,
     )
     return parse_json_response(text)
