@@ -124,7 +124,16 @@ def run_market_agent(tracer: TraceLogger, params: StrategyParams) -> dict:
     futures_data = get_futures()
     triggered, reason = check_circuit_breakers(vix_data, futures_data)
     if triggered:
-        tracer.log_decision("market", "skip", detail={"circuit_breaker": reason})
+        # argus#1519: with PROVY_CONTEXT_MANIFEST on, say which two reads this code decided on. Best effort; nothing here can change the skip.
+        extra: dict = {}
+        try:
+            from trace.context_manifest import circuit_breaker_context
+            ctx = circuit_breaker_context(vix_data, futures_data)
+            if isinstance(ctx, dict):
+                extra["context"] = ctx
+        except Exception:
+            pass
+        tracer.log_decision("market", "skip", detail={"circuit_breaker": reason}, **extra)
         return _cb_skip(reason)
 
     tracer.start_agent_span("market")

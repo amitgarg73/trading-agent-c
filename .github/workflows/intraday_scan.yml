@@ -41,6 +41,9 @@ jobs:
           ARGUS_URL: ${{ secrets.ARGUS_URL }}
           ARGUS_API_KEY: ${{ secrets.ARGUS_API_KEY_C }}
           PROVY_EMIT: "1"
+          # argus#1519: context manifest on decision steps. OFF unless the repository variable PROVY_CONTEXT_MANIFEST is set to 1;
+          # unset or 0 turns it off at the next run. See docs/design/TRADING-AGENT-ROLLOUT.md in the argus repo.
+          PROVY_CONTEXT_MANIFEST: ${{ vars.PROVY_CONTEXT_MANIFEST }}
           NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}

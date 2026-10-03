@@ -170,6 +170,14 @@ def _investigate_ticker(
             + "\n"
         )
 
+    # argus#1519: the news was fetched before this loop and placed in the prompt above, so the manifest names it and says it was used.
+    # A no-op unless PROVY_CONTEXT_MANIFEST is on; best effort and never able to touch the prompt.
+    if news_context:
+        try:
+            tracer.note_context(f"research_{ticker}", "get_news", news_context, used=True)
+        except Exception:
+            pass
+
     open_ctx = market_report.get("open_positions_context", "")
     msg = (
         f"Investigate {ticker} for an intraday setup.\n"
