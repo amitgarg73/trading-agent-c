@@ -59,6 +59,19 @@ def _emit_enabled() -> bool:
         return True
     return False
 
+
+def _context_on() -> bool:
+    """argus#1519: whether decision steps may carry a context manifest. Default OFF; PROVY_CONTEXT_MANIFEST, truthy, turns it on.
+
+    Read on every call, so one repository variable flips it between runs and unsetting it turns it off at the next run, with no deploy.
+    Deliberately written out here and not imported from trace/context_manifest.py: with the switch off nothing of the new module runs.
+    """
+    try:
+        return os.environ.get("PROVY_CONTEXT_MANIFEST", "").strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
 # Token cost per million tokens (Anthropic published pricing).
 # ⛔ THESE ARE LIST PRICES, NOT GUESSES. Haiku 4.5 was priced here at 0.80/4.00 for months, which
 # understated every Haiku agent by 25%; the published rate is 1.00/5.00. Cache read is 0.1x input and
@@ -332,6 +345,9 @@ class TraceLogger:
         # Newest span id per agent BASE, so a downstream call site can declare what it read
         # (argus#1009). Written in _write; read via last_span_for().
         self._last_span_by_agent: dict[str, str] = {}
+        # argus#1519: what each agent has read since its last decision step. Built lazily, and only when the switch is on.
+        self._cm_rec: Any = None
+        self._cm_lock = threading.Lock()
 
         # Open session via ingest API — fire-and-forget; traces can flow immediately
         self._open_thread = threading.Thread(target=self._open_session, daemon=True)
@@ -419,6 +435,8 @@ class TraceLogger:
         of argus#679 — before that the OTLP gateway derived outcome from span status alone and
         stored every non-error step as "success". Optional, and omitting it is unchanged behaviour.
         """
+        if _context_on():
+            self._cm_record_tool(agent, tool_name, tool_output)
         return self._write({
             "step_type":   "tool_call",
             "agent":       agent,
@@ -446,8 +464,13 @@ class TraceLogger:
         usage: Any = None,
         inputs: Optional[list] = None,
         tool_input: Optional[dict] = None,
+        context: Optional[dict] = None,
     ) -> str:
         """Log an agent's message.
+
+        `context` is a ready-made context manifest (argus#1519). Callers rarely pass one: with PROVY_CONTEXT_MANIFEST on, a step that
+        ran a model gets its manifest built here from what this logger already saw (the agent's reads, the `inputs` it declared, the
+        instruction constant). Ignored, and never built, with the switch off.
 
         `tool_input` is the values this step was GIVEN and did not fetch with a tool call: a shortlist an earlier stage computed in code,
         a setting it read. Provy's quality judge shows them as grounding for a value this step repeats (argus#1478).
@@ -495,7 +518,10 @@ class TraceLogger:
         if usage is not None:
             tokens_input, tokens_output, cache_read, cache_write = _usage_fields(usage)
 
+        if _context_on():
+            context = self._cm_message_manifest(agent, inputs, bool(model) or usage is not None, context)
         return self._write({
+            "context":            context,
             "inputs":             inputs,
             "step_type":          "agent_message",
             "agent":              agent,
@@ -522,9 +548,12 @@ class TraceLogger:
         model: Optional[str] = None,
         inputs: Optional[list] = None,
         tool_input: Optional[dict] = None,
+        context: Optional[dict] = None,
     ) -> str:
-        """`inputs`: span ids whose output this decision consumed. `tool_input`: the values it was given. See log_agent_message."""
+        """`inputs`: span ids whose output this decision consumed. `tool_input`: the values it was given. See log_agent_message.
+        `context`: a ready-made manifest (argus#1519), written only with PROVY_CONTEXT_MANIFEST on; a decision never builds its own."""
         return self._write({
+            "context":     context,
             "inputs":      inputs,
             "step_type":   "decision",
             "agent":       agent,
@@ -830,6 +859,15 @@ class TraceLogger:
         # reading of the same key.
         if fields.get("claim") is not None:
             attrs["argus.claim"] = json.dumps(fields["claim"], default=str)
+        # argus#1519: the context manifest, as one JSON attribute. The OTLP gateway reads `provy.context` and, as the legacy spelling,
+        # `argus.context` (web/lib/otel-normalize.ts), validates and bounds it, and stores it in the span's `context` column. This is the
+        # door this fleet really uses, so it is the one key that lands; a `provy_context` key in the body would not reach the column.
+        # Written only with the switch on, and a manifest that cannot be serialised is left off: the step is written either way.
+        if fields.get("context") is not None and _context_on():
+            try:
+                attrs["argus.context"] = json.dumps(fields["context"], separators=(",", ":"), default=str, allow_nan=False)
+            except Exception:
+                pass
 
         # ⛔ INPUT EDGES ARE LINKS, NOT A SECOND PARENT (argus#1009). The parent above is the CALL
         # TREE and is deliberately this agent's own base span (#668) — which is why, measured across
@@ -875,7 +913,53 @@ class TraceLogger:
         # By BASE name, matching the parent lookup above: research_GILD's output is research's.
         if emitted:
             self._last_span_by_agent[self._base(agent)] = emitted
+            if _context_on():
+                self._cm_remember_span(emitted, agent)
         return emitted
+
+    # ── argus#1519: context manifest plumbing. Every method below catches everything: a manifest must never fail a step. ──────────
+
+    def _cm_recorder(self) -> Any:
+        with self._cm_lock:
+            if self._cm_rec is None:
+                from trace import context_manifest as _cm
+                self._cm_rec = _cm.Recorder()
+            return self._cm_rec
+
+    def _cm_record_tool(self, agent: str, tool_name: str, tool_output: Any) -> None:
+        try:
+            self._cm_recorder().record_tool(agent, tool_name, tool_output)
+        except Exception:
+            pass
+
+    def _cm_remember_span(self, span_id: str, agent: str) -> None:
+        try:
+            self._cm_recorder().remember_span(span_id, agent)
+        except Exception:
+            pass
+
+    def note_context(self, agent: str, source: str, data: Any, used: Optional[bool] = None, kind: Optional[str] = None) -> None:
+        """Tell the manifest about something this agent was GIVEN without a tool call (news the caller pre-fetched). No-op with the
+        switch off. `source` is the read's own name (`get_news`); `used=True` only when the code put it in the prompt."""
+        if not _context_on():
+            return
+        try:
+            self._cm_recorder().note(agent, source, data, used=used, kind=kind)
+        except Exception:
+            pass
+
+    def _cm_message_manifest(self, agent: str, inputs: Optional[list], has_model: bool, given: Optional[dict]) -> Optional[dict]:
+        """The manifest for a message step, or whatever the caller passed. Always empties this agent's pending reads, so reads logged
+        before a step that ran no model (the nightly scanner's rationale) never label the next one."""
+        try:
+            rec = self._cm_recorder()
+            entries = rec.take(agent)
+            if given is not None or not has_model:
+                return given
+            from trace import context_manifest as _cm
+            return _cm.build(agent, entries, rec.upstream(inputs), has_model=True)
+        except Exception:
+            return given
 
     def last_span_for(self, agent: str) -> Optional[str]:
         """The newest span id this agent emitted, for a downstream step to declare as its input.
