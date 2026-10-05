@@ -436,7 +436,7 @@ class TraceLogger:
         stored every non-error step as "success". Optional, and omitting it is unchanged behaviour.
         """
         if _context_on():
-            self._cm_record_tool(agent, tool_name, tool_output)
+            self._cm_record_tool(agent, tool_name, tool_output, tool_input)
         return self._write({
             "step_type":   "tool_call",
             "agent":       agent,
@@ -926,9 +926,11 @@ class TraceLogger:
                 self._cm_rec = _cm.Recorder()
             return self._cm_rec
 
-    def _cm_record_tool(self, agent: str, tool_name: str, tool_output: Any) -> None:
+    def _cm_record_tool(self, agent: str, tool_name: str, tool_output: Any, tool_input: Any = None) -> None:
         try:
-            self._cm_recorder().record_tool(agent, tool_name, tool_output)
+            ticker = tool_input.get("ticker") if isinstance(tool_input, dict) else None
+            key = f"{tool_name}:{ticker}" if isinstance(ticker, str) and ticker else None   # where a tool parked what it knew (stamp_source)
+            self._cm_recorder().record_tool(agent, tool_name, tool_output, key=key)
         except Exception:
             pass
 
@@ -938,13 +940,14 @@ class TraceLogger:
         except Exception:
             pass
 
-    def note_context(self, agent: str, source: str, data: Any, used: Optional[bool] = None, kind: Optional[str] = None) -> None:
+    def note_context(self, agent: str, source: str, data: Any, used: Optional[bool] = None, kind: Optional[str] = None,
+                     meta: Optional[dict] = None) -> None:
         """Tell the manifest about something this agent was GIVEN without a tool call (news the caller pre-fetched). No-op with the
         switch off. `source` is the read's own name (`get_news`); `used=True` only when the code put it in the prompt."""
         if not _context_on():
             return
         try:
-            self._cm_recorder().note(agent, source, data, used=used, kind=kind)
+            self._cm_recorder().note(agent, source, data, used=used, kind=kind, meta=meta)
         except Exception:
             pass
 

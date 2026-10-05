@@ -311,6 +311,15 @@ def get_news(ticker: str) -> dict[str, Any]:
                             blackout = True
                             reason   = f"earnings news: {headline[:60]}"
 
+        # argus#1519: what this read knew and the return value drops. Same values, same return; a no-op with the switch off.
+        try:
+            from trace.context_manifest import stamp_source
+            stamp_source(f"get_news:{ticker}",
+                         as_of=max((c for c in (getattr(i, "created_at", None) for i in items)
+                                    if c is not None and getattr(c, "tzinfo", None) is not None), default=None),
+                         returned=len(items), cut=len(headlines) > 3)
+        except Exception:
+            pass
         return {"blackout": blackout, "reason": reason, "headlines": headlines[:3]}
     except Exception as e:
         return {"error": str(e)}
@@ -374,6 +383,11 @@ def get_intraday_signals(ticker: str) -> dict[str, Any]:
         total_vol = sum(b.volume for b in stock_bars)
         vwap = round(total_pv / total_vol, 2) if total_vol > 0 else 0.0
 
+        try:   # argus#1519: the newest bar's own timestamp is when this quote was current. No-op with the switch off.
+            from trace.context_manifest import stamp_source
+            stamp_source(f"get_intraday_signals:{ticker}", as_of=getattr(stock_bars[-1], "timestamp", None))
+        except Exception:
+            pass
         curr_price       = float(stock_bars[-1].close)
         open_price       = float(stock_bars[0].open)
         above_vwap       = curr_price > vwap

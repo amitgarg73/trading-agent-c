@@ -15,7 +15,13 @@ call: the manifest is built from values the step already holds, in memory, in mi
   - `used` is true only where the calling code put the item into the model's prompt by construction (an upstream step's output, the
     news it pre-fetched, the two reads a circuit breaker decided on). A tool result the model chose to ask for is left unmarked:
     whether it shaped the answer is a judgement this code cannot make.
-  - `retrieval.returned` is sent only for the two reads that are lookups in a store (the day's scan results, the recent learnings),
+  - 6c (richer manifest): a few tools park what they alone know (the newest headline's own time, the newest 1-minute bar's own
+    timestamp, how many headlines the lookup returned, whether they cut the list) via `stamp_source`; the return value they hand the
+    model is unchanged. Today's scan rows are dated to their day because the query selects on it. A time is refused unless it carries
+    a zone, is after 2000 and is not in the future. `truncated` is sent only when a tool dropped rows. NOTE the platform ignores a
+    caller's `truncated` and sets its own when it cuts; ours is accepted and not stored.
+  - `retrieval.returned` is sent only for reads that are lookups in a store (the day's scan results and candidates, the recent
+    learnings, the news lookup),
     and never for a read that errored, so "returned nothing" and "could not read" stay different.
   - `instruction` is the SHA-256 of the agent's instruction text, taken from the constant the agent itself sends, in memory, and the
     text is never stored. The version is `auto-` plus the first 12 hex digits of that hash, so it changes exactly when the text does.
@@ -52,7 +58,10 @@ _READ_TOOL = re.compile(r"^(get|read|fetch)_[a-z0-9_]+$")
 # Learned state the agent keeps for itself, as opposed to a live read of the world.
 _MEMORY_TOOLS = frozenset({"read_strategy_params", "read_recent_learnings"})
 # Reads that are lookups in a store: the number of rows they returned is the step's retrieval count.
-_RETRIEVAL_TOOLS = frozenset({"get_scan_results", "read_recent_learnings"})
+_RETRIEVAL_TOOLS = frozenset({"get_scan_results", "get_candidates", "read_recent_learnings"})
+# Reads whose rows are selected by TODAY's date in the query itself (`.eq("date", today)`): every row returned is today's, so the day is
+# the rows' own date. Day grain, like the learnings. Never used for an empty or errored read.
+_TODAY_KEYED_TOOLS = frozenset({"get_scan_results", "get_candidates"})
 # Where each agent's instruction text lives. Looked up in modules the agent has already imported: no import, no file read.
 _INSTRUCTION_SOURCES = {
     "market":       ("agents.market_agent",   "_SYSTEM"),
@@ -64,6 +73,69 @@ _INSTRUCTION_SOURCES = {
 }
 _VARIANT_SUFFIX = re.compile(r"^[A-Z]{1,5}$")        # same rule as TraceLogger._base: research_GILD -> research
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+# ── Facts only the tool function itself holds ──────────────────────────────────────────────────────────────────────────────────────
+# A few tools see a fact they then drop from what they return (the newest headline's own time, a bar's own timestamp, how many rows a
+# cap cut). The tool's return value is what the model sees, so it must not change; the fact is parked here under a key (`tool:ticker`)
+# and taken exactly once by whoever records the step. Bounded; inert with the switch off; never raises.
+_STAMPS: dict = {}
+_STAMPS_LOCK = threading.Lock()
+STAMPS_CAP = 200
+_FLOOR = datetime(2000, 1, 1, tzinfo=timezone.utc)
+_SKEW_S = 300
+
+
+def iso_utc(value: Any) -> Optional[str]:
+    """A datetime or ISO 8601 string as `YYYY-MM-DDTHH:MM:SS.mmmZ`, or None. Naive values are refused (a zone is a fact, not a guess),
+    as are stamps before 2000 and more than five minutes in the future: the platform would drop those anyway."""
+    try:
+        if isinstance(value, str):
+            value = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if not isinstance(value, datetime) or value.tzinfo is None:
+            return None
+        value = value.astimezone(timezone.utc)
+        now = datetime.now(timezone.utc)
+        if value < _FLOOR or (value - now).total_seconds() > _SKEW_S:
+            return None
+        return value.strftime("%Y-%m-%dT%H:%M:%S.") + f"{value.microsecond // 1000:03d}Z"
+    except Exception:
+        return None
+
+
+def stamp_source(key: str, as_of: Any = None, returned: Optional[int] = None, cut: Optional[bool] = None) -> None:
+    """Park what a tool knows about its own read: `as_of` (the source's own time), `returned` (rows the lookup gave back, before any
+    cap), `cut` (True only when the tool dropped rows from what it handed on). Absent stays absent. No-op unless the switch is on."""
+    try:
+        if not enabled():
+            return
+        meta: dict = {}
+        stamped = iso_utc(as_of) if as_of is not None else None
+        if stamped:
+            meta["as_of"] = stamped
+        if isinstance(returned, int) and not isinstance(returned, bool) and returned >= 0:
+            meta["returned"] = returned
+        if cut is True:
+            meta["cut"] = True
+        if not meta:
+            return
+        with _STAMPS_LOCK:
+            if len(_STAMPS) >= STAMPS_CAP and key not in _STAMPS:
+                _STAMPS.pop(next(iter(_STAMPS)))
+            _STAMPS[key] = meta
+    except Exception:
+        pass
+
+
+def take_stamp(key: Optional[str]) -> Optional[dict]:
+    """The parked facts for `key`, once. None when there are none."""
+    try:
+        if not key:
+            return None
+        with _STAMPS_LOCK:
+            return _STAMPS.pop(key, None)
+    except Exception:
+        return None
 
 
 def enabled() -> bool:
@@ -142,12 +214,26 @@ def _newest_date(output: Any) -> Optional[str]:
         return None
 
 
-def tool_item(name: str, output: Any, used: Optional[bool] = None, kind: Optional[str] = None) -> dict:
+def _day_start(day: Any) -> Optional[str]:
+    """`YYYY-MM-DD` as that day's start in UTC, via iso_utc (so a day that has not begun yet is refused)."""
+    try:
+        if not isinstance(day, str) or not _DATE.match(day):
+            return None
+        return iso_utc(datetime.strptime(day[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc))
+    except Exception:
+        return None
+
+
+def tool_item(name: str, output: Any, used: Optional[bool] = None, kind: Optional[str] = None,
+              meta: Optional[dict] = None, seen_on: Optional[str] = None) -> dict:
     item: dict = {"kind": kind or ("memory" if name in _MEMORY_TOOLS else "tool_result"), "source": f"tool:{name}"}
-    if name == "read_recent_learnings":
+    as_of = (meta or {}).get("as_of")
+    if not as_of and name == "read_recent_learnings":
         as_of = _newest_date(output)
-        if as_of:
-            item["as_of"] = as_of
+    if not as_of and name in _TODAY_KEYED_TOOLS and isinstance(output, list) and output and not _is_error(output):
+        as_of = _day_start(seen_on)
+    if as_of:
+        item["as_of"] = as_of
     if used is not None:
         item["used"] = used
     h = content_hash(output)
@@ -159,7 +245,11 @@ def tool_item(name: str, output: Any, used: Optional[bool] = None, kind: Optiona
 def _retrieval_count(entries: list) -> Optional[int]:
     total, seen = 0, False
     for e in entries:
-        if e["name"] in _RETRIEVAL_TOOLS and isinstance(e["output"], list) and not _is_error(e["output"]):
+        returned = (e.get("meta") or {}).get("returned")
+        if isinstance(returned, int) and not _is_error(e["output"]):
+            total += returned          # the tool counted its own lookup before any cap of its own
+            seen = True
+        elif e["name"] in _RETRIEVAL_TOOLS and isinstance(e["output"], list) and not _is_error(e["output"]):
             total += len(e["output"])
             seen = True
     return total if seen else None
@@ -190,7 +280,8 @@ def build(agent: str, entries: list, inputs: list, has_model: bool) -> Optional[
                 item["id"] = up["span_id"]
             items.append(item)
         for e in entries or []:
-            items.append(tool_item(e["name"], e["output"], used=e.get("used"), kind=e.get("kind")))
+            items.append(tool_item(e["name"], e["output"], used=e.get("used"), kind=e.get("kind"),
+                                   meta=e.get("meta"), seen_on=e.get("seen_on")))
         out: dict = {"v": 1}
         if items:
             out["items"] = items
@@ -201,6 +292,9 @@ def build(agent: str, entries: list, inputs: list, has_model: bool) -> Optional[
             ins = instruction_for(agent)
             if ins:
                 out["instruction"] = ins
+        # Only a tool that dropped rows from what it handed the model says so; nothing is inferred.
+        if any((e.get("meta") or {}).get("cut") for e in entries or [] if not _is_error(e["output"])):
+            out["truncated"] = True
         if len(out) == 1:
             return None
         return _fit(out)
@@ -216,16 +310,19 @@ class Recorder:
         self._pending: dict = {}
         self._span_agent: dict = {}
 
-    def record_tool(self, agent: str, name: str, output: Any) -> None:
+    def record_tool(self, agent: str, name: str, output: Any, key: Optional[str] = None) -> None:
         if not _READ_TOOL.match(name or ""):
             return
-        self.note(agent, name, output)
+        self.note(agent, name, output, meta=take_stamp(key))
 
-    def note(self, agent: str, name: str, output: Any, used: Optional[bool] = None, kind: Optional[str] = None) -> None:
+    def note(self, agent: str, name: str, output: Any, used: Optional[bool] = None, kind: Optional[str] = None,
+             meta: Optional[dict] = None) -> None:
         with self._lock:
             bucket = self._pending.setdefault(agent, [])
             if len(bucket) < PENDING_CAP:
-                bucket.append({"name": name, "output": output, "used": used, "kind": kind})
+                # `seen_on` is the runner's date at the moment of the read: the same `date.today()` the tool's own query used.
+                bucket.append({"name": name, "output": output, "used": used, "kind": kind, "meta": meta,
+                               "seen_on": datetime.now().date().isoformat()})
 
     def take(self, agent: str) -> list:
         with self._lock:
