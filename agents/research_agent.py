@@ -174,7 +174,8 @@ def _investigate_ticker(
     # A no-op unless PROVY_CONTEXT_MANIFEST is on; best effort and never able to touch the prompt.
     if news_context:
         try:
-            tracer.note_context(f"research_{ticker}", "get_news", news_context, used=True)
+            from trace.context_manifest import take_stamp
+            tracer.note_context(f"research_{ticker}", "get_news", news_context, used=True, meta=take_stamp(f"get_news:{ticker}"))
         except Exception:
             pass
 
