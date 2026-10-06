@@ -108,6 +108,23 @@ def run_watchdog(dry_run: bool = False) -> list[str]:
     return closed
 
 
+def _eod_rerun_advice(day: str) -> str:
+    """What to do about a missing EOD (argus#1566). Plain words, exact commands, with the day in."""
+    return (
+        f"WHAT TO DO: first look at what a re-run would do, which places nothing: "
+        f"`python sessions/eod.py --date {day} --dry-run` (or run the Strategy C - EOD workflow "
+        f"with eod_date={day} and dry_run ticked). If that looks right, run it for real: "
+        f"`python sessions/eod.py --date {day}` (or the same workflow with dry_run unticked). "
+        f"A re-run is safe to repeat for the records (the day's performance row is overwritten, "
+        f"not duplicated), but it first cancels EVERY open broker order, including the stop and "
+        f"target protection on any holding, and then submits market closes. This alert only fires "
+        f"after 16:30 ET, so the market is closed: the closes queue for the next open and the "
+        f"holdings sit unprotected until then. Positions the closing step does not select (no "
+        f"stratc_ order in the last 2 days) are NOT closed; the EOD alert's broker reconciliation "
+        f"lists them."
+    )
+
+
 def check_expected_work(now_et: datetime | None = None) -> list[str]:
     """
     Return a list of plain-language problems with today's work. Empty means healthy.
@@ -184,7 +201,7 @@ def check_expected_work(now_et: datetime | None = None) -> list[str]:
         if not run_state.performance_recorded(today):
             problems.append(
                 f"No end-of-day performance recorded for {today}. Positions may not have been "
-                f"closed and the day was not scored."
+                f"closed and the day was not scored. {_eod_rerun_advice(today)}"
             )
 
     return problems

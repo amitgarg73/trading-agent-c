@@ -7,6 +7,8 @@ from typing import Optional
 
 import pytz
 
+from core.settle import settle_day
+
 ET = pytz.timezone("America/New_York")
 
 # Thresholds for tiers 1-5 are dollar/pct values.
@@ -58,7 +60,7 @@ def check_protection_status() -> ProtectionStatus:
     if active:
         return active
 
-    today = date.today()
+    today = settle_day()
 
     # Tier 2: today's hard stop
     daily_pnl = _get_daily_pnl(today)
@@ -246,7 +248,7 @@ def _get_daily_pnl(for_date: date) -> float:
 
 def _get_rolling_pnl(days: int) -> float:
     from core.db import get_client
-    start = (date.today() - timedelta(days=days - 1)).isoformat()
+    start = (settle_day() - timedelta(days=days - 1)).isoformat()
     result = (
         get_client()
         .table("c_daily_performance")

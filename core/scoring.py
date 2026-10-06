@@ -28,6 +28,7 @@ from typing import Any
 import yfinance as yf
 
 from core.db import get_client
+from core.settle import settle_day
 
 
 def _fetch_day_ohlc(tickers: list[str], trade_date: str) -> dict[str, dict]:
@@ -155,7 +156,7 @@ def score_trades(session_id: str, trade_date: str | None = None) -> dict[str, An
 
     Returns a summary dict for logging.
     """
-    today = trade_date or date.today().isoformat()
+    today = trade_date or settle_day().isoformat()
     db    = get_client()
 
     # Fetch all closed positions for this session

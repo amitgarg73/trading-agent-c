@@ -68,6 +68,15 @@ def _no_real_database(monkeypatch):
     monkeypatch.setattr("core.db._client", None, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _reset_settle_day():
+    """The settle day is process state (argus#1566); no test may leak an explicit date to the next."""
+    from core.settle import set_settle_day
+    set_settle_day(None)
+    yield
+    set_settle_day(None)
+
+
 @pytest.fixture
 def mock_supabase(monkeypatch):
     """

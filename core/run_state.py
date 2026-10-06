@@ -28,13 +28,14 @@ mattered was fire-and-forget.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 # Imported as a module, not as bound names: core.db.get_client is swapped at runtime by the test
 # fixtures and by reset_client(), and a name bound here at import time would keep pointing at the
 # original client.
 from core import db
+from core.settle import settle_day
 
 _TABLE = "c_sessions"
 
@@ -135,8 +136,9 @@ def _latest(
     on_day: Optional[str] = None,
     *,
     include_simulated: bool = True,
+    bounded: bool = False,
 ) -> Optional[dict]:
-    day = on_day or date.today().isoformat()
+    day = on_day or settle_day().isoformat()
     req = (
         db.get_client()
         .table(_TABLE)
@@ -146,6 +148,11 @@ def _latest(
         .order("started_at", desc=True)
         .limit(1)
     )
+    if bounded:
+        # Only the named day. The default (>= day, newest first) is right for "today" because
+        # nothing is newer, but for a PAST day it returns the newest run since then, i.e. a later
+        # day's session. A re-run of a past EOD (argus#1566) must settle that day's own session.
+        req = req.lt("started_at", (date.fromisoformat(day) + timedelta(days=1)).isoformat())
     if not include_simulated:
         req = req.eq("is_simulated", False)
     wf = _workflow_id()
@@ -155,9 +162,11 @@ def _latest(
     return rows[0] if rows else None
 
 
-def today_premarket_run_id(on_day: Optional[str] = None) -> Optional[str]:
-    """Today's premarket run id, or None. This is the day-level key everything else hangs off."""
-    run = _latest("premarket", on_day)
+def today_premarket_run_id(on_day: Optional[str] = None, bounded: bool = False) -> Optional[str]:
+    """Today's premarket run id, or None. This is the day-level key everything else hangs off.
+
+    `bounded=True` restricts the lookup to `on_day` itself (used when settling a past day)."""
+    run = _latest("premarket", on_day, bounded=bounded)
     return run["id"] if run else None
 
 
@@ -300,7 +309,7 @@ _PERFORMANCE_TABLE = "c_daily_performance"
 
 def performance_recorded(on_day: Optional[str] = None) -> bool:
     """True when EOD has written today's performance row. The honest end-of-day liveness signal."""
-    day = on_day or date.today().isoformat()
+    day = on_day or settle_day().isoformat()
     rows = db.execute_with_retry(
         db.get_client().table(_PERFORMANCE_TABLE).select("date").eq("date", day).limit(1),
         description="performance_recorded",

@@ -11,6 +11,10 @@ from core.alerts import send_alert
 from core.goals import evaluate_goals, record_goal_snapshots, update_goal_progress
 from core.params import load_params
 from core.protection import check_protection_status
+from core.settle import (
+    SettleDateError, explicit_settle_day, parse_settle_date, requested_date, set_settle_day,
+    settle_day, validate_settle_date,
+)
 from trace.logger import TraceLogger
 
 _ET = pytz.timezone("America/New_York")
@@ -36,7 +40,10 @@ class DailyPerformance:
 def get_today_session_id() -> Optional[str]:
     """Return today's premarket session_id from the agent's own run record, or None."""
     from core import run_state
-    return run_state.today_premarket_run_id()
+    day = explicit_settle_day()
+    if day is None:
+        return run_state.today_premarket_run_id()   # default path, unchanged
+    return run_state.today_premarket_run_id(day.isoformat(), bounded=True)
 
 
 def get_today_trades(session_id: str) -> list[dict]:
@@ -48,7 +55,7 @@ def get_today_trades(session_id: str) -> list[dict]:
         .select("ticker,realized_pnl,entry_time,close_time,exit_reason,position_size")
         .eq("session_id", session_id)
         .eq("status", "closed")
-        .eq("close_date", date.today().isoformat())
+        .eq("close_date", settle_day().isoformat())
         .execute()
         .data
     )
@@ -64,7 +71,7 @@ def get_open_positions(session_id: str) -> list[dict]:
         .select("id,ticker,shares,entry_price,entry_time,alpaca_order_id,trail_order_id")
         .eq("session_id", session_id)
         .eq("status", "open")
-        .eq("open_date", date.today().isoformat())
+        .eq("open_date", settle_day().isoformat())
         .execute()
         .data
     )
@@ -106,7 +113,7 @@ def force_close_positions(session_id: str) -> int:
     closed = close_all_strategy_positions()
     fills  = {r["ticker"]: r.get("fill_price") for r in closed}
 
-    today  = date.today().isoformat()
+    today  = settle_day().isoformat()
     now_   = datetime.utcnow().isoformat()
     client = get_client()
     for pos in positions:
@@ -161,7 +168,7 @@ def reconcile_positions(session_id: str) -> dict:
     if not positions:
         return {"entry_updated": 0, "exits_synced": 0, "errors": 0}
 
-    today         = date.today().isoformat()
+    today         = settle_day().isoformat()
     now_          = datetime.utcnow().isoformat()
     client        = get_client()
     entry_updated = exits_synced = errors = 0
@@ -252,7 +259,7 @@ def compute_performance(session_id: str, trades: list[dict]) -> DailyPerformance
     total = len(trades)
     return DailyPerformance(
         session_id    = session_id,
-        date          = date.today().isoformat(),
+        date          = settle_day().isoformat(),
         realized_pnl  = round(sum(pnl_values), 2),
         trades_total  = total,
         trades_won    = len(won),
@@ -346,11 +353,93 @@ def _opening_entry_report(trades: list[dict]) -> str:
         return f"\n\n(entry-basis report unavailable: {e})"
 
 
-def main() -> None:
+def _parse_args(argv: list[str]):
+    import argparse
+    ap = argparse.ArgumentParser(prog="eod.py", description="Strategy C end-of-day session.")
+    ap.add_argument("--date", metavar="YYYY-MM-DD", default=None,
+                    help="settle this past trading day instead of today (also: EOD_DATE env var)")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print what would happen for the day; place and write nothing")
+    return ap.parse_args(argv)
+
+
+def _select_settle_day(cli_date: Optional[str]) -> Optional[date]:
+    """Resolve and validate an explicit settle date (argus#1566). None = settle today, unchanged."""
+    raw = requested_date(cli_date)
+    if raw is None:
+        return None
+    from core import market_calendar
+    try:
+        d = parse_settle_date(raw)
+        validate_settle_date(
+            d,
+            is_trading_weekday=is_trading_day,
+            market_open_on=lambda x: market_calendar.check_market_day(x).open,
+        )
+    except SettleDateError as e:
+        print(f"[eod] REFUSED: {e}")
+        raise SystemExit(2)
+    set_settle_day(d)
+    print(f"[eod] *** settling {d.isoformat()} as a re-run (explicit date; "
+          f"today is {date.today().isoformat()}) ***")
+    return d
+
+
+def _dry_run(session_id: str) -> None:
+    """Print what an EOD run would do for the settle day. Reads only: no orders, no writes."""
+    from core import alpaca
+    from core.position_report import format_report, run_report
+
+    day = settle_day().isoformat()
+    print(f"[eod] DRY RUN for {day} (session {session_id}). Nothing will be placed or written.")
+    rows = get_open_positions(session_id)
+    print(f"[eod] Database: {len(rows)} position(s) open for {day}:")
+    for r in rows:
+        print(f"        {r['ticker']:6} {r.get('shares')} sh @ {r.get('entry_price')}")
+    prev = alpaca.preview_strategy_closes()
+    if prev is None:
+        print("[eod] Broker: could not read holdings, so the close list cannot be previewed.")
+    else:
+        print(f"[eod] Broker holds {len(prev['holdings'])} symbol(s): "
+              f"{', '.join(f'{k} {v:g}' for k, v in sorted(prev['holdings'].items())) or 'none'}")
+        print(f"[eod] Would cancel ALL open broker orders first "
+              f"({prev['open_orders'] if prev['open_orders'] >= 0 else 'unknown number of'} open), "
+              f"which removes bracket protection from every holding.")
+        print(f"[eod] Would submit market closes for ({prev['filter']}): "
+              f"{', '.join(prev['would_close']) or 'nothing'}")
+        if prev["not_owned"]:
+            print(f"[eod] Held but NOT selected (no stratc_ order in the last 2 days): "
+                  f"{', '.join(prev['not_owned'])}")
+        db_tickers = {r["ticker"] for r in rows}
+        extra = sorted(set(prev["would_close"]) - db_tickers)
+        if extra:
+            print(f"[eod] Would also close holdings with no open row for {day}: {', '.join(extra)}")
+        missing = sorted(db_tickers - set(prev["would_close"]))
+        if missing:
+            print(f"[eod] Open rows the close would NOT touch: {', '.join(missing)} "
+                  f"(rows would still be marked closed).")
+        try:
+            market_open = alpaca._is_market_open()
+        except Exception:
+            market_open = None
+        if market_open is False:
+            print("[eod] Market is closed now: closes would QUEUE for the next open and the "
+                  "holdings would sit unprotected until then.")
+    print("[eod] " + format_report(run_report()).replace("\n", "\n[eod] "))
+    print("[eod] Dry run complete. Nothing was placed and nothing was written.")
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    args = _parse_args(argv or [])
     from agents.learning_agent import run_learning_agent
 
+    explicit = _select_settle_day(args.date)
+
     now_et  = datetime.now(_ET)
-    weekday = now_et.strftime("%a").upper()[:3]
+    # Default path: the weekday and market-day checks are about the clock, exactly as before.
+    # An explicit date was validated above against its own weekday and the market calendar.
+    check_date = explicit or now_et.date()
+    weekday = check_date.strftime("%a").upper()[:3] if explicit else now_et.strftime("%a").upper()[:3]
 
     if not is_trading_day(weekday):
         print(f"[eod] Not a trading day ({weekday}). Exiting.")
@@ -360,7 +449,7 @@ def main() -> None:
     # session id EOD would reuse; closing it again as eod_complete would overwrite that with a day
     # that never happened, and the force-close below would queue market sells for the next open.
     from core import market_calendar
-    market_day = market_calendar.check_market_day(now_et.date())
+    market_day = market_calendar.check_market_day(check_date)
     if not market_day.open:
         print(f"[eod] Market closed {market_day.day.isoformat()} "
               f"({market_day.reason or 'closed'}, via {market_day.source}). Exiting.")
@@ -369,6 +458,10 @@ def main() -> None:
     session_id = get_today_session_id()
     if not session_id:
         print("[eod] No premarket session today. Exiting.")
+        return
+
+    if args.dry_run:
+        _dry_run(session_id)
         return
 
     config = load_agent_config()
@@ -382,6 +475,15 @@ def main() -> None:
     if recon["exits_synced"] or recon["entry_updated"]:
         print(f"[eod] Reconciled: {recon['entry_updated']} entry fill(s), "
               f"{recon['exits_synced']} exit(s).")
+
+    # argus#1567. Read-only comparison of the broker against the open database rows, taken after
+    # the reconcile above (so bracket exits are already synced) and before the force-close. It
+    # places nothing and writes nothing to c_positions; it can only tell us about a difference.
+    from core.position_report import format_report, run_report
+    holdings_report = run_report()
+    tracer.log_decision("orchestrator", "broker_reconciliation", detail=holdings_report)
+    holdings_text = format_report(holdings_report)
+    print(f"[eod] {holdings_text}")
 
     # Force-close anything still open after reconcile
     n_forced = force_close_positions(session_id)
@@ -457,7 +559,7 @@ def main() -> None:
 
     # Update goals with today's final P&L
     update_goal_progress(perf.realized_pnl)
-    record_goal_snapshots(date.today(), perf.realized_pnl)
+    record_goal_snapshots(settle_day(), perf.realized_pnl)
     tracer.log_decision("orchestrator", "goals_updated",
                         detail={"pnl": perf.realized_pnl})
 
@@ -498,10 +600,11 @@ def main() -> None:
     pnl_sign    = "+" if perf.realized_pnl >= 0 else ""
     alert_prefix = "[ALERT] " if perf.protection_tier >= 3 else ""
     subject = (
-        f"{alert_prefix}Strategy C — EOD {now_et.strftime('%Y-%m-%d')} "
+        f"{alert_prefix}Strategy C — EOD {check_date.strftime('%Y-%m-%d')} "
         f"({pnl_sign}${perf.realized_pnl:.2f})"
     )
-    send_alert(subject, build_daily_summary(perf, trades, learnings) + _opening_entry_report(trades))
+    send_alert(subject, build_daily_summary(perf, trades, learnings) + _opening_entry_report(trades)
+               + "\n\n" + holdings_text)
 
     # Finalize session
     pnl_sign = "+" if perf.realized_pnl >= 0 else ""
@@ -528,8 +631,9 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
     try:
-        main()
+        main(sys.argv[1:])
     except Exception as e:
         import traceback as _tb
         try:

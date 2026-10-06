@@ -22,6 +22,13 @@ from tests.conftest import make_query
 
 _SESSION_ID = "sess-eod-0001"
 
+
+@pytest.fixture(autouse=True)
+def _no_broker_reads():
+    """EOD now also reads broker holdings for the reconciliation report (argus#1567)."""
+    with patch("core.alpaca.get_broker_holdings", return_value={}):
+        yield
+
 _TRADES = [
     {
         "ticker": "AAPL", "realized_pnl": 120.0,
