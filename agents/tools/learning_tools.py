@@ -176,7 +176,7 @@ def adjust_param(
             "rejection_reason": result.rejection_reason,
             "old_value":        result.old_value,
             "new_value":        result.new_value,
-            "cooldown_until":   result.cooldown_until,
+            "cooldown_until":   result.cooldown_until.isoformat() if result.cooldown_until else None,
         }
     except Exception as e:
         return {"error": str(e)}

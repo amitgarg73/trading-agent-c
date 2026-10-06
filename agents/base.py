@@ -139,7 +139,9 @@ def run_tool_loop(
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": json.dumps(result),
+                        # default=str: a tool result may carry a date (6 Oct: adjust_param's
+                        # cooldown_until). A date is shown to the model as ISO text, never a crash.
+                        "content": json.dumps(result, default=str),
                     })
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
