@@ -2,6 +2,15 @@ name: Strategy C — EOD
 
 on:
   workflow_dispatch:
+    inputs:
+      eod_date:
+        description: "Settle this past trading day (YYYY-MM-DD). Leave blank for today."
+        required: false
+        default: ""
+      dry_run:
+        description: "Print what would happen; place and write nothing."
+        type: boolean
+        default: false
 
 concurrency:
   group: eod
@@ -28,9 +37,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run EOD session
-        run: python sessions/eod.py
+        run: python sessions/eod.py ${{ inputs.dry_run && '--dry-run' || '' }}
         env:
           PYTHONPATH: ${{ github.workspace }}
+          EOD_DATE: ${{ inputs.eod_date }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY_C }}
           ALPACA_API_KEY_ID_C: ${{ secrets.ALPACA_API_KEY_ID_C }}
           ALPACA_API_SECRET_KEY_C: ${{ secrets.ALPACA_API_SECRET_KEY_C }}

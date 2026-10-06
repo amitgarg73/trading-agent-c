@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Optional
 
+from core.settle import settle_day
+
 
 @dataclass
 class GoalStatus:
@@ -16,7 +18,7 @@ class GoalStatus:
 def load_active_goals() -> list[dict]:
     """Load all active goals effective today from c_goals."""
     from core.db import get_client
-    today = date.today().isoformat()
+    today = settle_day().isoformat()
     result = (
         get_client()
         .table("c_goals")
@@ -66,7 +68,7 @@ def update_goal_progress(daily_pnl: float) -> None:
     from core.db import get_client
     goals = load_active_goals()
     client = get_client()
-    today = date.today().isoformat()
+    today = settle_day().isoformat()
 
     for goal in goals:
         gtype = goal["goal_type"]

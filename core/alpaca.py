@@ -481,6 +481,55 @@ def get_open_alpaca_tickers() -> set[str]:
         return set()
 
 
+def get_broker_holdings() -> Optional[dict[str, float]]:
+    """
+    READ-ONLY. Every holding at the broker as {symbol: signed quantity}, or None when the broker
+    could not be read. None is not an empty account: callers must report it as "could not read",
+    never as a clean pass (get_open_alpaca_tickers collapses both into an empty set).
+    """
+    try:
+        return {str(p.symbol): float(p.qty) for p in _client().get_all_positions()}
+    except Exception as e:
+        print(f"  [alpaca] get_broker_holdings failed: {e}")
+        return None
+
+
+def preview_strategy_closes() -> Optional[dict]:
+    """
+    READ-ONLY. What close_all_strategy_positions() would select right now, without closing
+    anything: {"holdings": {symbol: qty}, "would_close": [symbols], "not_owned": [symbols],
+    "open_orders": int, "filter": "stratc_tag" | "all (tag lookup failed)"}. None if the broker
+    cannot be read. Mirrors the selection in close_all_strategy_positions (argus#1566); keep the
+    two in step. Uses get_all_positions and get_orders only.
+    """
+    holdings = get_broker_holdings()
+    if holdings is None:
+        return None
+    result = {"holdings": holdings, "would_close": sorted(holdings), "not_owned": [],
+              "open_orders": 0, "filter": "stratc_tag"}
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        cutoff = (datetime.utcnow() - timedelta(days=2)).replace(tzinfo=timezone.utc)
+        orders = _client().get_orders(GetOrdersRequest(
+            status=QueryOrderStatus.ALL, limit=500, after=cutoff
+        ))
+        owned = {str(o.symbol) for o in orders
+                 if str(o.client_order_id or "").startswith(_ORDER_PREFIX)}
+        result["would_close"] = sorted(sym for sym in holdings if sym in owned)
+        result["not_owned"] = sorted(sym for sym in holdings if sym not in owned)
+    except Exception:
+        result["filter"] = "all (tag lookup failed)"
+    try:
+        from alpaca.trading.requests import GetOrdersRequest
+        from alpaca.trading.enums import QueryOrderStatus
+        result["open_orders"] = len(_client().get_orders(GetOrdersRequest(
+            status=QueryOrderStatus.OPEN, limit=500)))
+    except Exception:
+        result["open_orders"] = -1   # unknown
+    return result
+
+
 def close_position(ticker: str) -> tuple[bool, Optional[float]]:
     """Market-close a single position. Returns (success, fill_price).
 
