@@ -42,6 +42,11 @@ def get_ticker_fundamentals(ticker: str) -> dict[str, Any]:
         prev = getattr(snap, "previous_daily_bar", None) if snap else None
 
         if prev:
+            try:   # the previous daily bar's own timestamp is when these levels were current. No-op with the switch off.
+                from trace.context_manifest import stamp_newest, stamp_key
+                stamp_newest(stamp_key("get_ticker_fundamentals", ticker), [getattr(prev, "timestamp", None)])
+            except Exception:
+                pass
             pdh = round(float(prev.high),  2)
             pdl = round(float(prev.low),   2)
             pdc = round(float(prev.close), 2)
@@ -81,6 +86,7 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
     now_et   = datetime.now(et)
     result: dict[str, Any] = {}
     daily_bars: list = []  # populated in step 1; used as fallback in step 2
+    bar_times: list = []   # argus: each bar set's newest own timestamp; the newest is when this read was current
 
     # ── 1. Daily bars (50 calendar days → ~35 trading days) ──────────────────
     try:
@@ -91,6 +97,8 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
             start=daily_start,
         )).data.get(ticker, [])
 
+        if daily_bars:
+            bar_times.append(getattr(daily_bars[-1], "timestamp", None))
         if len(daily_bars) >= 2:
             tr_values = [
                 max(float(daily_bars[i].high) - float(daily_bars[i].low),
@@ -124,6 +132,8 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
             end=(now_et if now_et < pm_end else pm_end).astimezone(timezone.utc),
         )).data.get(ticker, [])
 
+        if pm_bars:
+            bar_times.append(getattr(pm_bars[-1], "timestamp", None))
         premarket_vol = int(sum(b.volume for b in pm_bars))
         avg           = result.get("avg_daily_volume")
         pct_of_daily  = round(premarket_vol / avg * 100, 1) if avg else None
@@ -189,6 +199,7 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
             spy_bars     = bars_data.get("SPY", [])
 
             if stock_bars:
+                bar_times.append(getattr(stock_bars[-1], "timestamp", None))
                 total_pv     = sum((b.high + b.low + b.close) / 3 * b.volume for b in stock_bars)
                 total_vol_s  = sum(b.volume for b in stock_bars)
                 vwap         = round(total_pv / total_vol_s, 2) if total_vol_s > 0 else None
@@ -235,6 +246,11 @@ def get_ticker_market_data(ticker: str) -> dict[str, Any]:
                 "live_price":      None,
             })
 
+    try:   # argus: stamp the newest bar's own time. A quote read with no bar time (the latest-quote fallback) stays undated.
+        from trace.context_manifest import stamp_newest, stamp_key
+        stamp_newest(stamp_key("get_ticker_market_data", ticker), bar_times)
+    except Exception:
+        pass
     return result
 
 
@@ -651,7 +667,7 @@ def get_position_history(ticker: str, days: int = 30) -> dict[str, Any]:
         rows = (
             get_client()
             .table("c_positions")
-            .select("ticker,realized_pnl,exit_reason,status")
+            .select("ticker,realized_pnl,exit_reason,status,close_date")
             .eq("ticker", ticker)
             .eq("status", "closed")
             .gte("close_date", cutoff)
@@ -666,6 +682,11 @@ def get_position_history(ticker: str, days: int = 30) -> dict[str, Any]:
         last_row = rows[-1] if rows else None
         last_exit = last_row.get("exit_reason") if last_row else None
 
+        try:   # the newest close_date is when this history was current (day grain). No rows: nothing to date. No-op with the switch off.
+            from trace.context_manifest import stamp_newest, stamp_key
+            stamp_newest(stamp_key("get_position_history", ticker), [r.get("close_date") for r in rows])
+        except Exception:
+            pass
         return {
             "trades":       trades,
             "wins":         wins,

@@ -10,8 +10,10 @@ wait on telemetry (CLAUDE.md: Provy is never in the trade path). There is no new
 call: the manifest is built from values the step already holds, in memory, in microseconds.
 
 ⛔ ABSENT IS UNKNOWN. A field is sent only when this code truly knows it.
-  - `as_of` is when the SOURCE was current, never when it was fetched. The only source here that carries a date of its own is the
-    learner's memory (the newest entry's date). Everything else is left undated on purpose.
+  - `as_of` is when the SOURCE was current, never when it was fetched. Dated: the learner's memory (newest entry's date), the news (newest
+    headline), market/ticker reads (the provider's own newest bar or quote time, via `stamp_newest`), the position history (newest
+    `close_date`, day grain). Left undated on purpose: the risk agent's account reads (a live broker read with no provider time of its
+    own), the economic calendar, and any step's input. A source whose only time is the fetch itself is never stamped.
   - `used` is true only where the calling code put the item into the model's prompt by construction (an upstream step's output, the
     news it pre-fetched, the two reads a circuit breaker decided on). A tool result the model chose to ask for is left unmarked:
     whether it shaped the answer is a judgement this code cannot make.
@@ -25,6 +27,10 @@ call: the manifest is built from values the step already holds, in memory, in mi
     and never for a read that errored, so "returned nothing" and "could not read" stay different.
   - `instruction` is the SHA-256 of the agent's instruction text, taken from the constant the agent itself sends, in memory, and the
     text is never stored. The version is `auto-` plus the first 12 hex digits of that hash, so it changes exactly when the text does.
+
+ITEM FINGERPRINT. Every item that has content carries `hash`: a tool result's, and an upstream step's (hash of that step's own output
+fields, taken when the logger wrote the step, in memory, never stored as content). An upstream step the logger never wrote has no
+content to hash and carries none.
 
 SOURCE NAMES ARE GENERIC. `tool:<tool name>` for a read, `step:<agent>` for an upstream step's output. A ticker is never in a source
 or an id (the per-ticker research agent's name is reduced to its base, `research`).
@@ -41,7 +47,7 @@ import os
 import re
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 SWITCH_ENV = "PROVY_CONTEXT_MANIFEST"
@@ -73,6 +79,7 @@ _INSTRUCTION_SOURCES = {
 }
 _VARIANT_SUFFIX = re.compile(r"^[A-Z]{1,5}$")        # same rule as TraceLogger._base: research_GILD -> research
 _DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 # ── Facts only the tool function itself holds ──────────────────────────────────────────────────────────────────────────────────────
@@ -125,6 +132,51 @@ def stamp_source(key: str, as_of: Any = None, returned: Optional[int] = None, cu
             _STAMPS[key] = meta
     except Exception:
         pass
+
+
+def _as_instant(value: Any) -> Optional[datetime]:
+    """One candidate time as an aware UTC datetime, or None. Accepts datetimes (pandas Timestamps included), ISO 8601 strings with a
+    zone, and a bare date (`date` or `YYYY-MM-DD`), which is that day's start in UTC (day grain, like the learnings). Naive datetimes and
+    anything unparseable are None: a zone is a fact, not a guess."""
+    try:
+        if isinstance(value, datetime):
+            return value.astimezone(timezone.utc) if value.tzinfo is not None else None
+        if isinstance(value, date):
+            return datetime(value.year, value.month, value.day, tzinfo=timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if _DATE_ONLY.match(text):
+                return datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else None
+    except Exception:
+        pass
+    return None
+
+
+def newest_time(values: Any) -> Optional[str]:
+    """The newest of several candidate source times as `iso_utc` text, or None. Candidates that are missing or unreadable are skipped; but
+    if the newest readable one is not believable (in the future, or before 2000), the answer is None, not the next-oldest: a stale
+    time offered as when the source was current would be a guess."""
+    try:
+        instants = [t for t in (_as_instant(v) for v in (values or [])) if t is not None]
+        return iso_utc(max(instants)) if instants else None
+    except Exception:
+        return None
+
+
+def stamp_newest(key: str, values: Any, **kw: Any) -> None:
+    """`stamp_source` with `as_of` taken from the newest of `values` (a tool's own timestamps). Never raises; no-op with the switch off."""
+    try:
+        if enabled():
+            stamp_source(key, as_of=newest_time(values), **kw)
+    except Exception:
+        pass
+
+
+def stamp_key(tool: str, ticker: Optional[str] = None) -> str:
+    """Where a tool parks what it knows about a read, and where the logger looks for it. `tool:TICKER`, or `tool:` for a read with no ticker."""
+    return f"{tool}:{ticker if isinstance(ticker, str) else ''}"
 
 
 def take_stamp(key: Optional[str]) -> Optional[dict]:
@@ -227,7 +279,8 @@ def _day_start(day: Any) -> Optional[str]:
 def tool_item(name: str, output: Any, used: Optional[bool] = None, kind: Optional[str] = None,
               meta: Optional[dict] = None, seen_on: Optional[str] = None) -> dict:
     item: dict = {"kind": kind or ("memory" if name in _MEMORY_TOOLS else "tool_result"), "source": f"tool:{name}"}
-    as_of = (meta or {}).get("as_of")
+    # A read that failed has no source time: a time parked by an earlier read of the same tool must not label it.
+    as_of = None if _is_error(output) else (meta or {}).get("as_of")
     if not as_of and name == "read_recent_learnings":
         as_of = _newest_date(output)
     if not as_of and name in _TODAY_KEYED_TOOLS and isinstance(output, list) and output and not _is_error(output):
@@ -278,6 +331,8 @@ def build(agent: str, entries: list, inputs: list, has_model: bool) -> Optional[
             item: dict = {"kind": "input", "source": f"step:{up.get('agent') or 'unknown'}", "used": True}
             if up.get("span_id"):
                 item["id"] = up["span_id"]
+            if up.get("hash"):
+                item["hash"] = up["hash"]
             items.append(item)
         for e in entries or []:
             items.append(tool_item(e["name"], e["output"], used=e.get("used"), kind=e.get("kind"),
@@ -309,6 +364,7 @@ class Recorder:
         self._lock = threading.Lock()
         self._pending: dict = {}
         self._span_agent: dict = {}
+        self._span_hash: dict = {}
 
     def record_tool(self, agent: str, name: str, output: Any, key: Optional[str] = None) -> None:
         if not _READ_TOOL.match(name or ""):
@@ -328,17 +384,20 @@ class Recorder:
         with self._lock:
             return self._pending.pop(agent, [])
 
-    def remember_span(self, span_id: str, agent: str) -> None:
+    def remember_span(self, span_id: str, agent: str, digest: Optional[str] = None) -> None:
+        """`digest`: the content hash of what that step produced, computed by the caller from the step's own output fields."""
         if span_id:
             with self._lock:
                 self._span_agent[span_id] = base_agent(agent)
+                if digest:
+                    self._span_hash[span_id] = digest
 
     def upstream(self, span_ids: Optional[list]) -> list:
         out = []
         with self._lock:
             for sid in span_ids or []:
                 if isinstance(sid, str) and len(sid) == 16:
-                    out.append({"agent": self._span_agent.get(sid), "span_id": sid})
+                    out.append({"agent": self._span_agent.get(sid), "span_id": sid, "hash": self._span_hash.get(sid)})
         return out
 
 
@@ -348,7 +407,8 @@ def circuit_breaker_context(vix_data: Any, futures_data: Any) -> Optional[dict]:
     try:
         if not enabled():
             return None
-        return build("market", [{"name": "get_vix", "output": vix_data, "used": True},
-                                {"name": "get_futures", "output": futures_data, "used": True}], [], has_model=False)
+        return build("market", [{"name": "get_vix", "output": vix_data, "used": True, "meta": take_stamp(stamp_key("get_vix"))},
+                                {"name": "get_futures", "output": futures_data, "used": True, "meta": take_stamp(stamp_key("get_futures"))}],
+                     [], has_model=False)
     except Exception:
         return None
