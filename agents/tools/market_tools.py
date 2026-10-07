@@ -21,6 +21,22 @@ _FUTURES = {
 }
 
 
+def _stamp(tool: str, values: Any) -> None:
+    """Park the provider's own newest bar/quote time for this read. Never raises; no-op with the switch off."""
+    try:
+        from trace.context_manifest import stamp_newest, stamp_key
+        stamp_newest(stamp_key(tool), values)
+    except Exception:
+        pass
+
+
+def _last_index(hist: Any) -> Any:
+    try:
+        return hist.index[-1]
+    except Exception:
+        return None
+
+
 def _vix_level(value: float) -> str:
     for threshold, label in _VIX_LEVELS:
         if value < threshold:
@@ -36,6 +52,7 @@ def get_vix() -> dict[str, Any]:
         if hist.empty:
             return {"error": "no VIX data"}
         value = round(float(hist["Close"].iloc[-1]), 2)
+        _stamp("get_vix", [_last_index(hist)])
         return {"value": value, "level": _vix_level(value)}
     except Exception as e:
         return {"error": str(e)}
@@ -46,8 +63,11 @@ def get_futures() -> dict[str, Any]:
     try:
         results: dict[str, Any] = {}
         changes = []
+        times: list = []
         for name, symbol in _FUTURES.items():
             hist = yf.Ticker(symbol).history(period="2d")
+            if len(hist):
+                times.append(_last_index(hist))
             if len(hist) >= 2:
                 prev  = float(hist["Close"].iloc[-2])
                 curr  = float(hist["Close"].iloc[-1])
@@ -67,6 +87,7 @@ def get_futures() -> dict[str, Any]:
 
         results["avg_change_pct"] = avg
         results["bias"] = bias
+        _stamp("get_futures", times)
         return results
     except Exception as e:
         return {"error": str(e)}
@@ -81,6 +102,11 @@ def get_fear_greed() -> dict[str, Any]:
             data = json.loads(resp.read())
         entry = data["data"][0]
         value = int(entry["value"])
+        try:   # the index's own unix `timestamp` is when this reading was current
+            from datetime import datetime, timezone
+            _stamp("get_fear_greed", [datetime.fromtimestamp(int(entry["timestamp"]), tz=timezone.utc)])
+        except Exception:
+            pass
         return {"value": value, "classification": entry["value_classification"]}
     except Exception as e:
         return {"error": str(e)}
@@ -137,6 +163,7 @@ def get_treasury_yields() -> dict[str, Any]:
         prev_yield = round(float(hist["Close"].iloc[-2]), 3)
         curr_yield = round(float(hist["Close"].iloc[-1]), 3)
         change_bp  = round((curr_yield - prev_yield) * 100, 1)
+        _stamp("get_treasury_yields", [_last_index(hist)])
         direction  = "rising" if change_bp > 5 else ("falling" if change_bp < -5 else "flat")
         return {"yield_10y": curr_yield, "change_bp": change_bp, "direction": direction}
     except Exception as e:
@@ -160,8 +187,11 @@ def get_sector_rotation() -> list[dict[str, Any]]:
         bars_by_symbol = _dclient().get_stock_bars(req).data
 
         rows = []
+        times: list = []
         for etf in _SECTOR_ETFS:
             bars = bars_by_symbol.get(etf, [])
+            if bars:
+                times.append(getattr(bars[-1], "timestamp", None))
             if len(bars) >= 2:
                 prev = float(bars[-2].close)
                 curr = float(bars[-1].close)
@@ -170,6 +200,7 @@ def get_sector_rotation() -> list[dict[str, Any]]:
                 chg = 0.0
             rows.append({"etf": etf, "change_pct": chg})
         rows.sort(key=lambda r: r["change_pct"], reverse=True)
+        _stamp("get_sector_rotation", times)
         return rows
     except Exception as e:
         return [{"error": str(e)}]

@@ -914,7 +914,7 @@ class TraceLogger:
         if emitted:
             self._last_span_by_agent[self._base(agent)] = emitted
             if _context_on():
-                self._cm_remember_span(emitted, agent)
+                self._cm_remember_span(emitted, agent, fields)
         return emitted
 
     # ── argus#1519: context manifest plumbing. Every method below catches everything: a manifest must never fail a step. ──────────
@@ -929,14 +929,20 @@ class TraceLogger:
     def _cm_record_tool(self, agent: str, tool_name: str, tool_output: Any, tool_input: Any = None) -> None:
         try:
             ticker = tool_input.get("ticker") if isinstance(tool_input, dict) else None
-            key = f"{tool_name}:{ticker}" if isinstance(ticker, str) and ticker else None   # where a tool parked what it knew (stamp_source)
+            key = f"{tool_name}:{ticker if isinstance(ticker, str) else ''}"   # where a tool parked what it knew (stamp_source); `tool:` when it takes no ticker
             self._cm_recorder().record_tool(agent, tool_name, tool_output, key=key)
         except Exception:
             pass
 
-    def _cm_remember_span(self, span_id: str, agent: str) -> None:
+    def _cm_remember_span(self, span_id: str, agent: str, fields: Optional[dict] = None) -> None:
         try:
-            self._cm_recorder().remember_span(span_id, agent)
+            digest = None
+            if fields:
+                from trace import context_manifest as _cm
+                # The step's own output, hashed in memory and dropped: a fingerprint for a downstream step's `step:*` item. Metadata only.
+                content = {k: fields.get(k) for k in ("agent_reasoning", "outcome", "payload", "tool_output", "claim") if fields.get(k) is not None}
+                digest = _cm.content_hash(content) if content else None
+            self._cm_recorder().remember_span(span_id, agent, digest)
         except Exception:
             pass
 
