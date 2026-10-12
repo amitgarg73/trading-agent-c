@@ -175,7 +175,10 @@ def _investigate_ticker(
     if news_context:
         try:
             from trace.context_manifest import take_stamp
-            tracer.note_context(f"research_{ticker}", "get_news", news_context, used=True, meta=take_stamp(f"get_news:{ticker}"))
+            # record=True: the headlines the agent was handed are also written as a tool_call step, so a claim built on one can be checked
+            # against what the agent actually saw (argus#1507). Own switch (PROVY_RECORD_GIVEN); nothing here reaches the prompt.
+            tracer.note_context(f"research_{ticker}", "get_news", news_context, used=True, meta=take_stamp(f"get_news:{ticker}"),
+                                record=True, entity_id=ticker)
         except Exception:
             pass
 

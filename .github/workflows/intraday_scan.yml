@@ -44,6 +44,8 @@ jobs:
           # argus#1519: context manifest on decision steps. OFF unless the repository variable PROVY_CONTEXT_MANIFEST is set to 1;
           # unset or 0 turns it off at the next run. See docs/design/TRADING-AGENT-ROLLOUT.md in the argus repo.
           PROVY_CONTEXT_MANIFEST: ${{ vars.PROVY_CONTEXT_MANIFEST }}
+          # argus#1507: pre-fetched text handed to a model is also recorded as a tool_call step. OFF unless the repository variable PROVY_RECORD_GIVEN is 1.
+          PROVY_RECORD_GIVEN: ${{ vars.PROVY_RECORD_GIVEN }}
           NTFY_TOPIC_C: ${{ secrets.NTFY_TOPIC_C }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
