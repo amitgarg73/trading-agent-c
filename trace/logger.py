@@ -60,6 +60,13 @@ def _emit_enabled() -> bool:
     return False
 
 
+def _record_given_on() -> bool:
+    """argus#1507: whether text the caller pre-fetched and handed to a model is ALSO recorded as a tool_call step. Default OFF;
+    PROVY_RECORD_GIVEN, truthy, turns it on. A separate switch from the manifest on purpose: the manifest promises to add nothing but
+    an attribute, and this adds a step. Read on every call, so one repository variable flips it with no deploy."""
+    return os.environ.get("PROVY_RECORD_GIVEN", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _context_on() -> bool:
     """argus#1519: whether decision steps may carry a context manifest. Default OFF; PROVY_CONTEXT_MANIFEST, truthy, turns it on.
 
@@ -947,15 +954,28 @@ class TraceLogger:
             pass
 
     def note_context(self, agent: str, source: str, data: Any, used: Optional[bool] = None, kind: Optional[str] = None,
-                     meta: Optional[dict] = None) -> None:
+                     meta: Optional[dict] = None, record: bool = False, entity_id: Optional[str] = None) -> None:
         """Tell the manifest about something this agent was GIVEN without a tool call (news the caller pre-fetched). No-op with the
-        switch off. `source` is the read's own name (`get_news`); `used=True` only when the code put it in the prompt."""
-        if not _context_on():
-            return
-        try:
-            self._cm_recorder().note(agent, source, data, used=used, kind=kind, meta=meta)
-        except Exception:
-            pass
+        switch off. `source` is the read's own name (`get_news`); `used=True` only when the code put it in the prompt.
+
+        `record=True` ALSO writes the given data as an ordinary tool_call step, so a grader sees the same text the agent saw (argus#1507).
+        The manifest is metadata only by design (a hash and a time); without this a claim drawn from pre-fetched text, such as a headline,
+        cannot be checked against anything and reads as invented. Its own switch (PROVY_RECORD_GIVEN), and it never touches the prompt."""
+        if _context_on():
+            try:
+                self._cm_recorder().note(agent, source, data, used=used, kind=kind, meta=meta)
+            except Exception:
+                pass
+        if record and _record_given_on():
+            try:
+                self._write({
+                    "step_type": "tool_call", "agent": agent, "tool_name": source,
+                    "tool_input": {"prefetched": True, **({"ticker": entity_id} if entity_id else {})},
+                    "tool_output": data if isinstance(data, dict) else {"value": data},
+                    "entity_id": entity_id, "latency_ms": 0, "model": None, "outcome": None,
+                })
+            except Exception:
+                pass
 
     def _cm_message_manifest(self, agent: str, inputs: Optional[list], has_model: bool, given: Optional[dict]) -> Optional[dict]:
         """The manifest for a message step, or whatever the caller passed. Always empties this agent's pending reads, so reads logged
