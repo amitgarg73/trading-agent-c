@@ -99,6 +99,10 @@ Return JSON only — no prose:
 }
 """.strip()
 
+# argus#1735: label every step of this agent with a hash of the prompt above, so a prompt change is visible to Provy.
+from trace.versions import register_prompt as _register_prompt
+_register_prompt("research", _INVESTIGATE_SYSTEM)
+
 INVESTIGATE_TOOL_SCHEMAS: list[dict] = [
     {
         "name": "get_ticker_fundamentals",

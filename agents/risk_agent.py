@@ -57,6 +57,10 @@ Return JSON only:
 }
 """.strip()
 
+# argus#1735: label every step of this agent with a hash of the prompt above, so a prompt change is visible to Provy.
+from trace.versions import register_prompt as _register_prompt
+_register_prompt("risk", _SYSTEM)
+
 TOOL_SCHEMAS: list[dict] = [
     {
         "name": "get_open_positions",

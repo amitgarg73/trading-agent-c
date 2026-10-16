@@ -843,6 +843,18 @@ class TraceLogger:
         if cache_read:                            attrs["argus.cache_read_tokens"]  = cache_read
         if cache_write:                           attrs["argus.cache_write_tokens"] = cache_write
         if model:                                 attrs["argus.model"]            = model
+        # What this step ran with (argus#1735): the hash of the agent's system prompt, or the commit for a step of plain code. A tool call has no instructions.
+        if step_type in ("agent_message", "decision"):
+            # ⛔ A LABEL NEVER BREAKS A STEP. This sits between a live order and its position record on the intraday path, so anything raising here is swallowed.
+            try:
+                from trace.versions import code_version, version_for
+                # A step that ran a model is labelled with its prompt. A step of plain code ran no prompt, so it is labelled with the commit instead: the intraday
+                # entry summary belongs to `orchestrator` but is code, and giving it the synthesis prompt's hash would claim instructions it never ran.
+                _ran_model = bool(model or tokens_input or tokens_output)
+                _pv = fields.get("prompt_version") or (version_for(agent, self._base(agent)) if _ran_model else code_version())
+                if _pv:                           attrs["argus.prompt_version"]   = _pv
+            except Exception:
+                pass
         if cost_usd is not None:                  attrs["argus.cost_usd"]         = cost_usd
         if entity_id is not None:                 attrs["argus.entity_id"]        = entity_id
 
