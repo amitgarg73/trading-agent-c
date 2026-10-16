@@ -75,6 +75,10 @@ Return JSON only — schema must match exactly:
 }
 """.strip()
 
+# argus#1735: label every step of this agent with a hash of the prompt above, so a prompt change is visible to Provy.
+from trace.versions import register_prompt as _register_prompt
+_register_prompt("orchestrator", _SYSTEM)
+
 
 def _build_synthesis_message(
     market_report: dict,

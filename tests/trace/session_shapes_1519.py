@@ -157,7 +157,9 @@ def stable_attrs(spans) -> list:
     """Every span's attributes in emission order, minus the one clock-dependent value, so two runs can be compared byte for byte."""
     rows = []
     for s in spans:
-        a = {k: v for k, v in dict(s.attributes or {}).items() if k != "argus.latency_ms"}
+        # `argus.prompt_version` (argus#1735) is a label that depends on the prompt text and the commit, neither of which these byte-identity tests are about;
+        # trace/test_prompt_version_labels_1735.py pins it.
+        a = {k: v for k, v in dict(s.attributes or {}).items() if k not in ("argus.latency_ms", "argus.prompt_version")}
         rows.append({"name": s.name, "attrs": {k: (v if isinstance(v, (str, int, float, bool)) else repr(v)) for k, v in sorted(a.items())},
                      "status": s.status.status_code.value if s.status else 0})
     return rows
