@@ -413,7 +413,7 @@ def _sync_positions(session_id: str, trail_pct: float) -> None:
 
 
 def _trace_order(tracer, ticker: str, p: dict, shares: int,
-                 order_id: Optional[str], fill_price: Optional[float]) -> None:
+                 order_id: Optional[str], fill_price: Optional[float]) -> Optional[str]:
     """Record what the order call did, whatever it did.
 
     ⛔ EVERY ORDER LEAVES A TRACE, NOT ONLY THE ONES THAT FAIL. Until argus#679 this path traced
@@ -434,7 +434,7 @@ def _trace_order(tracer, ticker: str, p: dict, shares: int,
     raise here would leave a placed order with nothing recording it.
     """
     if not tracer:
-        return
+        return None
     try:
         if order_id is None:
             outcome = "rejected"
@@ -442,7 +442,9 @@ def _trace_order(tracer, ticker: str, p: dict, shares: int,
         else:
             outcome = "filled" if fill_price is not None else "accepted"
             output = {"order_id": order_id, "fill_price": fill_price}
-        tracer.log_tool_call(
+        # The span id goes back to the caller so the summary that reports these orders can DECLARE them as its inputs
+        # (argus#1726): a summary that says "2 entered" is then tied to the very calls that did or did not fill.
+        return tracer.log_tool_call(
             "orchestrator", "submit_bracket_order",
             {"ticker": ticker, "shares": shares, "entry_price": p["entry_price"],
              "target_price": p["target_price"], "stop_price": p["stop_loss"]},
@@ -452,6 +454,7 @@ def _trace_order(tracer, ticker: str, p: dict, shares: int,
         )
     except Exception as exc:                                   # never let telemetry break a trade
         print(f"  [intraday] order trace failed for {ticker}: {exc}")
+        return None
 
 
 def _place_intraday_trades(
@@ -463,6 +466,7 @@ def _place_intraday_trades(
     today_tickers: set[str] | None = None,
     tracer=None,
     outcomes: dict | None = None,
+    order_spans: list | None = None,
 ) -> int:
     """Submit bracket orders to Alpaca and write confirmed positions to c_positions.
 
@@ -543,12 +547,16 @@ def _place_intraday_trades(
         except Exception as e:
             # Traced with no order id, so the attempt is visible rather than absent. An untraced
             # failure is indistinguishable from a ticker that was never approved.
-            _trace_order(tracer, ticker, p, shares, None, None)
+            _sid = _trace_order(tracer, ticker, p, shares, None, None)
+            if _sid and order_spans is not None:
+                order_spans.append(_sid)
             outcomes[ticker] = "rejected"
             print(f"  [intraday] {ticker} order failed at the broker: {e} — skipping, scan continues")
             continue
 
-        _trace_order(tracer, ticker, p, shares, order_id, fill_price)
+        _sid = _trace_order(tracer, ticker, p, shares, order_id, fill_price)
+        if _sid and order_spans is not None:
+            order_spans.append(_sid)
         if order_id is None:
             outcomes[ticker] = "rejected"
             print(f"  [intraday] {p['ticker']} order rejected or staleness gate fired — skipping")
@@ -877,15 +885,20 @@ def main() -> None:
 
         # Positions are written under premarket_session_id — the day-level data key.
         outcomes: dict = {}
+        order_spans: list = []
         count = _place_intraday_trades(
             proposals, {v["ticker"] for v in approved}, premarket_session_id, params.trail_pct,
             params.max_entry_premium,
             today_tickers=today_tickers,
             tracer=tracer,
             outcomes=outcomes,
+            order_spans=order_spans,
         )
         outcome = _entry_outcome(count)
-        tracer.log_decision("orchestrator", outcome, detail={"count": count})
+        # argus#1726: what this summary was built from, declared where only this code knows it: the order calls it counted, and the risk verdicts it
+        # filtered by. Provy can then open the calls behind "N entered" instead of inferring them.
+        _inputs = [i for i in [*order_spans, tracer.last_span_for("risk")] if i] or None
+        tracer.log_decision("orchestrator", outcome, detail={"count": count}, inputs=_inputs)
         # ⛔ THE ORCHESTRATOR'S ONLY VOICE USED TO LIVE IN THE PREMARKET SYNTHESIS CALL, WHICH HAS NOT
         # RUN SINCE 27 JUL (the branch defers entry to the open by design). So the agent has been
         # routing every entry decision the fleet makes while `orchestrator_synthesis_completeness`
@@ -897,7 +910,7 @@ def main() -> None:
         # position size and confidence, plus a clear terminal_reason explaining the session outcome",
         # and that is precisely what this path decides. Every value below is read back from the
         # verdicts and proposals the session actually produced.
-        tracer.log_agent_message("orchestrator", _entry_rationale(proposals, verdicts, approved, count, outcome), outcome)
+        tracer.log_agent_message("orchestrator", _entry_rationale(proposals, verdicts, approved, count, outcome), outcome, inputs=_inputs)
         _close_intraday(
             tracer, intraday_session_id, outcome,
             proposals=proposals, verdicts=verdicts, trades_executed=count,
